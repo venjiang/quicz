@@ -273,10 +273,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Close connection
     var close_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
-    _ = client.closeApplicationWithRoutePathAndDrainDatagrams(0, "done", 0, &close_out) catch {};
-    for (close_out[0..0]) |o| {
-        socket.send(io, &server_addr, o.datagram) catch {};
-        allocator.free(o.datagram);
+    const close_result = client.closeApplicationWithRoutePathAndDrainDatagrams(0, "done", 0, &close_out) catch null;
+    if (close_result) |result| {
+        for (close_out[0..result.drain.datagrams_written]) |o| {
+            socket.send(io, &server_addr, o.datagram) catch {};
+            allocator.free(o.datagram);
+        }
     }
 
     std.debug.print("quicz interop client: complete\n", .{});
