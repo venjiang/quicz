@@ -213,10 +213,10 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 | P3-D | Full QUIC v2 / RFC 9368 | Compatible version negotiation, v2 packet/key/token | VN + v2 handshake tests pass | Done |
 | P3-E | Lifecycle variant merge | Options-struct pattern for OrClose/AndDrain/AndPoll variants | Reduced API count, 1525/1525 tests pass | Active |
 | P3-F | HTTP/3 + QPACK | HTTP/3 framing, QPACK compression, stream mapping | HTTP/3 request/response over quicz transport | Next |
-| P3-G | PMTU/GSO/GRO | Path MTU discovery, generic segmentation/receive offload | PMTU probe tests, GSO/GRO datagram batching | Next |
+| P3-G | PMTU/GSO/GRO | Path MTU discovery, generic segmentation/receive offload | PMTU probe tests, GSO/GRO datagram batching | Done |
 | P3-H | Multipath | Multipath QUIC transport | Multi-path handshake and data transfer tests | Next |
 | P3-I | Broad fuzzing | Frame/packet/transport-parameter fuzz harness | Fuzz harness builds and runs without crashes | Done |
-| P3-J | Multi-language examples | Go, Rust, Python client/server examples | Each example passes handshake + echo | Next |
+| P3-J | Multi-language examples | Go, Rust, Python client/server examples | Each example passes handshake + echo | Done |
 
 ### P3 execution queue
 
