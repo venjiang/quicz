@@ -19,7 +19,7 @@ const quic_packet = quicz.packet;
 const protection = quicz.protection;
 
 const www_dir = "/www";
-const certs_dir = "/certs";
+const certs_dir = "/private/tmp/certs"; // Use /certs in Docker, /private/tmp/certs for local testing
 const bind_port: u16 = 443;
 const max_datagram_size: usize = 8192;
 const idle_timeout_ms: u64 = 30_000;
