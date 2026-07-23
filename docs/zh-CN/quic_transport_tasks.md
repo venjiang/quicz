@@ -141,8 +141,8 @@ P6 进入条件：P0-P5 完成，1611 测试通过。
 
 | 阶段 | 任务 | 范围 | 退出证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| P6-A | HTTP/3 完整栈 | 真实 request/response over QUIC streams；GOAWAY 优雅关闭；SETTINGS 交换；stream 生命周期 | H3 client GET → server 200 + body；GOAWAY 干净关闭 | Active |
-| P6-B | QUIC v2 / RFC 9368 | 版本协商、v2 salt/labels、v2 全流程 | v2 握手 + 传输通过；版本协商回退正常 | Pending |
+| P6-A | HTTP/3 完整栈 | 真实 request/response over QUIC streams；GOAWAY 优雅关闭；SETTINGS 交换；stream 生命周期 | H3 client GET → server 200 + body；GOAWAY 干净关闭 | Done |
+| P6-B | QUIC v2 / RFC 9368 | 版本协商、v2 salt/labels、v2 全流程 | v2 握手 + 传输通过；版本协商回退正常 | Active |
 | P6-C | 高级拥塞控制 | BBR 算法；CUBIC 生产加固；算法切换 API | BBR/CUBIC 连接启动时可选；均通过丢包/恢复测试 | Pending |
 | P6-D | Interop-Runner 完整覆盖 | retry/multiplexing/chacha20/keyupdate/v2 | Docker 中全部标准 testcase 通过 | Pending |
 | P6-E | QUIC Datagram 扩展 | RFC 9221 DATAGRAM 帧；不可靠数据 API | Datagram 收发正常；丢包不阻塞 stream | Pending |
