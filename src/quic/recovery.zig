@@ -1,4 +1,6 @@
 const std = @import("std");
+const cubic_module = @import("cubic.zig");
+const connection_config = @import("connection_config.zig");
 
 pub const timer_granularity_ms: u64 = 1;
 pub const time_threshold_numerator: u64 = 9;
@@ -29,6 +31,7 @@ pub const Config = struct {
     max_datagram_size: u16,
     initial_rtt_ms: u32,
     max_ack_delay_ms: u32 = 25,
+    congestion_algorithm: connection_config.CongestionAlgorithm = .new_reno,
 };
 
 /// Minimal RFC 9002-inspired recovery state.
@@ -51,6 +54,8 @@ pub const Recovery = struct {
     congestion_avoidance_bytes_acked: usize = 0,
     congestion_recovery_start_time_millis: ?i64 = null,
     ssthresh: usize = std.math.maxInt(usize),
+    congestion_algorithm: connection_config.CongestionAlgorithm = .new_reno,
+    cubic: cubic_module.CubicState = .{},
 
     /// Initialize recovery state with RFC 9002-style initial RTT and window.
     pub fn init(config: Config) Recovery {
@@ -62,6 +67,7 @@ pub const Recovery = struct {
             .smoothed_rtt_ms = initial_rtt,
             .rttvar_ms = initial_rtt / 2,
             .congestion_window = initialCongestionWindow(max_datagram_size),
+            .congestion_algorithm = config.congestion_algorithm,
         };
     }
 
@@ -167,8 +173,20 @@ pub const Recovery = struct {
         if (self.inCongestionRecovery(sent_time_millis)) return;
         self.congestion_recovery_start_time_millis = now_millis;
         self.congestion_avoidance_bytes_acked = 0;
-        self.ssthresh = self.congestion_window / 2;
-        self.congestion_window = @max(self.ssthresh, minimumCongestionWindow(self.max_datagram_size));
+        switch (self.congestion_algorithm) {
+            .new_reno => {
+                self.ssthresh = self.congestion_window / 2;
+                self.congestion_window = @max(self.ssthresh, minimumCongestionWindow(self.max_datagram_size));
+            },
+            .cubic => {
+                self.congestion_window = self.cubic.onCongestionEvent(
+                    self.congestion_window,
+                    self.max_datagram_size,
+                    now_millis,
+                );
+                self.ssthresh = self.congestion_window;
+            },
+        }
     }
 
     /// Return whether a congestion signal for `sent_time_millis` would start a
@@ -278,6 +296,13 @@ pub const Recovery = struct {
     }
 
     fn growCongestionAvoidance(self: *Recovery, bytes: usize) void {
+        switch (self.congestion_algorithm) {
+            .new_reno => self.growCongestionAvoidanceNewReno(bytes),
+            .cubic => self.growCongestionAvoidanceCubic(bytes),
+        }
+    }
+
+    fn growCongestionAvoidanceNewReno(self: *Recovery, bytes: usize) void {
         self.congestion_avoidance_bytes_acked =
             std.math.add(usize, self.congestion_avoidance_bytes_acked, bytes) catch std.math.maxInt(usize);
 
@@ -290,6 +315,21 @@ pub const Recovery = struct {
                 self.congestion_avoidance_bytes_acked = 0;
                 return;
             }
+        }
+    }
+
+    fn growCongestionAvoidanceCubic(self: *Recovery, bytes: usize) void {
+        _ = bytes;
+        // CUBIC uses time-based window growth via the cubic function.
+        // The window is updated based on elapsed time since the last loss.
+        const now_ms = self.congestion_recovery_start_time_millis orelse return;
+        const target = self.cubic.cubicWindow(
+            self.congestion_window,
+            self.max_datagram_size,
+            now_ms,
+        );
+        if (target > self.congestion_window) {
+            self.congestion_window = target;
         }
     }
 
@@ -710,4 +750,46 @@ test "recovery arithmetic saturates at numeric extremes" {
     recovery.onPacketAcked(1, 0, std.math.maxInt(u64), std.math.maxInt(u64));
     try std.testing.expectEqual(std.math.maxInt(usize), recovery.congestion_window);
     try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+}
+
+test "CUBIC congestion control through Recovery interface" {
+    var r = Recovery.init(.{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+        .congestion_algorithm = .cubic,
+    });
+
+    const initial_cwnd = r.congestion_window;
+    try std.testing.expect(initial_cwnd > 0);
+
+    // Simulate sending packets
+    r.onPacketSent(1200);
+    r.onPacketSent(1200);
+    try std.testing.expectEqual(@as(usize, 2400), r.bytes_in_flight);
+
+    // Simulate loss — CUBIC should reduce window by beta (0.7)
+    r.onPacketLost(1200, 50, 100);
+    try std.testing.expectEqual(@as(usize, 1200), r.bytes_in_flight);
+    try std.testing.expect(r.congestion_window < initial_cwnd);
+    try std.testing.expect(r.congestion_recovery_start_time_millis != null);
+
+    // CUBIC state should be set
+    try std.testing.expect(r.cubic.w_max > 0);
+    try std.testing.expect(r.cubic.epoch_start_ms != null);
+}
+
+test "NewReno still works when selected" {
+    var r = Recovery.init(.{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+        .congestion_algorithm = .new_reno,
+    });
+
+    const initial_cwnd = r.congestion_window;
+    r.onPacketSent(1200);
+    r.onPacketLost(1200, 50, 100);
+
+    // NewReno halves the window
+    try std.testing.expectEqual(initial_cwnd / 2, r.ssthresh);
+    try std.testing.expect(r.congestion_window >= r.ssthresh);
 }

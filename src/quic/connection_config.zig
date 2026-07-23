@@ -85,6 +85,12 @@ pub const PreferredAddress = struct {
     }
 };
 
+/// Congestion control algorithm selection.
+pub const CongestionAlgorithm = enum {
+    new_reno,
+    cubic,
+};
+
 /// Runtime configuration for a `Connection`.
 pub const Config = struct {
     /// Maximum frame payload bytes accepted or emitted by the in-memory API.
@@ -148,6 +154,8 @@ pub const Config = struct {
     /// Zero disables DATAGRAM frame support. Non-zero advertises the maximum
     /// DATAGRAM frame payload size this endpoint will accept.
     max_datagram_frame_size: u64 = 0,
+    /// Congestion control algorithm (default NewReno per RFC 9002).
+    congestion_algorithm: CongestionAlgorithm = .new_reno,
     /// Maximum active peer-issued connection IDs tracked by the connection skeleton.
     active_connection_id_limit: u64 = min_active_connection_id_limit,
     /// QUIC version advertised as this endpoint's chosen version.
