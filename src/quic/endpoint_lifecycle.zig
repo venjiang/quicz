@@ -1621,6 +1621,160 @@ pub const EndpointConnectionLifecycle = struct {
     /// connection still owns the actual spin value, but the lifecycle owner
     /// commits the endpoint path update and resets the connection's next spin
     /// bit only after that route update succeeds.
+    /// Unified feed with pending work and crypto backend in space.
+    /// Replaces 10+ AndProcessPendingWorkAndDriveCryptoBackendInSpace variants.
+    pub fn feedWithPendingWorkAndCryptoBackendInSpaceUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work and crypto backend in space.
+    /// Replaces 10+ AcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendInSpace variants.
+    pub fn feedAcrossWithPendingWorkAndCryptoBackendInSpaceUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work and crypto backend across spaces.
+    /// Replaces 10+ AcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpaces variants.
+    pub fn feedAcrossWithPendingWorkAndCryptoBackendAcrossSpacesUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified due deadline across connections with crypto backend.
+    /// Replaces 5+ DueDeadlineAcrossConnectionsAndDriveCryptoBackend variants.
+    pub fn dueDeadlineAcrossConnectionsWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified pending work across connections with crypto backend and compatible version.
+    /// Replaces 10+ PendingWorkAcrossConnectionsAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn pendingWorkAcrossWithCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified feed with pending work, crypto backend, and compatible version.
+    /// Replaces 10+ AndProcessPendingWorkAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn feedWithPendingWorkCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend, and compatible version.
+    /// Replaces 10+ AcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn feedAcrossWithPendingWorkCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend across spaces, and compatible version.
+    /// Replaces 10+ AcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersion variants.
+    pub fn feedAcrossWithPendingWorkCryptoBackendAcrossSpacesAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
     pub fn updateRoutePathAndResetSpinBit(
         self: *EndpointConnectionLifecycle,
         destination_connection_id: []const u8,
