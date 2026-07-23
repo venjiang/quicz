@@ -1,5 +1,6 @@
 const std = @import("std");
 const cubic_module = @import("cubic.zig");
+const bbr_module = @import("bbr.zig");
 const connection_config = @import("connection_config.zig");
 
 pub const timer_granularity_ms: u64 = 1;
@@ -56,6 +57,7 @@ pub const Recovery = struct {
     ssthresh: usize = std.math.maxInt(usize),
     congestion_algorithm: connection_config.CongestionAlgorithm = .new_reno,
     cubic: cubic_module.CubicState = .{},
+    bbr: bbr_module.BbrState = .{},
 
     /// Initialize recovery state with RFC 9002-style initial RTT and window.
     pub fn init(config: Config) Recovery {
@@ -186,6 +188,10 @@ pub const Recovery = struct {
                 );
                 self.ssthresh = self.congestion_window;
             },
+            .bbr => {
+                self.bbr.onPacketLost(now_millis, self.max_datagram_size);
+                self.ssthresh = self.congestion_window;
+            },
         }
     }
 
@@ -299,6 +305,7 @@ pub const Recovery = struct {
         switch (self.congestion_algorithm) {
             .new_reno => self.growCongestionAvoidanceNewReno(bytes),
             .cubic => self.growCongestionAvoidanceCubic(bytes),
+            .bbr => self.growCongestionAvoidanceBbr(bytes),
         }
     }
 
@@ -331,6 +338,13 @@ pub const Recovery = struct {
         if (target > self.congestion_window) {
             self.congestion_window = target;
         }
+    }
+
+    fn growCongestionAvoidanceBbr(self: *Recovery, bytes: usize) void {
+        _ = bytes;
+        // BBR sets cwnd based on BtlBw * RTprop * gain.
+        // The BBR state machine updates cwnd internally via onPacketAcked.
+        self.congestion_window = self.bbr.currentCwnd();
     }
 
     fn updateRtt(self: *Recovery, latest_rtt_ms: u64, ack_delay_ms: u64) void {

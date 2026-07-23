@@ -14,6 +14,7 @@ const tls_backend_module = @import("quic/tls_backend.zig");
 pub const tls13 = @import("tls/tls13.zig");
 pub const qlog = @import("qlog/qlog.zig");
 pub const cubic = @import("quic/cubic.zig");
+pub const bbr = @import("quic/bbr.zig");
 pub const pmtu = @import("quic/pmtu.zig");
 pub const h3 = @import("h3/frame.zig");
 pub const qpack = @import("h3/qpack.zig");
@@ -38,6 +39,7 @@ comptime {
     _ = tls13;
     _ = qlog;
     _ = cubic;
+    _ = bbr;
     _ = pmtu;
     _ = h3;
     _ = qpack;
