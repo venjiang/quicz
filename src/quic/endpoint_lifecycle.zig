@@ -1971,6 +1971,196 @@ pub const EndpointConnectionLifecycle = struct {
     }
 
     /// Return the committed UDP tuple for a registered destination connection ID.
+    /// Unified Handshake with crypto backend, OrClose, and drain.
+    pub fn handshakeCryptoBackendOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified Handshake with crypto backend, OrClose, and poll.
+    pub fn handshakeCryptoBackendOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified short with crypto backend, OrClose, and drain.
+    pub fn shortCryptoBackendOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified short with crypto backend, OrClose, and poll.
+    pub fn shortCryptoBackendOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified due deadline with crypto backend, OrClose, and drain.
+    pub fn dueDeadlineCryptoBackendOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified due deadline with crypto backend, OrClose, and poll.
+    pub fn dueDeadlineCryptoBackendOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending work with crypto backend, OrClose, and drain.
+    pub fn pendingWorkCryptoBackendOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending work with crypto backend, OrClose, and poll.
+    pub fn pendingWorkCryptoBackendOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified feed with crypto backend in space, OrClose, and drain.
+    pub fn feedCryptoBackendInSpaceOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed with crypto backend in space, OrClose, and poll.
+    pub fn feedCryptoBackendInSpaceOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
     pub fn currentRoutePath(
         self: *const EndpointConnectionLifecycle,
         destination_connection_id: []const u8,
