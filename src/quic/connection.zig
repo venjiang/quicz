@@ -30,6 +30,7 @@ const packet_context = @import("packet_context.zig");
 const protocol_limits = @import("protocol_limits.zig");
 const buffer = @import("buffer.zig");
 const wire_len = @import("wire_len.zig");
+const multipath_module = @import("multipath.zig");
 const qlog_module = @import("../qlog/qlog.zig");
 const frame_rules = @import("frame_rules.zig");
 const frame_payload_module = @import("frame_payload.zig");
@@ -654,6 +655,8 @@ pub const Connection = struct {
     peer_address_validated: bool,
     peer_address_bytes_received: usize,
     peer_address_bytes_sent: usize,
+    /// Multipath manager (null when multipath is disabled).
+    multipath: ?multipath_module.MultipathManager = null,
     peer_max_idle_timeout_ms: u64,
     peer_disable_active_migration: bool,
     peer_stateless_reset_token: ?[packet.stateless_reset_token_len]u8,
@@ -1179,6 +1182,31 @@ pub const Connection = struct {
     pub fn validatePeerAddress(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.peer_address_validated = true;
+    }
+
+    /// Enable multipath support for this connection.
+    pub fn enableMultipath(self: *Connection, allocator: std.mem.Allocator) !void {
+        if (self.multipath != null) return;
+        var mp = multipath_module.MultipathManager.init(allocator);
+        _ = try mp.addPath();
+        self.multipath = mp;
+    }
+
+    /// Whether multipath is enabled.
+    pub fn isMultipathEnabled(self: *const Connection) bool {
+        return self.multipath != null;
+    }
+
+    /// Return the number of active paths (multipath).
+    pub fn activePathCount(self: *const Connection) usize {
+        return if (self.multipath) |mp| mp.activePathCount() else 1;
+    }
+
+    /// Abandon a path (multipath).
+    pub fn abandonPath(self: *Connection, path_id: u64) !void {
+        if (self.multipath) |*mp| {
+            try mp.abandonPath(path_id);
+        }
     }
 
     /// Return remaining server anti-amplification bytes, or null when unrestricted.
@@ -76148,4 +76176,33 @@ test "sendDatagram and recvDatagram roundtrip through pollTx and frame processin
     const n = (try receiver.recvDatagram(&recv_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("hello datagram", recv_buf[0..n]);
     try std.testing.expectEqual(@as(usize, 0), receiver.receivedDatagramCount());
+}
+
+test "connection multipath enable and path management" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    // Multipath disabled by default
+    try std.testing.expect(!conn.isMultipathEnabled());
+    try std.testing.expectEqual(@as(usize, 1), conn.activePathCount());
+
+    // Enable multipath
+    try conn.enableMultipath(std.testing.allocator);
+    try std.testing.expect(conn.isMultipathEnabled());
+    try std.testing.expectEqual(@as(usize, 1), conn.activePathCount());
+
+    // Add a second path
+    if (conn.multipath) |*mp| {
+        _ = try mp.addPath();
+        try std.testing.expectEqual(@as(usize, 2), conn.activePathCount());
+
+        // Abandon first path
+        try conn.abandonPath(0);
+        try std.testing.expectEqual(@as(usize, 1), conn.activePathCount());
+    }
+
+    // Cleanup multipath
+    if (conn.multipath) |*mp| {
+        mp.deinit();
+    }
 }
