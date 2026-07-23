@@ -229,6 +229,33 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 | 5 | P3-E Lifecycle variant merge | Done | API simplification |
 | 6-10 | P3-F..J | Next | HTTP/3, PMTU, multipath, fuzzing, examples |
 
+
+### P5 task matrix — production readiness
+
+P5 re-entry rule satisfied: P0-P4 complete, 1583 tests pass.
+
+| Phase | Task | Scope | Exit evidence | Status |
+| --- | --- | --- | --- | --- |
+| P5-A | UDP I/O event loop | Non-blocking UDP socket event loop via Zig std.Io; multi-connection concurrent send/receive; timer-driven PTO/idle/close | Event loop test: 2 connections handshake + echo concurrently over real UDP | Next |
+| P5-B | HTTP/3 request/response | H3 request/response over QUIC streams; stream lifecycle; GOAWAY graceful close; SETTINGS exchange | H3 client sends GET, server responds 200 with body; GOAWAY closes cleanly | Next |
+| P5-C | Interop-Runner compat | Interop server/client binaries; handshake/transfer/retry/multiplexing test cases | quic-interop-runner handshake+transfer+retry pass | Next |
+| P5-D | 0-RTT full flow | Session ticket store, PSK handshake, 0-RTT data send, replay protection | Client resumes session with 0-RTT data; replay rejected | Next |
+| P5-E | Multipath integration | MultipathManager integrated into Connection; multi-path data distribution | Two-path connection: data flows on both paths; failover works | Next |
+| P5-F | Endpoint API migration | Migrate 571 lifecycle variants to options-struct unified interface | API count reduced by >50%; 1583+ tests pass | Next |
+| P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Next |
+
+### P5 execution queue
+
+| Order | Task | Status | Scope |
+| --- | --- | --- | --- |
+| 1 | P5-A UDP I/O event loop | Next | Foundation for all production features |
+| 2 | P5-B HTTP/3 request/response | Next | Full H3 stack over QUIC |
+| 3 | P5-C Interop-Runner compat | Next | Standard interop test suite |
+| 4 | P5-D 0-RTT full flow | Next | Session resumption |
+| 5 | P5-E Multipath integration | Next | Multi-path data distribution |
+| 6 | P5-F Endpoint API migration | Next | API simplification |
+| 7 | P5-G Production validation | Next | Stress/soak/leak/interop |
+
 ## Practical Transport Baseline
 
 | Feature | Practical target | quicz status |
