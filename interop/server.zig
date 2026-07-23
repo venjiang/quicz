@@ -249,7 +249,7 @@ pub fn main(init: std.process.Init) !void {
         var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var scratch: [8192]u8 = undefined;
 
-        _ = server_endpoint.receiveDatagramStepWithRoutePath(
+        const step = server_endpoint.receiveDatagramStepWithRoutePath(
             allocator,
             path,
             0,
@@ -275,29 +275,54 @@ pub fn main(init: std.process.Init) !void {
         var dest = std.Io.net.IpAddress{
             .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port },
         };
-        for (initial_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
+        switch (step.process) {
+            .routed => |routed| switch (routed) {
+                .long => |long_pkt| switch (long_pkt) {
+                    .packet => |pkt| switch (pkt) {
+                        .initial => |init_pkt| {
+                            const init_count = init_pkt.initial.backend.backend.drain.datagrams_written;
+                            for (initial_out[0..init_count]) |o| {
+                                socket.send(io, &dest, o.datagram) catch {};
+                                allocator.free(o.datagram);
+                            }
+                            if (init_pkt.handshake) |hs| {
+                                const hs_count = hs.backend.drain.datagrams_written;
+                                for (handshake_out[0..hs_count]) |o| {
+                                    socket.send(io, &dest, o.datagram) catch {};
+                                    allocator.free(o.datagram);
+                                }
+                            }
+                        },
+                        .handshake => |hs_pkt| {
+                            const hs_count = hs_pkt.backend.backend.drain.datagrams_written;
+                            for (handshake_out[0..hs_count]) |o| {
+                                socket.send(io, &dest, o.datagram) catch {};
+                                allocator.free(o.datagram);
+                            }
+                        },
+                    },
+                    .coalesced_initial_handshake => |coh| {
+                        const hs_count = coh.backend.backend.drain.datagrams_written;
+                        for (handshake_out[0..hs_count]) |o| {
+                            socket.send(io, &dest, o.datagram) catch {};
+                            allocator.free(o.datagram);
+                        }
+                    },
+                },
+                .installed_key => |ik| {
+                    const ik_count = ik.drain.datagrams_written;
+                    for (installed_out[0..ik_count]) |o| {
+                        socket.send(io, &dest, o.datagram) catch {};
+                        allocator.free(o.datagram);
+                    }
+                },
+            },
+            else => {},
         }
-        for (handshake_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
-        }
-        for (installed_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
-        }
-        for (pending_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
+        // Send pending output
+        for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
+            socket.send(io, &dest, o.datagram) catch {};
+            allocator.free(o.datagram);
         }
     }
 }
