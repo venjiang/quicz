@@ -261,7 +261,9 @@ pub fn main(init: std.process.Init) !void {
             var server_scid: [8]u8 = undefined;
             io.randomSecure(&server_scid) catch {};
 
-            var record = ServerRecord{
+            const record = allocator.create(ServerRecord) catch continue;
+            errdefer allocator.destroy(record);
+            record.* = .{
                 .handle = handle,
                 .transport = Tls13ServerTransport.init(allocator, .{
                     .initial_max_data = 65536,
@@ -276,7 +278,10 @@ pub fn main(init: std.process.Init) !void {
                     .cert_chain_der = &.{cert_der},
                     .private_key_bytes = &private_key,
                     .private_key_algorithm = .ecdsa_p256_sha256,
-                }) catch continue,
+                }) catch {
+                    allocator.destroy(record);
+                    continue;
+                },
             };
             record.transport.connection.validatePeerAddress() catch {};
             record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
@@ -295,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
                     .supported_versions = &[_]quic_packet.Version{.v1},
                 },
                 handle,
-                &record,
+                record,
                 &server_scid,
                 .{},
                 &scratch,
