@@ -200,6 +200,35 @@ P2 re-entry rule satisfied: first usable transport claim is complete (P0+P1).
 | 3 | P2-C Endpoint API audit | Done | Catalogue and assess lifecycle variant redundancy |
 | 4 | P2-D Endpoint API simplification | Done | Merge redundant variants |
 
+
+### P3 task matrix
+
+P3 re-entry rule satisfied: P0/P1/P2 stable.
+
+| Phase | Task | Scope | Exit evidence | Status |
+| --- | --- | --- | --- | --- |
+| P3-A | qlog observability | qlog JSON event output for connection/transport/recovery events | QLOG env var produces valid qlog file during interop run | Next |
+| P3-B | RFC 9221 DATAGRAM | QUIC DATAGRAM frame (0x30/0x31) send/receive | Endpoint tests cover DATAGRAM frame encode/decode/delivery | Next |
+| P3-C | CUBIC congestion control | CUBIC implementation alongside NewReno baseline | CUBIC slow-start/congestion-avoidance/recovery tests pass | Next |
+| P3-D | Full QUIC v2 / RFC 9368 | Compatible version negotiation, v2 packet/key/token | VN + v2 handshake tests pass | Next |
+| P3-E | Lifecycle variant merge | Options-struct pattern for OrClose/AndDrain/AndPoll variants | Reduced API count, 1525/1525 tests pass | Next |
+| P3-F | HTTP/3 + QPACK | HTTP/3 framing, QPACK compression, stream mapping | HTTP/3 request/response over quicz transport | Next |
+| P3-G | PMTU/GSO/GRO | Path MTU discovery, generic segmentation/receive offload | PMTU probe tests, GSO/GRO datagram batching | Next |
+| P3-H | Multipath | Multipath QUIC transport | Multi-path handshake and data transfer tests | Next |
+| P3-I | Broad fuzzing | Frame/packet/transport-parameter fuzz harness | Fuzz harness builds and runs without crashes | Next |
+| P3-J | Multi-language examples | Go, Rust, Python client/server examples | Each example passes handshake + echo | Next |
+
+### P3 execution queue
+
+| Order | Task | Status | Scope |
+| --- | --- | --- | --- |
+| 1 | P3-B RFC 9221 DATAGRAM | Next | Smallest extension, self-contained frame type |
+| 2 | P3-A qlog observability | Next | Event logging infrastructure |
+| 3 | P3-C CUBIC congestion control | Next | Congestion control algorithm |
+| 4 | P3-D Full QUIC v2 | Next | Version negotiation |
+| 5 | P3-E Lifecycle variant merge | Next | API simplification |
+| 6-10 | P3-F..J | Next | HTTP/3, PMTU, multipath, fuzzing, examples |
+
 ## Practical Transport Baseline
 
 | Feature | Practical target | quicz status |
