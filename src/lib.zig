@@ -23,6 +23,7 @@ pub const lifecycle_options = @import("quic/lifecycle_options.zig");
 pub const session_cache = @import("quic/session_cache.zig");
 pub const gso = @import("quic/gso.zig");
 pub const migration = @import("quic/migration.zig");
+const integration_tests = @import("quic/integration_tests.zig");
 pub const tls13_backend = @import("quic/tls13_backend.zig");
 comptime {
     // Keep tls13 reachable so its tests run under `zig build test`.
@@ -38,6 +39,7 @@ comptime {
     _ = session_cache;
     _ = gso;
     _ = migration;
+    _ = integration_tests;
     _ = tls13_backend;
 }
 const endpoint_types = @import("quic/endpoint_types.zig");
