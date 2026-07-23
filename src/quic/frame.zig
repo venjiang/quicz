@@ -32,6 +32,8 @@ pub const FrameType = enum(u8) {
     connection_close = 0x1c,
     application_close = 0x1d,
     handshake_done = 0x1e,
+    datagram = 0x30,
+    datagram_with_length = 0x31,
 };
 
 pub const StreamFrame = struct {
@@ -43,6 +45,10 @@ pub const StreamFrame = struct {
 
 pub const CryptoFrame = struct {
     offset: u64,
+    data: []const u8,
+};
+
+pub const DatagramFrame = struct {
     data: []const u8,
 };
 
@@ -194,6 +200,7 @@ pub const Frame = union(enum) {
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
     handshake_done: void,
+    datagram: DatagramFrame,
 };
 
 pub const FrameError = error{
@@ -341,6 +348,7 @@ pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
         .new_token => |new_token| allocator.free(new_token.token),
         .new_connection_id => |new_connection_id| allocator.free(new_connection_id.connection_id),
         .connection_close => |close| allocator.free(close.reason_phrase),
+        .datagram => |dg| allocator.free(dg.data),
         .application_close => |close| allocator.free(close.reason_phrase),
         else => {},
     }
@@ -575,6 +583,11 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         },
         .handshake_done => {
             try writer.writeByte(@intFromEnum(FrameType.handshake_done));
+        },
+        .datagram => |dg| {
+            try writer.writeByte(@intFromEnum(FrameType.datagram_with_length));
+            try packet.encodeVarInt(writer, dg.data.len);
+            try writer.writeAll(dg.data);
         },
     }
 }
@@ -830,6 +843,15 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
 
     if (frame_type == frameTypeId(.handshake_done)) {
         return .{ .handshake_done = {} };
+    }
+
+    // RFC 9221 DATAGRAM with length (0x31)
+    if (frame_type == @intFromEnum(FrameType.datagram_with_length)) {
+        const len = (try packet.decodeVarInt(reader)).value;
+        const data = try allocator.alloc(u8, len);
+        errdefer allocator.free(data);
+        try reader.readNoEof(data);
+        return .{ .datagram = .{ .data = data } };
     }
 
     return error.UnsupportedFrameType;
@@ -1840,6 +1862,26 @@ test "encode/decode handshake_done frame roundtrip" {
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
     switch (parsed) {
         .handshake_done => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode DATAGRAM frame roundtrip" {
+    var buf: [256]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+
+    const input = Frame{ .datagram = .{ .data = "hello datagram" } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = buffer.fixedReader(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .datagram => |dg| {
+            try std.testing.expectEqualStrings("hello datagram", dg.data);
+        },
         else => return error.TestUnexpectedResult,
     }
 }
