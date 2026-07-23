@@ -249,113 +249,120 @@ pub fn main(init: std.process.Init) !void {
         var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var scratch: [8192]u8 = undefined;
 
-        // Create a new record for potential Initial admission
-        const handle = next_handle;
-        next_handle += 1;
-        var server_scid: [8]u8 = undefined;
-        io.randomSecure(&server_scid) catch {};
+        // Check if this is an Initial packet (new connection)
+        const is_initial = received.data.len > 0 and
+            (received.data[0] & 0x80) != 0 and // Long header
+            (received.data[0] & 0x40) != 0; // Fixed bit
 
-        var record = ServerRecord{
-            .handle = handle,
-            .transport = Tls13ServerTransport.init(allocator, .{
-                .initial_max_data = 65536,
-                .initial_max_stream_data = 16384,
-                .initial_max_streams_bidi = 128,
-                .initial_max_streams_uni = 128,
-                .max_datagram_size = max_datagram_size,
-                .initial_rtt_ms = 100,
-                .max_idle_timeout_ms = 30000,
-            }, .{
-                .alpn = &[_][]const u8{"hq-interop"},
-                .cert_chain_der = &.{cert_der},
-                .private_key_bytes = &private_key,
-                .private_key_algorithm = .ecdsa_p256_sha256,
-            }) catch continue,
-        };
-        record.transport.connection.validatePeerAddress() catch {};
-        record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
+        if (is_initial) {
+            // New connection: create record and use Initial admission
+            const handle = next_handle;
+            next_handle += 1;
+            var server_scid: [8]u8 = undefined;
+            io.randomSecure(&server_scid) catch {};
 
-        const step = server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
-            allocator,
-            path,
-            0,
-            received.data,
-            &[_]u8{},
-            &[_]quic_packet.Version{.v1},
-            .{
-                .space = .application,
-                .out = &scratch,
-                .unpredictable_prefix = &[_]u8{},
-                .supported_versions = &[_]quic_packet.Version{.v1},
-            },
-            handle,
-            &record,
-            &server_scid,
-            .{},
-            &scratch,
-            &[_]u8{},
-            &initial_out,
-            &handshake_out,
-            &installed_out,
-            .application,
-            &pending_out,
-        ) catch {
-            record.transport.deinit();
-            continue;
-        };
+            var record = ServerRecord{
+                .handle = handle,
+                .transport = Tls13ServerTransport.init(allocator, .{
+                    .initial_max_data = 65536,
+                    .initial_max_stream_data = 16384,
+                    .initial_max_streams_bidi = 128,
+                    .initial_max_streams_uni = 128,
+                    .max_datagram_size = max_datagram_size,
+                    .initial_rtt_ms = 100,
+                    .max_idle_timeout_ms = 30000,
+                }, .{
+                    .alpn = &[_][]const u8{"hq-interop"},
+                    .cert_chain_der = &.{cert_der},
+                    .private_key_bytes = &private_key,
+                    .private_key_algorithm = .ecdsa_p256_sha256,
+                }) catch continue,
+            };
+            record.transport.connection.validatePeerAddress() catch {};
+            record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
+
+            const step = server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+                allocator,
+                path,
+                0,
+                received.data,
+                &[_]u8{},
+                &[_]quic_packet.Version{.v1},
+                .{
+                    .space = .application,
+                    .out = &scratch,
+                    .unpredictable_prefix = &[_]u8{},
+                    .supported_versions = &[_]quic_packet.Version{.v1},
+                },
+                handle,
+                &record,
+                &server_scid,
+                .{},
+                &scratch,
+                &[_]u8{},
+                &initial_out,
+                &handshake_out,
+                &installed_out,
+                .application,
+                &pending_out,
+            ) catch {
+                record.transport.deinit();
+                continue;
+            };
+            _ = step;
+        } else {
+            // Existing connection: use regular routing
+            const step = server_endpoint.receiveDatagramStepWithRoutePath(
+                allocator,
+                path,
+                0,
+                received.data,
+                &[_]u8{},
+                &[_]quic_packet.Version{.v1},
+                .{
+                    .space = .application,
+                    .out = &scratch,
+                    .unpredictable_prefix = &[_]u8{},
+                    .supported_versions = &[_]quic_packet.Version{.v1},
+                },
+                &scratch,
+                &[_]u8{},
+                &initial_out,
+                &handshake_out,
+                &installed_out,
+                .application,
+                &pending_out,
+            ) catch continue;
+            _ = step;
+        }
 
         // Send response datagrams back to client
         var dest = std.Io.net.IpAddress{
             .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port },
         };
-        switch (step.process) {
-            .routed => |routed| switch (routed) {
-                .long => |long_pkt| switch (long_pkt) {
-                    .packet => |pkt| switch (pkt) {
-                        .initial => |init_pkt| {
-                            const init_count = init_pkt.initial.backend.backend.drain.datagrams_written;
-                            for (initial_out[0..init_count]) |o| {
-                                socket.send(io, &dest, o.datagram) catch {};
-                                allocator.free(o.datagram);
-                            }
-                            if (init_pkt.handshake) |hs| {
-                                const hs_count = hs.backend.drain.datagrams_written;
-                                for (handshake_out[0..hs_count]) |o| {
-                                    socket.send(io, &dest, o.datagram) catch {};
-                                    allocator.free(o.datagram);
-                                }
-                            }
-                        },
-                        .handshake => |hs_pkt| {
-                            const hs_count = hs_pkt.backend.backend.drain.datagrams_written;
-                            for (handshake_out[0..hs_count]) |o| {
-                                socket.send(io, &dest, o.datagram) catch {};
-                                allocator.free(o.datagram);
-                            }
-                        },
-                    },
-                    .coalesced_initial_handshake => |coh| {
-                        const hs_count = coh.backend.backend.drain.datagrams_written;
-                        for (handshake_out[0..hs_count]) |o| {
-                            socket.send(io, &dest, o.datagram) catch {};
-                            allocator.free(o.datagram);
-                        }
-                    },
-                },
-                .installed_key => |ik| {
-                    const ik_count = ik.drain.datagrams_written;
-                    for (installed_out[0..ik_count]) |o| {
-                        socket.send(io, &dest, o.datagram) catch {};
-                        allocator.free(o.datagram);
-                    }
-                },
-            },
-            else => {},
+        for (initial_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
         }
-        // Send pending output
-        for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
-            socket.send(io, &dest, o.datagram) catch {};
-            allocator.free(o.datagram);
+        for (handshake_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
+        }
+        for (installed_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
+        }
+        for (pending_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
         }
     }
 }
