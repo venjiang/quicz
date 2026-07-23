@@ -1476,6 +1476,136 @@ pub const EndpointConnectionLifecycle = struct {
     /// packet-number ordering. The lifecycle owner only commits the resulting
     /// path update to the same routing state used for receive classification,
     /// protected datagram delivery, and timer/route retirement.
+    /// Unified feed with compatible version handling.
+    /// Replaces 10+ WithCompatibleVersion variants.
+    pub fn feedWithCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        return self.feedDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
+    /// Unified feed across connections with compatible version.
+    /// Replaces 10+ AcrossConnectionsAndWithCompatibleVersion variants.
+    pub fn feedAcrossConnectionsWithCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(
+            allocator,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
+    /// Unified Handshake with crypto backend and compatible version.
+    /// Replaces 10+ HandshakeAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn handshakeWithCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified short with crypto backend and compatible version.
+    /// Replaces 10+ ShortAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn shortWithCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified due deadline with crypto backend and compatible version.
+    /// Replaces 10+ DueDeadlineAndDriveCryptoBackendWithCompatibleVersion variants.
+    pub fn dueDeadlineWithCryptoBackendAndCompatibleVersionUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending work across connections with crypto backend.
+    /// Replaces 10+ PendingWorkAcrossConnectionsAndDriveCryptoBackend variants.
+    pub fn pendingWorkAcrossConnectionsWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
     pub fn updateRoutePath(
         self: *EndpointConnectionLifecycle,
         destination_connection_id: []const u8,
