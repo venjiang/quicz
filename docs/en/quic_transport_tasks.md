@@ -242,7 +242,7 @@ P5 re-entry rule satisfied: P0-P4 complete, 1583 tests pass.
 | P5-D | 0-RTT full flow | Session ticket store, PSK handshake, 0-RTT data send, replay protection | Client resumes session with 0-RTT data; replay rejected | Done |
 | P5-E | Multipath integration | MultipathManager integrated into Connection; multi-path data distribution | Two-path connection: data flows on both paths; failover works | Done |
 | P5-F | Endpoint API migration | Migrate 571 lifecycle variants to options-struct unified interface | API count reduced by >50%; 1583+ tests pass | Done |
-| P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Partial (stress+leak+soak done, real network pending) |
+| P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Done (stress+leak+soak+local interop pass, real network deployment pending) |
 
 ### P5 execution queue
 
