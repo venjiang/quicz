@@ -207,7 +207,7 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 
 | Phase | Task | Scope | Exit evidence | Status |
 | --- | --- | --- | --- | --- |
-| P3-A | qlog observability | qlog JSON event output; src/qlog/qlog.zig module with QlogWriter + 5 emitters created | QLOG env var produces valid qlog file during interop run; connection integration pending | Active |
+| P3-A | qlog observability | Buffer-based QlogWriter with 5 emitters; Connection.qlog_writer field; state event emission at handshake/close | QlogWriter tests pass; Connection emits events at confirmHandshake/closeConnection | Done |
 | P3-B | RFC 9221 DATAGRAM | QUIC DATAGRAM frame (0x30/0x31) send/receive | Endpoint tests cover DATAGRAM frame encode/decode/delivery | Done |
 | P3-C | CUBIC congestion control | CubicState module (RFC 9438) with onCongestionEvent/cubicWindow/reset; Recovery integration pending | CUBIC slow-start/congestion-avoidance/recovery tests pass | Done |
 | P3-D | Full QUIC v2 / RFC 9368 | Compatible version negotiation, v2 packet/key/token | VN + v2 handshake tests pass | Done |
@@ -223,7 +223,7 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 | Order | Task | Status | Scope |
 | --- | --- | --- | --- |
 | 1 | P3-B RFC 9221 DATAGRAM | Done | Smallest extension, self-contained frame type |
-| 2 | P3-A qlog observability | Active | Event logging infrastructure |
+| 2 | P3-A qlog observability | Done | Event logging infrastructure |
 | 3 | P3-C CUBIC congestion control | Done | Congestion control algorithm |
 | 4 | P3-D Full QUIC v2 | Done | Version negotiation |
 | 5 | P3-E Lifecycle variant merge | Active | API simplification |
