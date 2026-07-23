@@ -14,8 +14,8 @@ and a NewReno baseline. Real UDP loopback, separate-process Zig, and
 certificate-verified Go/Rust/quic-go interoperability probes cover the primary
 handshake and FIN-terminated stream-echo path.
 
-It is still experimental. Production endpoint capacity policy, broader
-interoperability, and several RFC edge cases remain in progress. HTTP/3/QPACK,
+P0 (first usable transport) and P1 (interop hardening and production
+policy) milestones are complete. The API is stabilizing but still evolving. HTTP/3/QPACK,
 QUIC DATAGRAM, full QUIC v2/compatible-version behavior, multipath, qlog,
 PMTU, GSO/GRO, and advanced congestion controllers are outside the first
 transport milestone.
@@ -87,7 +87,22 @@ The process probe runs independent Zig client and server processes over
 loopback UDP. See [the examples guide](examples/README.md) for a curated
 catalogue, intent, and commands; `zig build --help` lists every build step.
 
-## Go and Rust interoperability examples
+## External interoperability
+
+quicz passes certificate-verified interop against quic-go (Go), quinn (Rust),
+and the QUIC-Interop-Runner self-test (handshake, transfer, retry).
+
+Run the interop self-test:
+
+    zig build run-interop-client-standalone
+
+Run against an external quic-go or quinn server:
+
+    zig build run-interop-external -- SERVER_IP PORT /path/to/cert.pem localhost
+
+### Local Zig process interop
+
+Build the project, then start the local Zig echo server:
 
 Build the project, then start the local Zig echo server:
 
