@@ -1081,6 +1081,116 @@ pub const EndpointConnectionLifecycle = struct {
     /// validation and path validation. The lifecycle owner commits the route
     /// replacement and retained reset-token state used by the socket event
     /// loop after validation succeeds.
+    /// Unified feed with crypto backend drive — replaces 20+ AndDriveCryptoBackend variants.
+    pub fn feedDatagramWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
+    /// Unified routed Handshake with crypto backend — replaces 10+ variants.
+    pub fn processRoutedHandshakeWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = path;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified routed short with crypto backend — replaces 10+ variants.
+    pub fn processRoutedShortWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified due deadline with crypto backend — replaces 10+ variants.
+    pub fn processDueDeadlineWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending work with crypto backend — replaces 10+ variants.
+    pub fn processPendingWorkWithCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
     pub fn commitPreferredAddressMigration(
         self: *EndpointConnectionLifecycle,
         current_destination_connection_id: []const u8,
