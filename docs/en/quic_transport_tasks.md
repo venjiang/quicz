@@ -156,7 +156,7 @@ Work proceeds by main functionality alignment against these stacks.
 | Phase | Task | Scope | Exit evidence | Status |
 | --- | --- | --- | --- | --- |
 | P1-A1 | quinn interop handshake+echo | quinn (Rust) certificate-verified handshake, bidi/uni stream echo, close | `zig build run-interop-external` against quinn server: handshake + echo pass | Done |
-| P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry and one loss/PTO case pass against quinn | Active |
+| P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry and one loss/PTO case pass against quinn; VN already passes | Active |
 | P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Next |
 | P1-C1 | Stream-limit scenarios | MAX_STREAMS exhaustion, stream-count credit race, uni/bidi limit edge | Endpoint tests cover stream-limit exhaustion and credit release under load | Next |
 | P1-C2 | Loss/migration scenarios | Multi-packet loss, persistent congestion, path migration under loss | Endpoint tests cover multi-loss and migration-with-loss sequences | Next |
