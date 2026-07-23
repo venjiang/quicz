@@ -13,7 +13,7 @@
 //! separation at the adapter boundary.
 
 const std = @import("std");
-const tls13 = @import("tls13.zig");
+const tls13 = @import("../tls/tls13.zig");
 const transport_types = @import("../quic/transport_types.zig");
 const protection = @import("../quic/protection.zig");
 const crypto_types = @import("../quic/crypto_types.zig");

@@ -7,7 +7,7 @@ const connection_config = @import("../quic/connection_config.zig");
 const frame = @import("../quic/frame.zig");
 const packet = @import("../quic/packet.zig");
 const protection = @import("../quic/protection.zig");
-const tls13 = @import("tls13.zig");
+const tls13 = @import("../tls/tls13.zig");
 const tls13_backend = @import("tls13_backend.zig");
 const transport_types = @import("../quic/transport_types.zig");
 

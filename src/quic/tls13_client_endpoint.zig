@@ -13,7 +13,7 @@ const frame = @import("frame.zig");
 const packet = @import("packet.zig");
 const protection = @import("protection.zig");
 const tls13 = @import("../tls/tls13.zig");
-const client_transport = @import("../tls/tls13_client_transport.zig");
+const client_transport = @import("tls13_client_transport.zig");
 const transport_types = @import("transport_types.zig");
 
 const Config = connection_config.Config;
