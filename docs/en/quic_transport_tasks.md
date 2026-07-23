@@ -215,7 +215,7 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 | P3-F | HTTP/3 + QPACK | HTTP/3 framing, QPACK compression, stream mapping | HTTP/3 request/response over quicz transport | Next |
 | P3-G | PMTU/GSO/GRO | Path MTU discovery, generic segmentation/receive offload | PMTU probe tests, GSO/GRO datagram batching | Next |
 | P3-H | Multipath | Multipath QUIC transport | Multi-path handshake and data transfer tests | Next |
-| P3-I | Broad fuzzing | Frame/packet/transport-parameter fuzz harness | Fuzz harness builds and runs without crashes | Next |
+| P3-I | Broad fuzzing | Frame/packet/transport-parameter fuzz harness | Fuzz harness builds and runs without crashes | Done |
 | P3-J | Multi-language examples | Go, Rust, Python client/server examples | Each example passes handshake + echo | Next |
 
 ### P3 execution queue
