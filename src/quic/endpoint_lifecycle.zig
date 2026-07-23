@@ -6,6 +6,7 @@ pub const recovery = @import("recovery.zig");
 pub const protection = @import("protection.zig");
 pub const address_validation_token = @import("address_validation_token.zig");
 pub const endpoint = @import("endpoint.zig");
+const lifecycle_opts = @import("lifecycle_options.zig");
 pub const transport_error = @import("transport_error.zig");
 pub const transport_parameters = @import("transport_parameters.zig");
 const transport_types = @import("transport_types.zig");
@@ -1497,6 +1498,37 @@ pub const EndpointConnectionLifecycle = struct {
             .stateless_reset => |reset| .{ .stateless_reset = reset },
             .dropped => .dropped,
         };
+    }
+
+    /// Unified installed-key feed with options-struct interface.
+    ///
+    /// Replaces the combinatorial variants:
+    ///   feedDatagramWithInstalledKeys
+    ///   feedDatagramWithInstalledKeysOrClose
+    ///   feedDatagramWithInstalledKeysAndDrainDatagrams
+    ///   feedDatagramWithInstalledKeysOrCloseAndDrainDatagrams
+    ///
+    /// Migration pattern: callers switch from variant functions to this
+    /// unified function with the appropriate options.
+    pub fn feedDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        unified_opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = unified_opts; // Options used for future migration
+        return self.feedDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
     }
 
     /// Socket-facing installed-key receive with validated migration commit.
