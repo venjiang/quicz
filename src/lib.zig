@@ -18,6 +18,7 @@ pub const pmtu = @import("quic/pmtu.zig");
 pub const h3 = @import("h3/frame.zig");
 pub const qpack = @import("h3/qpack.zig");
 pub const h3_connection = @import("h3/connection.zig");
+pub const h3_request = @import("h3/request.zig");
 pub const multipath = @import("quic/multipath.zig");
 pub const lifecycle_options = @import("quic/lifecycle_options.zig");
 pub const session_cache = @import("quic/session_cache.zig");
@@ -35,6 +36,7 @@ comptime {
     _ = h3;
     _ = qpack;
     _ = h3_connection;
+    _ = h3_request;
     _ = multipath;
     _ = lifecycle_options;
     _ = session_cache;
