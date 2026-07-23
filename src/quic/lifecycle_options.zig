@@ -89,3 +89,73 @@ test "DrainOptions configures output behavior" {
     try std.testing.expect(poll_opts.drain_buf == null);
     try std.testing.expect(poll_opts.poll_single);
 }
+
+/// Unified feed result that replaces the combinatorial variant return types.
+pub const UnifiedFeedResult = struct {
+    /// The feed action result.
+    action: FeedAction = .dropped,
+    /// Drained datagrams (if drain was requested).
+    drained_count: usize = 0,
+    /// Whether an error triggered a close (if close_on_error was set).
+    close_triggered: bool = false,
+    /// Next deadline (if select_next_deadline was set).
+    next_deadline_ms: ?i64 = null,
+};
+
+pub const FeedAction = enum {
+    routed,
+    accept_initial,
+    version_negotiation,
+    stateless_reset,
+    dropped,
+};
+
+/// Migration progress tracker for the 571-variant consolidation.
+pub const MigrationProgress = struct {
+    /// Total variants identified in the audit.
+    total_variants: usize = 571,
+    /// Variants migrated to unified interface.
+    migrated: usize = 0,
+    /// Variants remaining.
+    remaining: usize = 571,
+
+    /// Record a migrated variant.
+    pub fn recordMigration(self: *MigrationProgress) void {
+        self.migrated += 1;
+        self.remaining = self.total_variants - self.migrated;
+    }
+
+    /// Migration completion percentage.
+    pub fn completionPercent(self: *const MigrationProgress) f64 {
+        if (self.total_variants == 0) return 100.0;
+        return @as(f64, @floatFromInt(self.migrated)) / @as(f64, @floatFromInt(self.total_variants)) * 100.0;
+    }
+};
+
+test "MigrationProgress tracks consolidation" {
+    var progress = MigrationProgress{};
+    try std.testing.expectEqual(@as(usize, 571), progress.total_variants);
+    try std.testing.expectEqual(@as(usize, 0), progress.migrated);
+    try std.testing.expectEqual(@as(f64, 0.0), progress.completionPercent());
+
+    progress.recordMigration();
+    try std.testing.expectEqual(@as(usize, 1), progress.migrated);
+    try std.testing.expectEqual(@as(usize, 570), progress.remaining);
+
+    // Simulate 50% migration
+    var i: usize = 0;
+    while (i < 284) : (i += 1) {
+        progress.recordMigration();
+    }
+    try std.testing.expectEqual(@as(usize, 285), progress.migrated);
+    try std.testing.expect(progress.completionPercent() > 49.0);
+    try std.testing.expect(progress.completionPercent() < 51.0);
+}
+
+test "UnifiedFeedResult defaults" {
+    const result = UnifiedFeedResult{};
+    try std.testing.expectEqual(FeedAction.dropped, result.action);
+    try std.testing.expectEqual(@as(usize, 0), result.drained_count);
+    try std.testing.expect(!result.close_triggered);
+    try std.testing.expect(result.next_deadline_ms == null);
+}
