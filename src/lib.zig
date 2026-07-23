@@ -30,6 +30,7 @@ pub const multipath = @import("quic/multipath.zig");
 pub const lifecycle_options = @import("quic/lifecycle_options.zig");
 pub const session_cache = @import("quic/session_cache.zig");
 pub const gso = @import("quic/gso.zig");
+pub const connection_pool = @import("quic/connection_pool.zig");
 pub const migration = @import("quic/migration.zig");
 const integration_tests = @import("quic/integration_tests.zig");
 pub const udp_event_loop = @import("quic/udp_event_loop.zig");
@@ -57,6 +58,7 @@ comptime {
     _ = lifecycle_options;
     _ = session_cache;
     _ = gso;
+    _ = connection_pool;
     _ = migration;
     _ = integration_tests;
     _ = udp_event_loop;
