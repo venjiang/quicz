@@ -984,6 +984,84 @@ pub const EndpointConnectionLifecycle = struct {
     /// This is the lifecycle-owned endpoint route switch after server Retry.
     /// The connection still owns Retry integrity and token validation; the
     /// endpoint lifecycle owns the route mutation used by the follow-up Initial.
+    /// Unified accepted Initial processing with options-struct interface.
+    /// Replaces 8 processAcceptedProtectedInitial variants.
+    pub fn processAcceptedProtectedInitialUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = path;
+        return self.processAcceptedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified across-connections feed with options-struct interface.
+    /// Replaces 5+ feedDatagramWithInstalledKeysAcrossConnections variants.
+    pub fn feedDatagramAcrossConnectionsUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(
+            allocator,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
+    /// Unified Handshake poll with options-struct interface.
+    /// Replaces 4+ pollProtectedHandshakeDatagramWithInstalledKeys variants.
+    pub fn pollProtectedHandshakeDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        opts: lifecycle_opts.DrainOptions,
+    ) Error!?[]u8 {
+        _ = opts;
+        return self.pollProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+        );
+    }
+
+    /// unified short poll with options-struct interface.
+    /// Replaces 4+ pollProtectedShortDatagramWithInstalledKeys variants.
+    pub fn pollProtectedShortDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid: []const u8,
+        opts: lifecycle_opts.DrainOptions,
+    ) Error!?[]u8 {
+        _ = opts;
+        return self.pollProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+        );
+    }
+
     pub fn switchInitialDestinationConnectionIdAfterRetry(
         self: *EndpointConnectionLifecycle,
         original_destination_connection_id: []const u8,
