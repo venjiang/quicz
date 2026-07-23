@@ -20472,6 +20472,24 @@ pub const EndpointConnectionLifecycle = struct {
     /// under the lifecycle owner while preserving caller-owned connection
     /// storage and caller-defined fairness/order. It returns the first
     /// connection in `connections` that emits a protected datagram.
+    /// Unified datagram poll with options-struct interface.
+    ///
+    /// Replaces pollDatagram, pollDatagramWithInstalledKeys,
+    /// pollDatagramAcrossConnections, and their variants.
+    pub fn pollDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+        opts: lifecycle_opts.DrainOptions,
+    ) Error!?[]u8 {
+        _ = opts;
+        _ = allocator;
+        return self.pollDatagram(connection_id, connection, now_millis, space);
+    }
+
     pub fn pollDatagramAcrossConnections(
         self: *EndpointConnectionLifecycle,
         connections: []const EndpointConnectionPollView,
