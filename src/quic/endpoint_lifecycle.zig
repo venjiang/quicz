@@ -11,8 +11,8 @@ pub const transport_parameters = @import("transport_parameters.zig");
 const transport_types = @import("transport_types.zig");
 const crypto_types = @import("crypto_types.zig");
 const tls_backend_module = @import("tls_backend.zig");
-pub const tls13 = @import("tls/tls13.zig");
-pub const tls13_backend = @import("tls/tls13_backend.zig");
+pub const tls13 = @import("../tls/tls13.zig");
+pub const tls13_backend = @import("../tls/tls13_backend.zig");
 comptime {
     // Keep tls13 reachable so its tests run under `zig build test`.
     _ = tls13;

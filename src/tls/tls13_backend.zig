@@ -14,9 +14,9 @@
 
 const std = @import("std");
 const tls13 = @import("tls13.zig");
-const transport_types = @import("../transport_types.zig");
-const protection = @import("../protection.zig");
-const crypto_types = @import("../crypto_types.zig");
+const transport_types = @import("../quic/transport_types.zig");
+const protection = @import("../quic/protection.zig");
+const crypto_types = @import("../quic/crypto_types.zig");
 
 const Error = transport_types.Error;
 const PacketNumberSpace = transport_types.PacketNumberSpace;

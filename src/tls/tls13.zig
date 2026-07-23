@@ -5336,7 +5336,7 @@ test "buildCertificateChain writes multi-byte vector lengths" {
 }
 
 test "Tls13Handshake validates supplied certificate entries to a trust anchor" {
-    const pem = @embedFile("../testdata/quicz-echo-ca.pem");
+    const pem = @embedFile("../quic/testdata/quicz-echo-ca.pem");
     const begin_marker = "-----BEGIN CERTIFICATE-----";
     const end_marker = "-----END CERTIFICATE-----";
     const begin = std.mem.indexOf(u8, pem, begin_marker) orelse return error.TestUnexpectedResult;
@@ -8213,7 +8213,7 @@ test "Tls13Handshake PSK-selected loopback skips Certificate flight" {
 // ─── Tests for certificate validity-period verification ─────────────
 
 test "verifyServerCertificate surfaces unparseable certificates as BadCertificate" {
-    const cert_der = @embedFile("../testdata/test_leaf.der");
+    const cert_der = @embedFile("../quic/testdata/test_leaf.der");
     var hs = Tls13Handshake.initClient(.{
         .skip_cert_verify = false,
         .now_sec = 0,

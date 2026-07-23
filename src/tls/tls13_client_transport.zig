@@ -1,15 +1,15 @@
 //! Pure-Zig TLS 1.3 QUIC client transport state without socket ownership.
 
 const std = @import("std");
-const buffer = @import("../buffer.zig");
-const connection_module = @import("../connection.zig");
-const connection_config = @import("../connection_config.zig");
-const frame = @import("../frame.zig");
-const packet = @import("../packet.zig");
-const protection = @import("../protection.zig");
+const buffer = @import("../quic/buffer.zig");
+const connection_module = @import("../quic/connection.zig");
+const connection_config = @import("../quic/connection_config.zig");
+const frame = @import("../quic/frame.zig");
+const packet = @import("../quic/packet.zig");
+const protection = @import("../quic/protection.zig");
 const tls13 = @import("tls13.zig");
 const tls13_backend = @import("tls13_backend.zig");
-const transport_types = @import("../transport_types.zig");
+const transport_types = @import("../quic/transport_types.zig");
 
 const Connection = connection_module.Connection;
 const Config = connection_config.Config;
