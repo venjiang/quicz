@@ -157,7 +157,7 @@ Work proceeds by main functionality alignment against these stacks.
 | --- | --- | --- | --- | --- |
 | P1-A1 | quinn interop handshake+echo | quinn (Rust) certificate-verified handshake, bidi/uni stream echo, close | `zig build run-interop-external` against quinn server: handshake + echo pass | Done |
 | P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry+VN+echo pass against quinn; loss/PTO covered by endpoint tests | Done |
-| P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Active |
+| P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Done |
 | P1-C1 | Stream-limit scenarios | MAX_STREAMS exhaustion, stream-count credit race, uni/bidi limit edge | Endpoint tests cover stream-limit exhaustion and credit release under load | Done |
 | P1-C2 | Loss/migration scenarios | Multi-packet loss, persistent congestion, path migration under loss | Endpoint tests cover multi-loss and migration-with-loss sequences | Done |
 | P1-D1 | Token persistence/replay | Address validation token persistence, replay rejection across restart | Token store/reload/replay tests pass | Done |
@@ -171,7 +171,7 @@ Work proceeds by main functionality alignment against these stacks.
 | --- | --- | --- | --- |
 | 1 | P1-A1 quinn interop handshake+echo | Done | Clone quinn, build echo server, run quicz interop client against it |
 | 2 | P1-A2 quinn interop Retry+loss | Done | Extend quinn interop to Retry and loss/PTO scenarios |
-| 3 | P1-B1 Interop-Runner shape | Active | Build interop-runner compatible binary and scenario set |
+| 3 | P1-B1 Interop-Runner shape | Done | Build interop-runner compatible binary and scenario set |
 | 4 | P1-C1 stream-limit scenarios | Done | Add stream-limit exhaustion and credit race endpoint tests |
 | 5 | P1-C2 loss/migration scenarios | Done | Add multi-loss and migration-with-loss endpoint tests |
 | 6 | P1-D1 token persistence/replay | Done | Add token store/reload/replay tests |

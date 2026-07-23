@@ -1025,6 +1025,17 @@ pub fn build(b: *std.Build) void {
         run_interop_external_client_cmd.addArgs(args);
     }
 
+    // zig build run-interop-client-standalone (no OpenSSL dependency)
+    const run_interop_client_standalone = b.step(
+        "run-interop-client-standalone",
+        "Run QUIC interop client self-test (standalone)",
+    );
+    const run_interop_client_standalone_cmd = b.addRunArtifact(exe_interop_client);
+    run_interop_client_standalone.dependOn(&run_interop_client_standalone_cmd.step);
+    if (b.args) |args| {
+        run_interop_client_standalone_cmd.addArgs(args);
+    }
+
     // zig build run-interop-external (standalone, no OpenSSL dependency)
     const run_interop_standalone = b.step(
         "run-interop-external",
