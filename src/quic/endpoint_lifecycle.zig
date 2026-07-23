@@ -2355,6 +2355,190 @@ pub const EndpointConnectionLifecycle = struct {
     /// first-Initial acceptance still uses
     /// `processAcceptedProtectedInitialDatagram()` because routes are installed
     /// only after authentication succeeds.
+    /// Unified feed across connections with pending work, OrClose, and drain.
+    pub fn feedAcrossWithPendingWorkOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = out;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, OrClose, and poll.
+    pub fn feedAcrossWithPendingWorkOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend, OrClose, and drain.
+    pub fn feedAcrossWithPendingWorkCryptoBackendOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend, OrClose, and poll.
+    pub fn feedAcrossWithPendingWorkCryptoBackendOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend across spaces, OrClose, and drain.
+    pub fn feedAcrossWithPendingWorkCryptoBackendAcrossSpacesOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend across spaces, OrClose, and poll.
+    pub fn feedAcrossWithPendingWorkCryptoBackendAcrossSpacesOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed with pending work, crypto backend in space, compatible version, OrClose, and drain.
+    pub fn feedWithPendingWorkCryptoBackendInSpaceCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed with pending work, crypto backend in space, compatible version, OrClose, and poll.
+    pub fn feedWithPendingWorkCryptoBackendInSpaceCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend in space, compatible version, OrClose, and drain.
+    pub fn feedAcrossWithPendingWorkCryptoBackendInSpaceCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed across connections with pending work, crypto backend in space, compatible version, OrClose, and poll.
+    pub fn feedAcrossWithPendingWorkCryptoBackendInSpaceCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(allocator, path, now_millis, datagram, options);
+    }
+
     pub fn processRoutedProtectedInitialDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
