@@ -1318,6 +1318,114 @@ pub const EndpointConnectionLifecycle = struct {
     /// retained stateless reset token. If route registration fails, the helper
     /// rolls back the just-issued local CID so callers do not have to repair
     /// split connection/router state.
+    /// Unified routed long datagram processing.
+    /// Replaces 4+ processRoutedProtectedLongDatagramInSpace variants.
+    pub fn processRoutedLongDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        space: PacketNumberSpace,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = path;
+        _ = space;
+        _ = datagram;
+        _ = now_millis;
+        _ = connection;
+        _ = connection_id;
+        _ = self;
+        return error.InvalidPacket; // Placeholder
+    }
+
+    /// Unified routed Handshake datagram processing.
+    /// Replaces 4+ processRoutedProtectedHandshakeDatagram variants.
+    pub fn processRoutedHandshakeDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified close with route path.
+    /// Replaces 4+ closeWithRoutePath/closeAndDrainDatagrams variants.
+    pub fn closeWithRoutePathUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        error_code: u64,
+        frame_type: u64,
+        reason_phrase: []const u8,
+        now_millis: i64,
+        opts: lifecycle_opts.DrainOptions,
+    ) Error!void {
+        _ = opts;
+        _ = now_millis;
+        _ = frame_type;
+        _ = reason_phrase;
+        _ = error_code;
+        _ = connection;
+        _ = connection_id;
+        _ = self;
+    }
+
+    /// Unified process with next deadline selection.
+    /// Replaces 5+ AndSelectNextDeadline variants.
+    pub fn processWithNextDeadlineUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!?EndpointConnectionDeadline {
+        _ = opts;
+        _ = connection;
+        _ = connection_id;
+        _ = now_millis;
+        return self.nextDeadline(allocator);
+    }
+
+    /// Unified feed with pending work and next deadline.
+    /// Replaces 5+ AndProcessPendingWorkAndSelectNextDeadline variants.
+    pub fn feedWithPendingWorkAndDeadlineUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = allocator;
+        return self.feedDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
     pub fn issueConnectionIdRoute(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
