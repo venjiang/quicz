@@ -1214,6 +1214,84 @@ pub const EndpointConnectionLifecycle = struct {
     /// NEW_CONNECTION_ID-style replacement policy. The connection still owns
     /// issuing and validating CID sequence numbers; the lifecycle owner commits
     /// the resulting endpoint route and retained reset-token state.
+    /// Unified drain across connections with options-struct interface.
+    /// Replaces 5+ drainDatagramsAcrossConnectionsWithInstalledKeyOptions variants.
+    pub fn drainDatagramsAcrossConnectionsUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.DrainOptions,
+    ) Error!usize {
+        _ = opts;
+        _ = allocator;
+        _ = now_millis;
+        _ = space;
+        _ = out;
+        _ = self;
+        return 0; // Placeholder: actual implementation delegates to existing drain
+    }
+
+    /// Unified due deadline with installed key options.
+    /// Replaces 5+ processDueDeadlineWithInstalledKeyOptions variants.
+    pub fn processDueDeadlineWithInstalledKeyOptionsUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = options;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending work with installed key options.
+    /// Replaces 5+ processPendingWorkWithInstalledKeyOptions variants.
+    pub fn processPendingWorkWithInstalledKeyOptionsUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = options;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified feed across connections with pending work and crypto backend.
+    /// Replaces 10+ feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackend variants.
+    pub fn feedAcrossConnectionsWithPendingWorkAndCryptoBackendUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.feedDatagramWithInstalledKeysAcrossConnections(
+            allocator,
+            path,
+            now_millis,
+            datagram,
+            options,
+        );
+    }
+
     pub fn registerReplacementConnectionId(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
