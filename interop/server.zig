@@ -242,132 +242,134 @@ pub fn main(init: std.process.Init) !void {
         );
         const path = endpoint.Udp4Tuple{ .local = local_addr, .remote = from_addr };
 
-        // Process through endpoint with Initial admission
+        // Classify the datagram
         var initial_out: [4]quicz.EndpointPolledDatagramResult = undefined;
         var handshake_out: [4]quicz.EndpointPolledDatagramResult = undefined;
         var installed_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var scratch: [8192]u8 = undefined;
 
-        // Check if this is an Initial packet (new connection)
-        const is_initial = received.data.len > 0 and
-            (received.data[0] & 0x80) != 0 and // Long header
-            (received.data[0] & 0x40) != 0; // Fixed bit
+        const action = server_endpoint.feedDatagram(
+            &scratch,
+            path,
+            received.data,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+        ) catch continue;
 
-        if (is_initial) {
-            // New connection: create record and use Initial admission
-            const handle = next_handle;
-            next_handle += 1;
-            var server_scid: [8]u8 = undefined;
-            io.randomSecure(&server_scid) catch {};
-
-            const record = allocator.create(ServerRecord) catch continue;
-            errdefer allocator.destroy(record);
-            record.* = .{
-                .handle = handle,
-                .transport = Tls13ServerTransport.init(allocator, .{
-                    .initial_max_data = 65536,
-                    .initial_max_stream_data = 16384,
-                    .initial_max_streams_bidi = 128,
-                    .initial_max_streams_uni = 128,
-                    .max_datagram_size = max_datagram_size,
-                    .initial_rtt_ms = 100,
-                    .max_idle_timeout_ms = 30000,
-                }, .{
-                    .alpn = &[_][]const u8{"hq-interop"},
-                    .cert_chain_der = &.{cert_der},
-                    .private_key_bytes = &private_key,
-                    .private_key_algorithm = .ecdsa_p256_sha256,
-                }) catch {
-                    allocator.destroy(record);
-                    continue;
-                },
-            };
-            record.transport.connection.validatePeerAddress() catch {};
-            record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
-
-            const step = server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
-                allocator,
-                path,
-                0,
-                received.data,
-                &[_]u8{},
-                &[_]quic_packet.Version{.v1},
-                .{
-                    .space = .application,
-                    .out = &scratch,
-                    .unpredictable_prefix = &[_]u8{},
-                    .supported_versions = &[_]quic_packet.Version{.v1},
-                },
-                handle,
-                record,
-                &server_scid,
-                .{},
-                &scratch,
-                &[_]u8{},
-                &initial_out,
-                &handshake_out,
-                &installed_out,
-                .application,
-                &pending_out,
-            ) catch {
-                record.transport.deinit();
-                continue;
-            };
-            _ = step;
-        } else {
-            // Existing connection: use regular routing
-            const step = server_endpoint.receiveDatagramStepWithRoutePath(
-                allocator,
-                path,
-                0,
-                received.data,
-                &[_]u8{},
-                &[_]quic_packet.Version{.v1},
-                .{
-                    .space = .application,
-                    .out = &scratch,
-                    .unpredictable_prefix = &[_]u8{},
-                    .supported_versions = &[_]quic_packet.Version{.v1},
-                },
-                &scratch,
-                &[_]u8{},
-                &initial_out,
-                &handshake_out,
-                &installed_out,
-                .application,
-                &pending_out,
-            ) catch continue;
-            _ = step;
-        }
-
-        // Send response datagrams back to client
         var dest = std.Io.net.IpAddress{
             .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port },
         };
-        for (initial_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
-        }
-        for (handshake_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
-        }
-        for (installed_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
-        }
-        for (pending_out) |o| {
-            if (o.datagram.len > 0) {
-                socket.send(io, &dest, o.datagram) catch {};
-                allocator.free(o.datagram);
-            }
+        switch (action) {
+            .accept_initial => |initial_accept| {
+                // New connection: create heap-allocated record and accept
+                const handle = next_handle;
+                next_handle += 1;
+                var server_scid: [8]u8 = undefined;
+                io.randomSecure(&server_scid) catch {};
+
+                const record = allocator.create(ServerRecord) catch continue;
+                errdefer allocator.destroy(record);
+                record.* = .{
+                    .handle = handle,
+                    .transport = Tls13ServerTransport.init(allocator, .{
+                        .initial_max_data = 65536,
+                        .initial_max_stream_data = 16384,
+                        .initial_max_streams_bidi = 128,
+                        .initial_max_streams_uni = 128,
+                        .max_datagram_size = max_datagram_size,
+                        .initial_rtt_ms = 100,
+                        .max_idle_timeout_ms = 30000,
+                    }, .{
+                        .alpn = &[_][]const u8{"hq-interop"},
+                        .cert_chain_der = &.{cert_der},
+                        .private_key_bytes = &private_key,
+                        .private_key_algorithm = .ecdsa_p256_sha256,
+                    }) catch {
+                        allocator.destroy(record);
+                        continue;
+                    },
+                };
+                record.transport.connection.validatePeerAddress() catch {};
+                record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
+
+                const initial_info = quicz.protection.peekProtectedLongPacketInfo(received.data) catch {
+                    record.transport.deinit();
+                    allocator.destroy(record);
+                    continue;
+                };
+                record.transport.setOriginalDestinationConnectionId(initial_info.dcid) catch {};
+
+                const accepted = server_endpoint.acceptInitialRecord(
+                    handle,
+                    record,
+                    0,
+                    initial_accept,
+                    &server_scid,
+                    received.data,
+                    .{},
+                    &scratch,
+                    &initial_out,
+                    &handshake_out,
+                ) catch {
+                    record.transport.deinit();
+                    allocator.destroy(record);
+                    continue;
+                };
+                // Send Initial and Handshake responses
+                for (initial_out[0..accepted.initial.drain.datagrams_written]) |o| {
+                    socket.send(io, &dest, o.datagram) catch {};
+                    allocator.free(o.datagram);
+                }
+                if (accepted.handshake) |hs| {
+                    for (handshake_out[0..hs.drain.datagrams_written]) |o| {
+                        socket.send(io, &dest, o.datagram) catch {};
+                        allocator.free(o.datagram);
+                    }
+                }
+            },
+            .routed => {
+                // Existing connection: use regular routing
+                const step = server_endpoint.receiveDatagramStepWithRoutePath(
+                    allocator,
+                    path,
+                    0,
+                    received.data,
+                    &[_]u8{},
+                    &[_]quic_packet.Version{.v1},
+                    .{
+                        .space = .application,
+                        .out = &scratch,
+                        .unpredictable_prefix = &[_]u8{},
+                        .supported_versions = &[_]quic_packet.Version{.v1},
+                    },
+                    &scratch,
+                    &[_]u8{},
+                    &initial_out,
+                    &handshake_out,
+                    &installed_out,
+                    .application,
+                    &pending_out,
+                ) catch continue;
+                // Send response datagrams
+                switch (step.process) {
+                    .routed => |routed| switch (routed) {
+                        .installed_key => |ik| {
+                            for (installed_out[0..ik.drain.datagrams_written]) |o| {
+                                socket.send(io, &dest, o.datagram) catch {};
+                                allocator.free(o.datagram);
+                            }
+                        },
+                        else => {},
+                    },
+                    else => {},
+                }
+                for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
+                    socket.send(io, &dest, o.datagram) catch {};
+                    allocator.free(o.datagram);
+                }
+            },
+            else => {},
         }
     }
 }
