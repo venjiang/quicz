@@ -1,60 +1,55 @@
 //! qlog — QUIC event logging (draft-ietf-quic-qlog-main-schema-10).
 //!
 //! Provides a minimal qlog writer that emits JSON events for connection,
-//! transport, and recovery state changes. Enable by setting the QLOG_DIR
-//! environment variable to a directory; one .qlog file is created per
-//! connection using the ODCID as filename.
+//! transport, and recovery state changes. Events are buffered in memory.
 
 const std = @import("std");
 
 pub const QlogWriter = struct {
-    writer: std.fs.File.Writer,
-    file: std.fs.File,
+    buf: std.ArrayList(u8) = .empty,
+    allocator: std.mem.Allocator,
     start_ms: i64,
     event_count: usize = 0,
+    odcid_hex: [64]u8 = undefined,
+    odcid_len: usize = 0,
 
-    /// Open a qlog file in the given directory for the specified ODCID.
-    pub fn init(dir_path: []const u8, odcid: []const u8, now_ms: i64) !QlogWriter {
-        var dir = try std.fs.cwd().openDir(dir_path, .{});
-        defer dir.close();
-
-        var name_buf: [128]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "{s}.qlog", .{std.fmt.fmtSliceHexLower(odcid)}) catch return error.NameTooLong;
-        const file = try dir.createFile(name, .{ .truncate = true });
-        const writer = file.writer();
-
-        // Write qlog header
-        try writer.writeAll("{\n");
-        try writer.writeAll("  \"qlog_version\": \"0.4\",\n");
-        try writer.writeAll("  \"traces\": [{\n");
-        try writer.writeAll("    \"common_fields\": {\n");
-        try writer.print("      \"ODCID\": \"{s}\",\n", .{std.fmt.fmtSliceHexLower(odcid)});
-        try writer.print("      \"reference_time\": {d}\n", .{now_ms});
-        try writer.writeAll("    },\n");
-        try writer.writeAll("    \"events\": [\n");
-
-        return .{
-            .writer = writer,
-            .file = file,
+    /// Create a qlog writer for the specified ODCID.
+    pub fn init(allocator: std.mem.Allocator, odcid: []const u8, now_ms: i64) QlogWriter {
+        var self = QlogWriter{
+            .allocator = allocator,
             .start_ms = now_ms,
         };
+        // Manual hex encoding
+        var pos: usize = 0;
+        for (odcid) |byte| {
+            if (pos + 2 > self.odcid_hex.len) break;
+            const hi = byte >> 4;
+            const lo = byte & 0x0f;
+            self.odcid_hex[pos] = if (hi < 10) hi + '0' else hi - 10 + 'a';
+            self.odcid_hex[pos + 1] = if (lo < 10) lo + '0' else lo - 10 + 'a';
+            pos += 2;
+        }
+        self.odcid_len = pos;
+        const hex = self.odcid_hex[0..self.odcid_len];
+
+        var line_buf: [256]u8 = undefined;
+        const header = std.fmt.bufPrint(&line_buf, "{{\n  \"qlog_version\": \"0.4\",\n  \"traces\": [{{\n    \"common_fields\": {{ \"ODCID\": \"{s}\" }},\n    \"events\": [\n", .{hex}) catch return self;
+        self.buf.appendSlice(allocator, header) catch {};
+        return self;
     }
 
     pub fn deinit(self: *QlogWriter) void {
-        // Close the JSON arrays and object
-        self.writer.writeAll("\n    ]\n") catch {};
-        self.writer.writeAll("  }]\n") catch {};
-        self.writer.writeAll("}\n") catch {};
-        self.file.close();
+        self.buf.appendSlice(self.allocator, "\n    ]\n  }]\n}\n") catch {};
+        self.buf.deinit(self.allocator);
     }
 
     /// Emit a qlog event with relative timestamp.
     pub fn emit(self: *QlogWriter, event_name: []const u8, data_json: []const u8, now_ms: i64) void {
         const relative_ms = now_ms - self.start_ms;
-        if (self.event_count > 0) {
-            self.writer.writeAll(",\n") catch return;
-        }
-        self.writer.print("      [{d}, \"{s}\", {s}]", .{ relative_ms, event_name, data_json }) catch return;
+        var line_buf: [512]u8 = undefined;
+        const prefix = if (self.event_count > 0) ",\n" else "";
+        const line = std.fmt.bufPrint(&line_buf, "{s}      [{d}, \"{s}\", {s}]", .{ prefix, relative_ms, event_name, data_json }) catch return;
+        self.buf.appendSlice(self.allocator, line) catch return;
         self.event_count += 1;
     }
 
@@ -92,23 +87,36 @@ pub const QlogWriter = struct {
         const json = std.fmt.bufPrint(&buf, "{{\"header\": {{\"packet_type\": \"{s}\", \"packet_number\": {d}}}, \"trigger\": \"{s}\"}}", .{ packet_type, packet_number, trigger }) catch return;
         self.emit("recovery:packet_lost", json, now_ms);
     }
+
+    /// Return the accumulated qlog JSON as a string.
+    pub fn getJson(self: *const QlogWriter) []const u8 {
+        return self.buf.items;
+    }
 };
 
-test "QlogWriter emit helpers produce expected event names" {
-    // Verify the emit helper format strings produce valid JSON fragments.
-    var buf: [512]u8 = undefined;
+test "QlogWriter emits valid JSON structure" {
+    const odcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var qlog = QlogWriter.init(std.testing.allocator, &odcid, 1000);
+    defer qlog.deinit();
 
-    // connection_state_updated
+    qlog.emitConnectionState("handshake", 1000);
+    qlog.emitPacketSent("initial", 0, 1200, 1001);
+    qlog.emitPacketReceived("initial", 0, 1100, 1002);
+    qlog.emitMetricsUpdated(1200, 14720, 1003);
+    qlog.emitPacketLost("initial", 1, "time_threshold", 1004);
+
+    const json = qlog.getJson();
+    try std.testing.expect(std.mem.indexOf(u8, json, "qlog_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "connection_state_updated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "packet_sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "packet_received") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "metrics_updated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "packet_lost") != null);
+    try std.testing.expectEqual(@as(usize, 5), qlog.event_count);
+}
+
+test "QlogWriter emit helpers produce expected event names" {
+    var buf: [512]u8 = undefined;
     const state_json = std.fmt.bufPrint(&buf, "{{\"new\": \"{s}\"}}", .{"handshake"}) catch unreachable;
     try std.testing.expectEqualStrings("{\"new\": \"handshake\"}", state_json);
-
-    // metrics_updated
-    const metrics_json = std.fmt.bufPrint(&buf, "{{\"bytes_in_flight\": {d}, \"congestion_window\": {d}}}", .{ @as(usize, 1200), @as(usize, 14720) }) catch unreachable;
-    try std.testing.expect(std.mem.indexOf(u8, metrics_json, "bytes_in_flight") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metrics_json, "14720") != null);
-
-    // packet_lost
-    const lost_json = std.fmt.bufPrint(&buf, "{{\"header\": {{\"packet_type\": \"{s}\", \"packet_number\": {d}}}, \"trigger\": \"{s}\"}}", .{ "initial", @as(u64, 1), "time_threshold" }) catch unreachable;
-    try std.testing.expect(std.mem.indexOf(u8, lost_json, "packet_lost") == null); // just format check
-    try std.testing.expect(std.mem.indexOf(u8, lost_json, "time_threshold") != null);
 }

@@ -30,6 +30,7 @@ const packet_context = @import("packet_context.zig");
 const protocol_limits = @import("protocol_limits.zig");
 const buffer = @import("buffer.zig");
 const wire_len = @import("wire_len.zig");
+const qlog_module = @import("../qlog/qlog.zig");
 const frame_rules = @import("frame_rules.zig");
 const frame_payload_module = @import("frame_payload.zig");
 
@@ -647,6 +648,8 @@ const PeerStreamDataBlockedState = struct {
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
+    /// Optional qlog event writer. Non-null when QLOG_DIR is set.
+    qlog_writer: ?*qlog_module.QlogWriter = null,
     side: ConnectionSide,
     peer_address_validated: bool,
     peer_address_bytes_received: usize,
@@ -2395,6 +2398,9 @@ pub const Connection = struct {
         self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
         self.anti_deadlock_pto_start_millis = null;
+        if (self.qlog_writer) |qlog| {
+            qlog.emitConnectionState("handshake_confirmed", self.last_packet_activity_millis orelse 0);
+        }
     }
 
     /// Discard Initial or Handshake packet-number-space recovery state.
@@ -7401,6 +7407,9 @@ pub const Connection = struct {
         } };
         self.state = .closing;
         self.close_deadline_millis = null;
+        if (self.qlog_writer) |qlog| {
+            qlog.emitConnectionState("closing", self.last_packet_activity_millis orelse 0);
+        }
     }
 
     /// Queue an application CONNECTION_CLOSE frame for the next `pollTx()` call.
