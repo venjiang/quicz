@@ -207,7 +207,7 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 
 | Phase | Task | Scope | Exit evidence | Status |
 | --- | --- | --- | --- | --- |
-| P3-A | qlog observability | qlog JSON event output for connection/transport/recovery events | QLOG env var produces valid qlog file during interop run | Active |
+| P3-A | qlog observability | qlog JSON event output; src/qlog/qlog.zig module with QlogWriter + 5 emitters created | QLOG env var produces valid qlog file during interop run; connection integration pending | Active |
 | P3-B | RFC 9221 DATAGRAM | QUIC DATAGRAM frame (0x30/0x31) send/receive | Endpoint tests cover DATAGRAM frame encode/decode/delivery | Done |
 | P3-C | CUBIC congestion control | CUBIC implementation alongside NewReno baseline | CUBIC slow-start/congestion-avoidance/recovery tests pass | Next |
 | P3-D | Full QUIC v2 / RFC 9368 | Compatible version negotiation, v2 packet/key/token | VN + v2 handshake tests pass | Next |
