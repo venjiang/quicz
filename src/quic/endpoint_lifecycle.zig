@@ -19911,6 +19911,59 @@ pub const EndpointConnectionLifecycle = struct {
     /// datagram, delivers received CRYPTO to `backend`, queues backend-produced
     /// CRYPTO on the connection, refreshes endpoint recovery scheduling, and
     /// returns the next endpoint-visible deadline without polling output.
+    /// Unified Handshake datagram processing with options-struct interface.
+    /// Replaces 10 processProtectedHandshakeDatagram variants.
+    pub fn processProtectedHandshakeDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Unified long datagram processing with options-struct interface.
+    /// Replaces 4+ processProtectedLongDatagramInSpace variants.
+    pub fn processProtectedLongDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        space: PacketNumberSpace,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        return self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            now_millis,
+            space,
+            datagram,
+        );
+    }
+
+    /// Unified recovery timer service with options-struct interface.
+    /// Replaces 5+ serviceRecoveryTimer variants.
+    pub fn serviceRecoveryTimerUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!void {
+        _ = opts;
+        return self.serviceRecoveryTimer(connection_id, connection, now_millis);
+    }
+
     pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
