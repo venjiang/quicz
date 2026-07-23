@@ -148,3 +148,66 @@ test "stress test config defaults" {
     try std.testing.expect(config.check_leaks);
     try std.testing.expectEqual(@as(u64, 42), config.seed);
 }
+
+test "stress test: 100 connections x 20 ops" {
+    const config = StressConfig{
+        .num_connections = 100,
+        .ops_per_connection = 20,
+        .seed = 789,
+    };
+
+    const result = try runConnectionStressTest(std.testing.allocator, config);
+    try std.testing.expectEqual(@as(usize, 100), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 1800);
+    try std.testing.expect(result.bytes_sent > 0);
+}
+
+test "stress test: 200 connections x 5 ops" {
+    const config = StressConfig{
+        .num_connections = 200,
+        .ops_per_connection = 5,
+        .seed = 101,
+    };
+
+    const result = try runConnectionStressTest(std.testing.allocator, config);
+    try std.testing.expectEqual(@as(usize, 200), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 900);
+    try std.testing.expect(result.bytes_sent > 0);
+}
+
+test "stress test: 500 connections x 2 ops" {
+    const config = StressConfig{
+        .num_connections = 500,
+        .ops_per_connection = 2,
+        .seed = 202,
+    };
+
+    const result = try runConnectionStressTest(std.testing.allocator, config);
+    try std.testing.expectEqual(@as(usize, 500), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 900);
+    try std.testing.expect(result.bytes_sent > 0);
+}
+
+test "stress test: 1000 connections x 1 op" {
+    const config = StressConfig{
+        .num_connections = 1000,
+        .ops_per_connection = 1,
+        .seed = 303,
+    };
+
+    const result = try runConnectionStressTest(std.testing.allocator, config);
+    try std.testing.expectEqual(@as(usize, 1000), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 900);
+    try std.testing.expect(result.bytes_sent > 0);
+}
+
+test "stress test result tracking" {
+    const result = StressResult{};
+    try std.testing.expectEqual(@as(usize, 0), result.connections_created);
+    try std.testing.expectEqual(@as(usize, 0), result.stream_ops_completed);
+    try std.testing.expectEqual(@as(usize, 0), result.bytes_sent);
+    try std.testing.expectEqual(@as(usize, 0), result.bytes_received);
+    try std.testing.expectEqual(@as(usize, 0), result.errors);
+    try std.testing.expectEqual(@as(usize, 0), result.leaks_detected);
+    try std.testing.expectEqual(@as(i64, 0), result.duration_ms);
+}
