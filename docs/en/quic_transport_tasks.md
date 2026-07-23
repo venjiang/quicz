@@ -155,8 +155,8 @@ Work proceeds by main functionality alignment against these stacks.
 
 | Phase | Task | Scope | Exit evidence | Status |
 | --- | --- | --- | --- | --- |
-| P1-A1 | quinn interop handshake+echo | quinn (Rust) certificate-verified handshake, bidi/uni stream echo, close | `zig build run-interop-external` against quinn server: handshake + echo pass | Next |
-| P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry and one loss/PTO case pass against quinn | Next |
+| P1-A1 | quinn interop handshake+echo | quinn (Rust) certificate-verified handshake, bidi/uni stream echo, close | `zig build run-interop-external` against quinn server: handshake + echo pass | Done |
+| P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry and one loss/PTO case pass against quinn | Active |
 | P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Next |
 | P1-C1 | Stream-limit scenarios | MAX_STREAMS exhaustion, stream-count credit race, uni/bidi limit edge | Endpoint tests cover stream-limit exhaustion and credit release under load | Next |
 | P1-C2 | Loss/migration scenarios | Multi-packet loss, persistent congestion, path migration under loss | Endpoint tests cover multi-loss and migration-with-loss sequences | Next |
@@ -169,8 +169,8 @@ Work proceeds by main functionality alignment against these stacks.
 
 | Order | Task | Status | Scope |
 | --- | --- | --- | --- |
-| 1 | P1-A1 quinn interop handshake+echo | Next | Clone quinn, build echo server, run quicz interop client against it |
-| 2 | P1-A2 quinn interop Retry+loss | Next | Extend quinn interop to Retry and loss/PTO scenarios |
+| 1 | P1-A1 quinn interop handshake+echo | Done | Clone quinn, build echo server, run quicz interop client against it |
+| 2 | P1-A2 quinn interop Retry+loss | Active | Extend quinn interop to Retry and loss/PTO scenarios |
 | 3 | P1-B1 Interop-Runner shape | Next | Build interop-runner compatible binary and scenario set |
 | 4 | P1-C1 stream-limit scenarios | Next | Add stream-limit exhaustion and credit race endpoint tests |
 | 5 | P1-C2 loss/migration scenarios | Next | Add multi-loss and migration-with-loss endpoint tests |
