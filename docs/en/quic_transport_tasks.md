@@ -241,7 +241,7 @@ P5 re-entry rule satisfied: P0-P4 complete, 1583 tests pass.
 | P5-C | Interop-Runner compat | Server+client binaries compile (Zig 0.16 adapted); Dockerfile + run_endpoint.sh ready | Docker build + interop-runner handshake/transfer test | Active |
 | P5-D | 0-RTT full flow | Session ticket store, PSK handshake, 0-RTT data send, replay protection | Client resumes session with 0-RTT data; replay rejected | Done |
 | P5-E | Multipath integration | MultipathManager integrated into Connection; multi-path data distribution | Two-path connection: data flows on both paths; failover works | Done |
-| P5-F | Endpoint API migration | Migrate 571 lifecycle variants to options-struct unified interface | API count reduced by >50%; 1583+ tests pass | Active |
+| P5-F | Endpoint API migration | Migrate 571 lifecycle variants to options-struct unified interface | API count reduced by >50%; 1583+ tests pass | Done |
 | P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Active |
 
 ### P5 execution queue
@@ -253,7 +253,7 @@ P5 re-entry rule satisfied: P0-P4 complete, 1583 tests pass.
 | 3 | P5-C Interop-Runner compat | Active | Standard interop test suite |
 | 4 | P5-D 0-RTT full flow | Done | Session resumption |
 | 5 | P5-E Multipath integration | Done | Multi-path data distribution |
-| 6 | P5-F Endpoint API migration | Active | API simplification |
+| 6 | P5-F Endpoint API migration | Done | API simplification |
 | 7 | P5-G Production validation | Active | Stress/soak/leak/interop |
 
 ## Practical Transport Baseline
