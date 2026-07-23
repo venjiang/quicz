@@ -207,8 +207,8 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 
 | Phase | Task | Scope | Exit evidence | Status |
 | --- | --- | --- | --- | --- |
-| P3-A | qlog observability | qlog JSON event output for connection/transport/recovery events | QLOG env var produces valid qlog file during interop run | Next |
-| P3-B | RFC 9221 DATAGRAM | QUIC DATAGRAM frame (0x30/0x31) send/receive | Endpoint tests cover DATAGRAM frame encode/decode/delivery | Next |
+| P3-A | qlog observability | qlog JSON event output for connection/transport/recovery events | QLOG env var produces valid qlog file during interop run | Active |
+| P3-B | RFC 9221 DATAGRAM | QUIC DATAGRAM frame (0x30/0x31) send/receive | Endpoint tests cover DATAGRAM frame encode/decode/delivery | Done |
 | P3-C | CUBIC congestion control | CUBIC implementation alongside NewReno baseline | CUBIC slow-start/congestion-avoidance/recovery tests pass | Next |
 | P3-D | Full QUIC v2 / RFC 9368 | Compatible version negotiation, v2 packet/key/token | VN + v2 handshake tests pass | Next |
 | P3-E | Lifecycle variant merge | Options-struct pattern for OrClose/AndDrain/AndPoll variants | Reduced API count, 1525/1525 tests pass | Next |
@@ -222,8 +222,8 @@ P3 re-entry rule satisfied: P0/P1/P2 stable.
 
 | Order | Task | Status | Scope |
 | --- | --- | --- | --- |
-| 1 | P3-B RFC 9221 DATAGRAM | Next | Smallest extension, self-contained frame type |
-| 2 | P3-A qlog observability | Next | Event logging infrastructure |
+| 1 | P3-B RFC 9221 DATAGRAM | Done | Smallest extension, self-contained frame type |
+| 2 | P3-A qlog observability | Active | Event logging infrastructure |
 | 3 | P3-C CUBIC congestion control | Next | Congestion control algorithm |
 | 4 | P3-D Full QUIC v2 | Next | Version negotiation |
 | 5 | P3-E Lifecycle variant merge | Next | API simplification |
