@@ -17931,6 +17931,55 @@ pub const EndpointConnectionLifecycle = struct {
     /// lifecycle refreshes recovery state after receive and returns the next
     /// endpoint-visible deadline without polling ACK, STREAM, close, or PTO
     /// output.
+    /// Unified protected short datagram processing with options-struct interface.
+    ///
+    /// Replaces 5 processProtectedShortDatagram variants:
+    ///   processProtectedShortDatagram
+    ///   processProtectedShortDatagramOrClose
+    ///   processProtectedShortDatagramWithInstalledKeys
+    ///   processProtectedShortDatagramWithInstalledKeysOrClose
+    ///   processProtectedShortDatagramWithKeyUpdate
+    pub fn processProtectedShortDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        return self.processProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+        );
+    }
+
+    /// Unified routed protected short datagram processing with options-struct interface.
+    ///
+    /// Replaces 5 processRoutedProtectedShortDatagram variants.
+    pub fn processRoutedProtectedShortDatagramUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+        );
+    }
+
     pub fn processProtectedShortDatagramAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
