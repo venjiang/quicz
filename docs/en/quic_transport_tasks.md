@@ -238,11 +238,11 @@ P5 re-entry rule satisfied: P0-P4 complete, 1583 tests pass.
 | --- | --- | --- | --- | --- |
 | P5-A | UDP I/O event loop | Non-blocking UDP socket event loop via Zig std.Io; multi-connection concurrent send/receive; timer-driven PTO/idle/close | Event loop test: 2 connections handshake + echo concurrently over real UDP | Done |
 | P5-B | HTTP/3 request/response | H3 request/response over QUIC streams; stream lifecycle; GOAWAY graceful close; SETTINGS exchange | H3 client sends GET, server responds 200 with body; GOAWAY closes cleanly | Done |
-| P5-C | Interop-Runner compat | Server+client binaries compile (Zig 0.16 adapted); Dockerfile + run_endpoint.sh ready | Docker build + interop-runner handshake/transfer test | Active |
+| P5-C | Interop-Runner compat | Server+client binaries compile (Zig 0.16 adapted); Dockerfile + run_endpoint.sh ready | Docker build + interop-runner handshake/transfer test | Blocked (Docker Hub network unavailable) |
 | P5-D | 0-RTT full flow | Session ticket store, PSK handshake, 0-RTT data send, replay protection | Client resumes session with 0-RTT data; replay rejected | Done |
 | P5-E | Multipath integration | MultipathManager integrated into Connection; multi-path data distribution | Two-path connection: data flows on both paths; failover works | Done |
 | P5-F | Endpoint API migration | Migrate 571 lifecycle variants to options-struct unified interface | API count reduced by >50%; 1583+ tests pass | Done |
-| P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Active |
+| P5-G | Production validation | Stress test, long-running, memory leak detection, real network interop | 10K concurrent connections; 1hr soak; zero leaks; quic-go interop | Partial (stress+leak+soak done, real network pending) |
 
 ### P5 execution queue
 
