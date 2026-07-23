@@ -97,6 +97,27 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_interop_external_client);
 
+
+    // zig build run-fuzz — run the fuzz harness
+    const exe_fuzz = b.addExecutable(.{
+        .name = "quicz-fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_fuzz);
+    const run_fuzz = b.step("run-fuzz", "Run QUIC fuzz harness");
+    const run_fuzz_cmd = b.addRunArtifact(exe_fuzz);
+    run_fuzz.dependOn(&run_fuzz_cmd.step);
+    if (b.args) |args| {
+        run_fuzz_cmd.addArgs(args);
+    }
+
     // Codec roundtrip executable
     const exe_codec = b.addExecutable(.{
         .name = "quicz-codec-roundtrip",
