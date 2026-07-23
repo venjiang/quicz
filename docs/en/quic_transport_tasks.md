@@ -268,9 +268,9 @@ P6 re-entry rule: P0-P5 complete, 1611 tests pass.
 | P6-C | Advanced congestion control | BBR algorithm; CUBIC production hardening; algorithm switch API | BBR and CUBIC selectable at connection start; both pass loss/recovery tests | Done |
 | P6-D | Interop-Runner full coverage | retry, multiplexing, chacha20, keyupdate, v2 testcases | All standard interop testcases pass in Docker | Done |
 | P6-E | QUIC Datagram extension | RFC 9221 DATAGRAM frames; unreliable data API | Datagram send/receive over QUIC; loss does not block streams | Done |
-| P6-F | Performance optimization | GSO/GRO batch UDP; zero-copy send; connection pool | Batch send/receive test; pool reuse test | Active |
-| P6-G | Observability production | qlog full events; connection metrics; error tracking | qlog output for handshake+transfer; metrics queryable | Pending |
-| P6-H | WebTransport over HTTP/3 | Bidirectional streams + datagrams over H3 | WT client opens bidi stream; echo works; WT datagram roundtrip | Pending |
+| P6-F | Performance optimization | GSO/GRO batch UDP; zero-copy send; connection pool | Batch send/receive test; pool reuse test | Done |
+| P6-G | Observability production | qlog full events; connection metrics; error tracking | qlog output for handshake+transfer; metrics queryable | Done |
+| P6-H | WebTransport over HTTP/3 | Bidirectional streams + datagrams over H3 | WT client opens bidi stream; echo works; WT datagram roundtrip | Done |
 
 ### P6 execution queue
 
@@ -281,9 +281,9 @@ P6 re-entry rule: P0-P5 complete, 1611 tests pass.
 | 3 | P6-C Advanced congestion control | Done | BBR + CUBIC production |
 | 4 | P6-D Interop-Runner full coverage | Done | All testcases |
 | 5 | P6-E QUIC Datagram extension | Done | RFC 9221 |
-| 6 | P6-F Performance optimization | Active | GSO/GRO/pool |
-| 7 | P6-G Observability production | Pending | qlog/metrics |
-| 8 | P6-H WebTransport | Pending | WT over H3 |
+| 6 | P6-F Performance optimization | Done | GSO/GRO/pool |
+| 7 | P6-G Observability production | Done | qlog/metrics |
+| 8 | P6-H WebTransport | Done | WT over H3 |
 ## Practical Transport Baseline
 
 | Feature | Practical target | quicz status |

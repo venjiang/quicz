@@ -146,9 +146,9 @@ P6 进入条件：P0-P5 完成，1611 测试通过。
 | P6-C | 高级拥塞控制 | BBR 算法；CUBIC 生产加固；算法切换 API | BBR/CUBIC 连接启动时可选；均通过丢包/恢复测试 | Done |
 | P6-D | Interop-Runner 完整覆盖 | retry/multiplexing/chacha20/keyupdate/v2 | Docker 中全部标准 testcase 通过 | Done |
 | P6-E | QUIC Datagram 扩展 | RFC 9221 DATAGRAM 帧；不可靠数据 API | Datagram 收发正常；丢包不阻塞 stream | Done |
-| P6-F | 性能优化 | GSO/GRO 批量 UDP；零拷贝发送；连接池 | 批量收发测试；连接池复用测试 | Active |
-| P6-G | 可观测性生产化 | qlog 完整事件；连接指标；错误追踪 | qlog 输出握手+传输；指标可查询 | Pending |
-| P6-H | WebTransport over HTTP/3 | 双向流 + datagram over H3 | WT client 开双向流；echo 正常；WT datagram 往返 | Pending |
+| P6-F | 性能优化 | GSO/GRO 批量 UDP；零拷贝发送；连接池 | 批量收发测试；连接池复用测试 | Done |
+| P6-G | 可观测性生产化 | qlog 完整事件；连接指标；错误追踪 | qlog 输出握手+传输；指标可查询 | Done |
+| P6-H | WebTransport over HTTP/3 | 双向流 + datagram over H3 | WT client 开双向流；echo 正常；WT datagram 往返 | Done |
 ## 实用 Transport 基线
 
 | 功能 | 实用目标 | quicz 状态 |
