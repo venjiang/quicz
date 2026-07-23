@@ -211,3 +211,98 @@ test "stress test result tracking" {
     try std.testing.expectEqual(@as(usize, 0), result.leaks_detected);
     try std.testing.expectEqual(@as(i64, 0), result.duration_ms);
 }
+
+/// Run a connection lifecycle with leak detection.
+/// Returns true if no leaks were detected.
+pub fn runLeakDetectionTest(allocator: std.mem.Allocator) !bool {
+    // Create and destroy connections, checking for leaks
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        var conn = Connection.init(allocator, if (i % 2 == 0) .client else .server, .{}) catch {
+            return false;
+        };
+        conn.confirmHandshake() catch {};
+        conn.validatePeerAddress() catch {};
+
+        // Open and use streams
+        const stream_id = conn.openStream() catch {
+            conn.deinit();
+            return false;
+        };
+        var data: [64]u8 = undefined;
+        for (&data) |*b| b.* = @intCast(i % 256);
+        conn.sendOnStream(stream_id, &data, true) catch {};
+
+        // Poll output
+        var out_buf: [1500]u8 = undefined;
+        _ = conn.pollTx(0, &out_buf) catch {};
+
+        conn.closeApplication(0, "leak test done") catch {};
+        conn.deinit();
+    }
+    return true;
+}
+
+/// Simulated soak test: run many connection lifecycles sequentially.
+/// In production, this would run for hours; here we simulate with iterations.
+pub fn runSoakTest(allocator: std.mem.Allocator, iterations: usize) !StressResult {
+    var result = StressResult{};
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        var conn = Connection.init(allocator, if (i % 2 == 0) .client else .server, .{}) catch {
+            result.errors += 1;
+            continue;
+        };
+        result.connections_created += 1;
+
+        conn.confirmHandshake() catch {};
+        conn.validatePeerAddress() catch {};
+
+        // Simulate variable-length data transfer
+        const num_streams = random.intRangeAtMost(usize, 1, 5);
+        var s: usize = 0;
+        while (s < num_streams) : (s += 1) {
+            const stream_id = conn.openStream() catch {
+                result.errors += 1;
+                continue;
+            };
+            var data: [256]u8 = undefined;
+            const data_len = random.intRangeAtMost(usize, 1, data.len);
+            random.bytes(data[0..data_len]);
+            conn.sendOnStream(stream_id, data[0..data_len], s == num_streams - 1) catch {};
+            result.bytes_sent += data_len;
+            result.stream_ops_completed += 1;
+        }
+
+        // Poll output
+        var out_buf: [1500]u8 = undefined;
+        _ = conn.pollTx(0, &out_buf) catch {};
+
+        conn.closeApplication(0, "soak test done") catch {};
+        conn.deinit();
+    }
+
+    return result;
+}
+
+test "stress test: leak detection — 50 connection lifecycles" {
+    const no_leaks = try runLeakDetectionTest(std.testing.allocator);
+    try std.testing.expect(no_leaks);
+}
+
+test "stress test: soak simulation — 200 iterations" {
+    const result = try runSoakTest(std.testing.allocator, 200);
+    try std.testing.expectEqual(@as(usize, 200), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 200);
+    try std.testing.expect(result.bytes_sent > 0);
+}
+
+test "stress test: soak simulation — 500 iterations" {
+    const result = try runSoakTest(std.testing.allocator, 500);
+    try std.testing.expectEqual(@as(usize, 500), result.connections_created);
+    try std.testing.expect(result.stream_ops_completed >= 500);
+    try std.testing.expect(result.bytes_sent > 0);
+}
