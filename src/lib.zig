@@ -11,8 +11,8 @@ pub const transport_parameters = @import("quic/transport_parameters.zig");
 const transport_types = @import("quic/transport_types.zig");
 const crypto_types = @import("quic/crypto_types.zig");
 const tls_backend_module = @import("quic/tls_backend.zig");
-pub const tls13 = @import("quic/tls13.zig");
-pub const tls13_backend = @import("quic/tls13_backend.zig");
+pub const tls13 = @import("quic/tls/tls13.zig");
+pub const tls13_backend = @import("quic/tls/tls13_backend.zig");
 comptime {
     // Keep tls13 reachable so its tests run under `zig build test`.
     _ = tls13;
@@ -276,7 +276,7 @@ test {
     _ = endpoint_connection_registry_module;
 }
 
-const tls13_client_transport_module = @import("quic/tls13_client_transport.zig");
+const tls13_client_transport_module = @import("quic/tls/tls13_client_transport.zig");
 pub const Tls13ClientTransport = tls13_client_transport_module.Tls13ClientTransport;
 test {
     _ = tls13_client_transport_module;
@@ -288,7 +288,7 @@ test {
     _ = tls13_client_endpoint_module;
 }
 
-const tls13_server_transport_module = @import("quic/tls13_server_transport.zig");
+const tls13_server_transport_module = @import("quic/tls/tls13_server_transport.zig");
 pub const Tls13ServerTransport = tls13_server_transport_module.Tls13ServerTransport;
 test {
     _ = tls13_server_transport_module;

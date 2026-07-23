@@ -15,9 +15,9 @@ const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
 const frame = @import("frame.zig");
 const quic_packet = @import("packet.zig");
 const protection = @import("protection.zig");
-const tls13 = @import("tls13.zig");
+const tls13 = @import("tls/tls13.zig");
 const tls13_client_endpoint = @import("tls13_client_endpoint.zig");
-const tls13_server_transport = @import("tls13_server_transport.zig");
+const tls13_server_transport = @import("tls/tls13_server_transport.zig");
 
 const Connection = connection_module.Connection;
 const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
