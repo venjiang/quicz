@@ -24,6 +24,7 @@ pub const h3_server = @import("h3/server.zig");
 pub const h3_client = @import("h3/client.zig");
 const h3_integration_test = @import("h3/h3_integration_test.zig");
 const quic_v2_test = @import("quic/quic_v2_test.zig");
+const interop_coverage_test = @import("quic/interop_coverage_test.zig");
 pub const multipath = @import("quic/multipath.zig");
 pub const lifecycle_options = @import("quic/lifecycle_options.zig");
 pub const session_cache = @import("quic/session_cache.zig");
@@ -49,6 +50,7 @@ comptime {
     _ = h3_client;
     _ = h3_integration_test;
     _ = quic_v2_test;
+    _ = interop_coverage_test;
     _ = multipath;
     _ = lifecycle_options;
     _ = session_cache;
