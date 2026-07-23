@@ -7,15 +7,23 @@ notes are in [`spec.md`](spec.md).
 
 ## Current Scope
 
-quicz currently focuses on the QUIC transport core: connection state, packet
-protection, CRYPTO/STREAM frames, transport parameters, ACK/loss/PTO,
-congestion control, connection IDs, path validation, Retry, stateless reset,
-and endpoint lifecycle. TLS is integrated through a narrow adapter around an
-external C TLS library. quicz does not implement TLS in-tree.
+quicz implements the IETF QUIC transport protocol (RFC 8999/9000/9001/9002)
+in pure Zig with a pure Zig TLS 1.3 implementation. The project covers:
+
+- **QUIC transport core**: connection state, packet protection, frames,
+  transport parameters, ACK/loss/PTO, congestion control (NewReno + CUBIC),
+  connection IDs, path validation, Retry, stateless reset, endpoint lifecycle.
+- **Pure Zig TLS 1.3** (): handshake state machine, key schedule,
+  certificate verification, ALPN, QUIC transport parameters extension.
+- **HTTP/3** (): frame codec (RFC 9114), QPACK header compression
+  (RFC 9204), connection/stream management.
+- **Extensions**: RFC 9221 DATAGRAM, DPLPMTUD (RFC 8899), multipath path
+  management, connection migration with anti-amplification, 0-RTT session
+  cache, GSO/GRO segmentation, qlog observability.
+- **Interop**: verified against quic-go (Go) and quinn (Rust).
 
 In this document, "core protocol flow" means internal transport state changes.
-It does not refer to an application domain. HTTP/3, QPACK, DATAGRAM, the full
-interop matrix, and a production socket API remain tracked in the task plan.
+It does not refer to an application domain.
 
 ## Key Terms
 
@@ -53,6 +61,11 @@ interop matrix, and a production socket API remain tracked in the task plan.
   verify TLS callbacks, transport-parameter bytes, traffic secrets, and CRYPTO
   handoff. It is internal verification evidence, not user logging and not a
   full packet capture format.
+
+
+## Module Map
+
+
 
 ## System Architecture
 
