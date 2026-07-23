@@ -16,6 +16,7 @@ pub const qlog = @import("qlog/qlog.zig");
 pub const cubic = @import("quic/cubic.zig");
 pub const pmtu = @import("quic/pmtu.zig");
 pub const h3 = @import("h3/frame.zig");
+pub const qpack = @import("h3/qpack.zig");
 pub const multipath = @import("quic/multipath.zig");
 pub const tls13_backend = @import("quic/tls13_backend.zig");
 comptime {
@@ -25,6 +26,7 @@ comptime {
     _ = cubic;
     _ = pmtu;
     _ = h3;
+    _ = qpack;
     _ = multipath;
     _ = tls13_backend;
 }
