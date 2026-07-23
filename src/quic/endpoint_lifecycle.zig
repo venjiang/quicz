@@ -8059,37 +8059,6 @@ pub const EndpointConnectionLifecycle = struct {
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
         };
     }
-
-    /// Drive one close-propagating backend across ordered packet number spaces,
-    /// then select the next endpoint-visible deadline.
-    ///
-    /// This is the single-connection form of
-    /// `driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline()`.
-    pub fn driveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        spaces: []const PacketNumberSpace,
-        backend: CryptoBackend,
-        scratch: []u8,
-    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        const drive_views = [_]EndpointCryptoBackendDriveView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-            .backend = backend,
-            .scratch = scratch,
-        }};
-        const deadline_connections = [_]EndpointConnectionView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-        }};
-        return self.driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
-            spaces,
-            &drive_views,
-            &deadline_connections,
-        );
-    }
-
     /// Drive one backend, then select the next endpoint-visible deadline.
     ///
     /// This is the single-connection no-output backend-drive step for simple
@@ -10113,92 +10082,6 @@ pub const EndpointConnectionLifecycle = struct {
             .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
-
-    /// Drive compatible-version close-propagating backends across ordered
-    /// packet number spaces, then poll explicit installed-key output.
-    pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
-        self: *EndpointConnectionLifecycle,
-        spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionInstalledKeyPollView,
-        now_millis: i64,
-    ) Error!EndpointCryptoBackendDriveDatagramResult {
-        var backend = EndpointCryptoBackendDriveSweepResult{};
-        for (drive_views) |view| {
-            const progress = self.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection(
-                view.connection_id,
-                view.connection,
-                spaces,
-                view.backend,
-                view.scratch,
-                compatibilities,
-            ) catch |err| {
-                if (err != error.InvalidPacket or view.connection.connectionState() != .closing) return err;
-                return .{
-                    .backend = backend,
-                    .datagram = try self.pollDatagramWithInstalledKeyOptionsForBackendClose(
-                        view.connection_id,
-                        poll_views,
-                        now_millis,
-                    ),
-                    .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
-                };
-            };
-            accumulateCryptoBackendProgress(&backend, progress);
-        }
-        const retained_handshake_spaces_before_poll =
-            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
-            poll_views,
-            now_millis,
-        );
-        markHandshakeSpaceDiscardedIfCountDrops(
-            &backend.progress,
-            retained_handshake_spaces_before_poll,
-            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
-        );
-        return .{
-            .backend = backend,
-            .datagram = datagram,
-            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
-        };
-    }
-
-    /// Drive one compatible-version close-propagating backend across ordered
-    /// packet number spaces, then poll installed-key output.
-    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        spaces: []const PacketNumberSpace,
-        backend: CryptoBackend,
-        scratch: []u8,
-        compatibilities: []const VersionCompatibility,
-        now_millis: i64,
-        poll_options: EndpointPollInstalledKeyDatagramOptions,
-    ) Error!EndpointCryptoBackendDriveDatagramResult {
-        const drive_views = [_]EndpointCryptoBackendDriveView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-            .backend = backend,
-            .scratch = scratch,
-        }};
-        const poll_views = [_]EndpointConnectionPollView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-            .destination_connection_id = poll_options.destination_connection_id,
-            .source_connection_id = poll_options.source_connection_id,
-        }};
-        return self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-            spaces,
-            &drive_views,
-            compatibilities,
-            &poll_views,
-            now_millis,
-            poll_options.space,
-        );
-    }
     /// Drive compatible-version close-propagating backends across ordered
     /// packet number spaces, then drain installed-key output.
     pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams(
@@ -11171,44 +11054,6 @@ pub const EndpointConnectionLifecycle = struct {
             ),
         };
     }
-
-    /// Process pending work, drive one backend across ordered packet number
-    /// spaces, then select the next endpoint-visible deadline.
-    ///
-    /// This is the single-connection form of
-    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline()`.
-    pub fn processPendingWorkAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        backend: CryptoBackend,
-        scratch: []u8,
-    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
-        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
-        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
-        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
-            return .{
-                .pending_work = pending_sweep,
-                .backend = .{
-                    .backend = .{},
-                    .next_deadline = self.nextDeadline(connection_id, connection),
-                },
-            };
-        }
-
-        return .{
-            .pending_work = pending_sweep,
-            .backend = try self.driveCryptoBackendAcrossSpacesAndSelectNextDeadline(
-                connection_id,
-                connection,
-                backend_spaces,
-                backend,
-                scratch,
-            ),
-        };
-    }
     /// Process pending work, drive crypto backends, then poll installed-key output.
     ///
     /// This is the no-new-datagram socket-loop step: timers and close/idle
@@ -11545,35 +11390,6 @@ pub const EndpointConnectionLifecycle = struct {
             ),
         };
     }
-
-    /// Process pending work, drive close-propagating crypto backends across
-    /// ordered packet number spaces, then poll explicit output.
-    ///
-    /// This is the close-on-error form of
-    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`.
-    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
-        self: *EndpointConnectionLifecycle,
-        pending_connections: []const EndpointConnectionReceiveView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        poll_views: []const EndpointConnectionInstalledKeyPollView,
-    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
-        const pending_work = try self.processPendingWorkAcrossConnections(
-            pending_connections,
-            now_millis,
-        );
-        return .{
-            .pending_work = pending_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
-                backend_spaces,
-                drive_views,
-                poll_views,
-                now_millis,
-            ),
-        };
-    }
-
     /// Process pending work, drive close-propagating backends, then drain output.
     ///
     /// Backend peer transport-parameter errors return before output draining.
@@ -11628,38 +11444,6 @@ pub const EndpointConnectionLifecycle = struct {
                 drive_views,
                 poll_views,
                 now_millis,
-                out,
-            ),
-        };
-    }
-
-    /// Process pending work, drive close-propagating crypto backends across
-    /// ordered packet number spaces, then drain output.
-    ///
-    /// This is the bounded-output form of
-    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram()`.
-    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        pending_connections: []const EndpointConnectionReceiveView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
-        const pending_work = try self.processPendingWorkAcrossConnections(
-            pending_connections,
-            now_millis,
-        );
-        return .{
-            .pending_work = pending_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                poll_views,
-                now_millis,
-                poll_space,
                 out,
             ),
         };
@@ -11901,37 +11685,6 @@ pub const EndpointConnectionLifecycle = struct {
             ),
         };
     }
-
-    /// Process pending work, drive compatible-version backends across ordered
-    /// packet number spaces, then drain output.
-    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        pending_connections: []const EndpointConnectionReceiveView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
-        const pending_work = try self.processPendingWorkAcrossConnections(
-            pending_connections,
-            now_millis,
-        );
-        return .{
-            .pending_work = pending_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
-                out,
-            ),
-        };
-    }
     /// Process pending work, drive compatible-version close path, then select a deadline.
     ///
     /// Peer Version Information errors queue CONNECTION_CLOSE and return before
@@ -12078,65 +11831,6 @@ pub const EndpointConnectionLifecycle = struct {
                 compatibilities,
                 poll_views,
                 now_millis,
-                out,
-            ),
-        };
-    }
-
-    /// Process pending work, drive close-propagating compatible-version backends
-    /// across ordered packet number spaces, then poll output.
-    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-        self: *EndpointConnectionLifecycle,
-        pending_connections: []const EndpointConnectionReceiveView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
-        const pending_work = try self.processPendingWorkAcrossConnections(
-            pending_connections,
-            now_millis,
-        );
-        return .{
-            .pending_work = pending_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
-            ),
-        };
-    }
-    /// Process pending work, drive close-propagating compatible-version backends
-    /// across ordered packet number spaces, then drain output.
-    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        pending_connections: []const EndpointConnectionReceiveView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
-        const pending_work = try self.processPendingWorkAcrossConnections(
-            pending_connections,
-            now_millis,
-        );
-        return .{
-            .pending_work = pending_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
                 out,
             ),
         };
@@ -13895,42 +13589,6 @@ pub const EndpointConnectionLifecycle = struct {
                 connection_id,
                 connection,
                 backend_space,
-                backend,
-                scratch,
-            ),
-        };
-    }
-
-    /// Process one due deadline, drive one backend across ordered packet number
-    /// spaces, then select a deadline.
-    ///
-    /// This is the cross-space form of
-    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`.
-    pub fn processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        backend: CryptoBackend,
-        scratch: []u8,
-    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
-        const due_work = (try self.processDueDeadlineAndSelectNextDeadline(
-            connection_id,
-            connection,
-            now_millis,
-        )) orelse return null;
-        if (due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendAcrossSpacesAndSelectNextDeadline(
-                connection_id,
-                connection,
-                backend_spaces,
                 backend,
                 scratch,
             ),
@@ -16109,41 +15767,6 @@ pub const EndpointConnectionLifecycle = struct {
             ),
         };
     }
-
-    /// Process the earliest due deadline with explicit output, then drive
-    /// close-propagating TLS backends across ordered packet number spaces.
-    ///
-    /// This is the cross-space form of
-    /// `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`.
-    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
-        self: *EndpointConnectionLifecycle,
-        deadline_connections: []const EndpointConnectionInstalledKeyPollView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        poll_views: []const EndpointConnectionInstalledKeyPollView,
-    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
-        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
-            deadline_connections,
-            now_millis,
-        )) orelse return null;
-        if (due_work.datagram != null or
-            due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
-                backend_spaces,
-                drive_views,
-                poll_views,
-                now_millis,
-            ),
-        };
-    }
-
     /// Process the earliest due deadline, then drive close-propagating backends and drain output.
     pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
@@ -16208,44 +15831,6 @@ pub const EndpointConnectionLifecycle = struct {
                 drive_views,
                 poll_views,
                 now_millis,
-                out,
-            ),
-        };
-    }
-
-    /// Process the earliest due deadline, then drive close-propagating TLS
-    /// backends across ordered packet number spaces and drain output.
-    ///
-    /// This is the bounded-output form of
-    /// `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram()`.
-    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        deadline_connections: []const EndpointConnectionPollView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
-        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
-            deadline_connections,
-            now_millis,
-        )) orelse return null;
-        if (due_work.datagram != null or
-            due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                poll_views,
-                now_millis,
-                poll_space,
                 out,
             ),
         };
@@ -16602,113 +16187,6 @@ pub const EndpointConnectionLifecycle = struct {
                 compatibilities,
                 poll_views,
                 now_millis,
-            ),
-        };
-    }
-
-    /// Process the earliest due deadline, then drive compatible-version backends
-    /// across ordered packet number spaces and drain output.
-    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        deadline_connections: []const EndpointConnectionPollView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
-        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
-            deadline_connections,
-            now_millis,
-        )) orelse return null;
-        if (due_work.datagram != null or
-            due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
-                out,
-            ),
-        };
-    }
-    /// Process the earliest due deadline, then drive close-propagating compatible-version
-    /// backends across ordered packet number spaces and poll output.
-    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-        self: *EndpointConnectionLifecycle,
-        deadline_connections: []const EndpointConnectionPollView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
-        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
-            deadline_connections,
-            now_millis,
-        )) orelse return null;
-        if (due_work.datagram != null or
-            due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
-            ),
-        };
-    }
-    /// Process the earliest due deadline, then drive close-propagating compatible-version
-    /// backends across ordered packet number spaces and drain output.
-    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams(
-        self: *EndpointConnectionLifecycle,
-        deadline_connections: []const EndpointConnectionPollView,
-        now_millis: i64,
-        backend_spaces: []const PacketNumberSpace,
-        drive_views: []const EndpointCryptoBackendDriveView,
-        compatibilities: []const VersionCompatibility,
-        poll_views: []const EndpointConnectionPollView,
-        poll_space: EndpointInstalledKeyDatagramSpace,
-        out: []EndpointPolledDatagramResult,
-    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
-        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
-            deadline_connections,
-            now_millis,
-        )) orelse return null;
-        if (due_work.datagram != null or
-            due_work.pending_work.idle_retired != null or
-            due_work.pending_work.close_retired != null)
-        {
-            return .{ .due_work = due_work };
-        }
-        return .{
-            .due_work = due_work,
-            .backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams(
-                backend_spaces,
-                drive_views,
-                compatibilities,
-                poll_views,
-                now_millis,
-                poll_space,
-                out,
             ),
         };
     }
@@ -17673,34 +17151,6 @@ pub const EndpointConnectionLifecycle = struct {
         );
         return route;
     }
-
-    /// Route and process one caller-keyed Initial/Handshake datagram with close propagation.
-    ///
-    /// This keeps endpoint route validation on the lifecycle owner and delegates
-    /// authenticated frame-payload peer errors to the connection close path.
-    pub fn processRoutedProtectedLongDatagramInSpaceOrClose(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        space: PacketNumberSpace,
-        path: endpoint.Udp4Tuple,
-        now_millis: i64,
-        keys: protection.Aes128PacketProtectionKeys,
-        datagram: []const u8,
-    ) EndpointProtectedDatagramError!endpoint.RouteResult {
-        const route = try self.routeDatagram(path, datagram);
-        if (route.connection_id != connection_id) return error.InvalidPacket;
-        try self.processProtectedLongDatagramInSpaceOrClose(
-            connection_id,
-            connection,
-            space,
-            now_millis,
-            keys,
-            datagram,
-        );
-        return route;
-    }
-
     /// Route caller-keyed long-header input, drive backend, and drain output.
     ///
     /// This is the routed socket-loop form of
@@ -18580,31 +18030,6 @@ pub const EndpointConnectionLifecycle = struct {
         );
         return self.nextDeadline(connection_id, connection);
     }
-
-    /// Process caller-keyed 1-RTT input with close propagation and select a wakeup.
-    ///
-    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
-    /// return before ordinary wakeup selection.
-    pub fn processProtectedShortDatagramOrCloseAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        receive_keys: protection.Aes128PacketProtectionKeys,
-        dcid_len: usize,
-        datagram: []const u8,
-    ) Error!?EndpointConnectionDeadline {
-        try self.processProtectedShortDatagramOrClose(
-            connection_id,
-            connection,
-            now_millis,
-            receive_keys,
-            dcid_len,
-            datagram,
-        );
-        return self.nextDeadline(connection_id, connection);
-    }
-
     /// Route caller-keyed 1-RTT input and select the next wakeup.
     ///
     /// Route errors and connection-id mismatches fail before packet processing.
@@ -19087,31 +18512,6 @@ pub const EndpointConnectionLifecycle = struct {
         );
         return self.nextDeadline(connection_id, connection);
     }
-
-    /// Process explicit key-update 1-RTT input with close propagation and select a wakeup.
-    ///
-    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
-    /// return before ordinary wakeup selection.
-    pub fn processProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        receive_keys: protection.ShortPacketKeyUpdateKeys,
-        dcid_len: usize,
-        datagram: []const u8,
-    ) Error!?EndpointConnectionDeadline {
-        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
-            connection_id,
-            connection,
-            now_millis,
-            receive_keys,
-            dcid_len,
-            datagram,
-        );
-        return self.nextDeadline(connection_id, connection);
-    }
-
     /// Route explicit key-update 1-RTT input and select the next wakeup.
     ///
     /// Route errors and connection-id mismatches fail before packet processing.
@@ -19607,32 +19007,6 @@ pub const EndpointConnectionLifecycle = struct {
         );
         return self.nextDeadline(connection_id, connection);
     }
-
-    /// Process caller-owned key-phase 1-RTT input with close propagation and select a wakeup.
-    ///
-    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE,
-    /// preserve caller-owned key-phase state, and return before ordinary
-    /// wakeup selection.
-    pub fn processProtectedShortDatagramWithKeyPhaseStateOrCloseAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        receive_key_phase_state: *protection.Aes128KeyPhaseState,
-        dcid_len: usize,
-        datagram: []const u8,
-    ) Error!?EndpointConnectionDeadline {
-        try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
-            connection_id,
-            connection,
-            now_millis,
-            receive_key_phase_state,
-            dcid_len,
-            datagram,
-        );
-        return self.nextDeadline(connection_id, connection);
-    }
-
     /// Route caller-owned key-phase 1-RTT input and select the next wakeup.
     ///
     /// Route errors and connection-id mismatches fail before packet processing
@@ -21484,30 +20858,6 @@ pub const EndpointConnectionLifecycle = struct {
         );
         return self.nextDeadline(connection_id, connection);
     }
-
-    /// Process one installed-key 1-RTT datagram with close propagation and select a wakeup.
-    ///
-    /// Authenticated frame-payload errors queue CONNECTION_CLOSE and return
-    /// before wakeup selection. Successful receive uses the same no-output
-    /// scheduling contract as the non-close-propagating path.
-    pub fn processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline(
-        self: *EndpointConnectionLifecycle,
-        connection_id: u64,
-        connection: *Connection,
-        now_millis: i64,
-        dcid_len: usize,
-        datagram: []const u8,
-    ) Error!?EndpointConnectionDeadline {
-        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
-            connection_id,
-            connection,
-            now_millis,
-            dcid_len,
-            datagram,
-        );
-        return self.nextDeadline(connection_id, connection);
-    }
-
     /// Route/process one installed-key 1-RTT datagram and select the next wakeup.
     ///
     /// Route errors and connection-id mismatches fail before packet processing.
