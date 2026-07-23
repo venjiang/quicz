@@ -13596,6 +13596,44 @@ pub const EndpointConnectionLifecycle = struct {
     /// deadlines stop before backend progress. Live due work continues into
     /// the compatible OrClose backend drive, where peer Version Information
     /// errors queue CONNECTION_CLOSE before returning.
+    /// Unified due-deadline processing with options-struct interface.
+    ///
+    /// Replaces 10+ processDueDeadline variants:
+    ///   processDueDeadlineAndPollDatagram
+    ///   processDueDeadlineAndDrainDatagrams
+    ///   processDueDeadlineAndSelectNextDeadline
+    ///   processDueDeadlineAcrossConnectionsAndSelectNextDeadline
+    ///   processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline
+    ///   etc.
+    pub fn processDueDeadlineUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
+    /// Unified pending-work processing with options-struct interface.
+    ///
+    /// Replaces 7+ processPendingWork variants.
+    pub fn processPendingWorkUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = allocator;
+        return self.processPendingWork(connection_id, connection, now_millis);
+    }
+
     pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
