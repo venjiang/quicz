@@ -94,7 +94,7 @@ P0 gates below are complete:
 | P0-D4 | Path validation and single-path migration | RFC 9000 path validation and migration | Endpoint route update seam | PATH_CHALLENGE/PATH_RESPONSE and validated route migration work through endpoint state; failed validation is non-committing. | Done |
 | P0-E1 | TLS rollback closure | RFC 9001 plus TLS 1.3 handshake inputs used by QUIC | `tls13.zig`, `tls13_backend.zig` | Certificate, SNI, ALPN, transport-parameter, key-share, transcript, Finished, ticket, and backend failures do not expose partially committed QUIC state. | Done |
 | P0-E2 | QUIC key phase handling | RFC 9001 1-RTT key update and key discard | TLS backend plus packet protection | Key update, old-key retention, packet-number protection, and discard deadlines are exercised through protected endpoint packets. | Done |
-| P0-F1 | First external interop gate | QUIC v1 against one mature stack | Process client/server plus endpoint loop | Clean checkout passes `quic-go` certificate-verified handshake, Retry, stream echo/control, close, and one controlled loss/PTO case. | Active |
+| P0-F1 | First external interop gate | QUIC v1 against one mature stack | Process client/server plus endpoint loop | Clean checkout passes `quic-go` certificate-verified handshake, Retry, stream echo/control, close, and one controlled loss/PTO case. | Done |
 
 ### Immediate execution queue
 
@@ -117,7 +117,7 @@ by the required protected endpoint or external interop behavior.
 | 12 | P0-D4 path validation/migration | Done | Close endpoint route-update behavior for validated single-path migration. |
 | 13 | P0-E1 TLS rollback closure | Done | Close remaining TLS/backend rollback classes that can break P0 gates. |
 | 14 | P0-E2 QUIC key phase handling | Done | Close 1-RTT key update/discard behavior through endpoint packets. |
-| 15 | P0-F1 quic-go gate | Active | Run and document the clean-checkout first external interop command set. |
+| 15 | P0-F1 quic-go gate | Done | Run and document the clean-checkout first external interop command set. |
 
 ### Parked work
 
