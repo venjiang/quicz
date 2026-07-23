@@ -189,7 +189,7 @@ P2 re-entry rule satisfied: first usable transport claim is complete (P0+P1).
 | P2-A | README and docs | README interop matrix, build/test/interop guide, examples index | README reflects P0/P1 status and interop commands | Done |
 | P2-B | src/tls/ extraction | Move tls13.zig, tls13_backend.zig, tls13_client_transport.zig into src/quic/tls/ submodule | zig build test 1525/1525, zig build 137/137 after move | Done |
 | P2-C | Endpoint API audit | Catalogue the 391 lifecycle variants, identify redundant/mergeable APIs | Audit document with merge candidates and risk assessment | Done |
-| P2-D | Endpoint API simplification | Merge redundant lifecycle variants, reduce public API surface; 33 dead fns identified for removal, 121 unused externally | Reduced API count, 1525/1525 tests pass | Active |
+| P2-D | Endpoint API simplification | 57 dead lifecycle fns removed (628->571, -1982 lines); combinatorial variant merge deferred to P3 | Reduced API count, 1525/1525 tests pass | Done |
 
 ### P2 execution queue
 
@@ -198,7 +198,7 @@ P2 re-entry rule satisfied: first usable transport claim is complete (P0+P1).
 | 1 | P2-A README and docs | Done | Updated README with interop matrix and P0/P1 status |
 | 2 | P2-B src/tls/ extraction | Done | Move TLS files to src/quic/tls/ submodule |
 | 3 | P2-C Endpoint API audit | Done | Catalogue and assess lifecycle variant redundancy |
-| 4 | P2-D Endpoint API simplification | Active | Merge redundant variants |
+| 4 | P2-D Endpoint API simplification | Done | Merge redundant variants |
 
 ## Practical Transport Baseline
 
