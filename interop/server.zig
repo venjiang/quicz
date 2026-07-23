@@ -18,9 +18,16 @@ const endpoint = quicz.endpoint;
 const quic_packet = quicz.packet;
 const protection = quicz.protection;
 
-const www_dir = "/www";
+const www_dir = "/private/tmp/www"; // Use /www in Docker, /private/tmp/www for local testing
 const certs_dir = "/private/tmp/certs"; // Use /certs in Docker, /private/tmp/certs for local testing
-const bind_port: u16 = 443;
+const default_bind_port: u16 = 443;
+
+fn getBindPort(init: std.process.Init) u16 {
+    if (init.environ_map.get("PORT")) |port_str| {
+        return std.fmt.parseInt(u16, port_str, 10) catch default_bind_port;
+    }
+    return default_bind_port;
+}
 const max_datagram_size: usize = 8192;
 const idle_timeout_ms: u64 = 30_000;
 
@@ -194,6 +201,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Bind UDP socket
 
+    const bind_port = getBindPort(init);
     var address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = bind_port } };
     var socket = address.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch {
         std.debug.print("failed to bind UDP port {d}\n", .{bind_port});
