@@ -191,7 +191,7 @@ pub fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: u
 /// RFC 9221 DATAGRAM with length (0x31): type + varint len + data.
 pub fn datagramFrameWireLen(data_len: usize) Error!usize {
     const type_len: usize = 1;
-    const len_field = packet.varIntLen(data_len);
+    const len_field = try quicVarIntWireLen(data_len);
     return type_len + len_field + data_len;
 }
 

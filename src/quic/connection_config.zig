@@ -143,6 +143,11 @@ pub const Config = struct {
     initial_max_streams_bidi: u64 = 64,
     /// Initial unidirectional stream-count limit in both send and receive directions. Maximum is 2^60.
     initial_max_streams_uni: u64 = 64,
+    /// RFC 9221 max_datagram_frame_size transport parameter.
+    ///
+    /// Zero disables DATAGRAM frame support. Non-zero advertises the maximum
+    /// DATAGRAM frame payload size this endpoint will accept.
+    max_datagram_frame_size: u64 = 0,
     /// Maximum active peer-issued connection IDs tracked by the connection skeleton.
     active_connection_id_limit: u64 = min_active_connection_id_limit,
     /// QUIC version advertised as this endpoint's chosen version.

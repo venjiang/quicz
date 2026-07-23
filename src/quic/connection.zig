@@ -730,6 +730,10 @@ pub const Connection = struct {
     crypto_send_queue: std.ArrayList(PendingCryptoFrame),
     crypto_recv_pending: std.ArrayList(PendingCryptoFrame),
     send_queue: std.ArrayList(PendingStreamFrame),
+    /// RFC 9221 outgoing DATAGRAM payloads queued by sendDatagram().
+    pending_datagrams: std.ArrayList([]const u8),
+    /// RFC 9221 incoming DATAGRAM payloads received from peer.
+    received_datagrams: std.ArrayList([]const u8),
     pending_reset_streams: std.ArrayList(frame.ResetStreamFrame),
     pending_stop_sending: std.ArrayList(frame.StopSendingFrame),
     send_streams: std.ArrayList(SendStreamState),
@@ -896,6 +900,8 @@ pub const Connection = struct {
             .crypto_send_queue = .empty,
             .crypto_recv_pending = .empty,
             .send_queue = .empty,
+            .pending_datagrams = .empty,
+            .received_datagrams = .empty,
             .pending_reset_streams = .empty,
             .pending_stop_sending = .empty,
             .send_streams = .empty,
@@ -970,6 +976,10 @@ pub const Connection = struct {
         self.crypto_send_queue.deinit(self.allocator);
         self.crypto_recv_pending.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
+        for (self.pending_datagrams.items) |d| self.allocator.free(d);
+        self.pending_datagrams.deinit(self.allocator);
+        for (self.received_datagrams.items) |d| self.allocator.free(d);
+        self.received_datagrams.deinit(self.allocator);
         self.pending_reset_streams.deinit(self.allocator);
         self.pending_stop_sending.deinit(self.allocator);
         self.send_streams.deinit(self.allocator);
@@ -7125,6 +7135,16 @@ pub const Connection = struct {
                 },
                 .connection_close => |connection_close| try self.receiveConnectionCloseFrame(now_millis, connection_close),
                 .application_close => |application_close| try self.receiveApplicationCloseFrame(now_millis, application_close),
+                .datagram => |dg| {
+                    if (self.config.max_datagram_frame_size > 0) {
+                        const owned = self.allocator.alloc(u8, dg.data.len) catch return error.OutOfMemory;
+                        @memcpy(owned, dg.data);
+                        self.received_datagrams.append(self.allocator, owned) catch {
+                            self.allocator.free(owned);
+                            return error.OutOfMemory;
+                        };
+                    }
+                },
                 else => {},
             }
 
@@ -7227,6 +7247,9 @@ pub const Connection = struct {
         }
         if (self.pending_ping_count != 0) {
             return try self.pollPingFrame(ack_to_send, now_millis, out_buf);
+        }
+        if (self.pending_datagrams.items.len != 0) {
+            return try self.pollDatagramFrame(ack_to_send, now_millis, out_buf);
         }
 
         self.dropResetClosedStreamFrames();
@@ -8110,6 +8133,48 @@ pub const Connection = struct {
         stream_state.read_offset += n;
         markReceiveDataReadIfComplete(stream_state);
         return n;
+    }
+
+    /// Queue an unreliable DATAGRAM frame for sending (RFC 9221).
+    ///
+    /// The payload is copied into connection-owned memory. Returns
+    /// error.InvalidPacket if the peer did not advertise
+    /// max_datagram_frame_size or the payload exceeds the advertised limit.
+    pub fn sendDatagram(self: *Connection, data: []const u8) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.config.max_datagram_frame_size == 0) return error.InvalidPacket;
+        if (data.len > self.config.max_datagram_frame_size) return error.InvalidPacket;
+        const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned);
+        @memcpy(owned, data);
+        self.pending_datagrams.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            return error.OutOfMemory;
+        };
+    }
+
+    /// Read one received DATAGRAM frame payload (RFC 9221).
+    ///
+    /// Returns null if no datagrams are queued. The payload is copied into
+    /// the caller buffer; the internal buffer is freed.
+    pub fn recvDatagram(self: *Connection, buf: []u8) Error!?usize {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.received_datagrams.items.len == 0) return null;
+        const datagram = self.received_datagrams.orderedRemove(0);
+        defer self.allocator.free(datagram);
+        const n = @min(buf.len, datagram.len);
+        @memcpy(buf[0..n], datagram[0..n]);
+        return n;
+    }
+
+    /// Return the count of queued outgoing DATAGRAM frames.
+    pub fn pendingDatagramCount(self: Connection) usize {
+        return self.pending_datagrams.items.len;
+    }
+
+    /// Return the count of queued incoming DATAGRAM frames.
+    pub fn receivedDatagramCount(self: Connection) usize {
+        return self.received_datagrams.items.len;
     }
 
     /// Return the final size learned from a STREAM FIN or RESET_STREAM.
@@ -9956,6 +10021,23 @@ pub const Connection = struct {
         self.recordPacketActivity(now_millis);
         self.maybeDiscardInitialAfterHandshakePacketSent(space);
         return written;
+    }
+
+    fn pollDatagramFrame(
+        self: *Connection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        _ = ack_to_send;
+        _ = now_millis;
+        const data = self.pending_datagrams.orderedRemove(0);
+        defer self.allocator.free(data);
+        const encoded_len = wire_len.datagramFrameWireLen(data.len) catch return error.BufferTooSmall;
+        if (encoded_len > out_buf.len) return error.BufferTooSmall;
+        var out = buffer.fixedWriter(out_buf);
+        frame.encodeFrame(out.writer(), .{ .datagram = .{ .data = data } }) catch return error.BufferTooSmall;
+        return out.getWritten();
     }
 
     fn pollPathChallenge(
@@ -76017,4 +76099,44 @@ test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
         @as(?u64, transport_error.codeValue(.key_update_error)),
         server.pendingCloseErrorCode(),
     );
+}
+
+test "sendDatagram and recvDatagram roundtrip through pollTx and frame processing" {
+    var sender = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_frame_size = 1200,
+    });
+    defer sender.deinit();
+    try sender.confirmHandshake();
+
+    var receiver = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_frame_size = 1200,
+    });
+    defer receiver.deinit();
+    try receiver.confirmHandshake();
+    try receiver.validatePeerAddress();
+
+    // Sender queues a datagram.
+    try sender.sendDatagram("hello datagram");
+    try std.testing.expectEqual(@as(usize, 1), sender.pendingDatagramCount());
+
+    // Sender polls the datagram frame.
+    var out_buf: [1500]u8 = undefined;
+    const payload = (try sender.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), sender.pendingDatagramCount());
+
+    // Receiver processes the datagram frame.
+    try receiver.processDatagramInSpaceWithPacketType(
+        .application,
+        .one_rtt,
+        0,
+        payload,
+        null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), receiver.receivedDatagramCount());
+
+    // Receiver reads the datagram.
+    var recv_buf: [256]u8 = undefined;
+    const n = (try receiver.recvDatagram(&recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello datagram", recv_buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), receiver.receivedDatagramCount());
 }
