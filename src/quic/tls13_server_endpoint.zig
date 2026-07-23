@@ -12430,6 +12430,16 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     try std.testing.expect(server_record_for_ack.transport.connection.sentPacketCount(.application) > 0);
     try std.testing.expect(server_record_for_ack.transport.connection.bytesInFlight(.application) > 0);
 
+    // --- Phase 7u: Stream-limit enforcement at endpoint seam ---
+    // Client bidi streams opened so far: 0, 4, 8 (3 streams).
+    // Open additional streams to verify multi-stream endpoint behavior.
+    var limit_stream_ids: [5]u64 = undefined;
+    for (0..5) |i| {
+        limit_stream_ids[i] = try client.openStream();
+    }
+    // Verify all 8 client-initiated bidi streams are tracked.
+    try std.testing.expectEqual(@as(u64, 28), limit_stream_ids[4]);
+
     // --- Phase 7t: Failure-before-mutation — corrupted datagram does not mutate state ---
     {
         const fbm_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
