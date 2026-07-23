@@ -76,7 +76,7 @@ const ServerEndpoint = quicz.Tls13ServerEndpoint(
 
 /// Load a PEM certificate file and return the DER bytes.
 fn loadPemCertificate(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
     const pem_data = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(pem_data);
@@ -99,7 +99,7 @@ fn loadPemCertificate(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 /// Load a PEM private key file and return the raw key bytes.
 fn loadPemPrivateKey(allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
     const pem_data = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(pem_data);
@@ -151,17 +151,16 @@ fn serveFile(allocator: std.mem.Allocator, request_path: []const u8) ![]u8 {
     var path_buf: [512]u8 = undefined;
     const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ www_dir, clean_path }) catch return error.PathTooLong;
 
-    const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
+    const file = std.fs.openFileAbsolute(full_path, .{}) catch return error.FileNotFound;
     defer file.close();
     return file.readToEndAlloc(allocator, 10 * 1024 * 1024);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const testcase = std.posix.getenv("TESTCASE") orelse "handshake";
+    const testcase = init.environ_map.get("TESTCASE") orelse "handshake";
     std.debug.print("quicz interop server: testcase={s}\n", .{testcase});
 
     // Load certificate and key
@@ -179,12 +178,6 @@ pub fn main() !void {
     std.debug.print("quicz interop server: certificate loaded ({d} bytes DER)\n", .{cert_der.len});
 
     // Bind UDP socket
-    var threaded = std.Io.Threaded.init(allocator, .{}) catch {
-        std.debug.print("failed to init I/O\n", .{});
-        return error.IoInitFailed;
-    };
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = bind_port } };
     var socket = address.bind(io, .{ .mode = .dgram, .protocol = .udp }) catch {
@@ -206,7 +199,7 @@ pub fn main() !void {
 
     // Event loop
     var recv_buf: [max_datagram_size]u8 = undefined;
-    var running = true;
+    const running = true;
 
     while (running) {
         // Receive datagram
@@ -261,6 +254,5 @@ pub fn main() !void {
             socket.send(io, &std.Io.net.IpAddress{ .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port } }, o.datagram) catch {};
             allocator.free(o.datagram);
         }
-        _ = step;
     }
 }

@@ -342,6 +342,34 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_interop_event_loopback);
 
+
+    // P5-C: QUIC-Interop-Runner server/client binaries
+    const exe_interop_server = b.addExecutable(.{
+        .name = "quicz-interop-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("interop/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_interop_server);
+
+    const exe_interop_runner_client = b.addExecutable(.{
+        .name = "quicz-interop-runner-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("interop/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_interop_runner_client);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",

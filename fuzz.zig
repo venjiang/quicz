@@ -30,7 +30,7 @@ pub fn fuzzVarintDecode(data: []const u8) void {
 
 /// Simple coverage-guided fuzz loop for testing.
 pub fn main() !void {
-    var prng = std.Random.DefaultPrng.init(42);
+    const prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
 
     var buf: [4096]u8 = undefined;

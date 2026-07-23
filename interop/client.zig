@@ -67,13 +67,12 @@ fn saveFile(path: []const u8, data: []const u8) !void {
     try file.writeAll(data);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const testcase = std.posix.getenv("TESTCASE") orelse "handshake";
-    const requests_env = std.posix.getenv("REQUESTS") orelse "";
+    const testcase = init.environ_map.get("TESTCASE") orelse "handshake";
+    const requests_env = init.environ_map.get("REQUESTS") orelse "";
     std.debug.print("quicz interop client: testcase={s}\n", .{testcase});
 
     if (requests_env.len == 0) {
@@ -102,12 +101,6 @@ pub fn main() !void {
     std.debug.print("quicz interop client: connecting to {s}:{d}\n", .{ first_url.host, first_url.port });
 
     // Initialize I/O
-    var threaded = std.Io.Threaded.init(allocator, .{}) catch {
-        std.debug.print("failed to init I/O\n", .{});
-        return error.IoInitFailed;
-    };
-    defer threaded.deinit();
-    const io = threaded.io();
 
     // Bind client UDP socket
     var address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
