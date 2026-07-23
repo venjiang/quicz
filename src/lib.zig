@@ -21,6 +21,7 @@ pub const h3_connection = @import("h3/connection.zig");
 pub const multipath = @import("quic/multipath.zig");
 pub const lifecycle_options = @import("quic/lifecycle_options.zig");
 pub const session_cache = @import("quic/session_cache.zig");
+pub const gso = @import("quic/gso.zig");
 pub const tls13_backend = @import("quic/tls13_backend.zig");
 comptime {
     // Keep tls13 reachable so its tests run under `zig build test`.
@@ -34,6 +35,7 @@ comptime {
     _ = multipath;
     _ = lifecycle_options;
     _ = session_cache;
+    _ = gso;
     _ = tls13_backend;
 }
 const endpoint_types = @import("quic/endpoint_types.zig");
