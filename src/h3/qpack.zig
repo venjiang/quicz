@@ -184,3 +184,149 @@ test "QPACK encode header block with custom headers" {
     try std.testing.expectEqual(@as(u8, 0x20), encoded[2]);
     try std.testing.expect(len > 3);
 }
+
+/// Decode a QPACK header block into header fields.
+/// Returns the number of fields written to `out_fields`.
+pub fn decodeHeaderBlock(data: []const u8, out_fields: []HeaderField) !usize {
+    if (data.len < 2) return error.InvalidHeaderBlock;
+
+    // Skip Required Insert Count (1 byte) and Delta Base (1 byte)
+    var pos: usize = 2;
+    var count: usize = 0;
+
+    while (pos < data.len) {
+        if (count >= out_fields.len) return error.TooManyFields;
+        const first = data[pos];
+
+        if (first & 0x80 != 0) {
+            // Indexed Field Line: 1TXXXXXX
+            const is_static = (first & 0x40) != 0;
+            const index: u64 = first & 0x3f;
+            if (!is_static) return error.DynamicTableUnsupported;
+            if (index >= static_table.len) return error.InvalidStaticIndex;
+            out_fields[count] = .{
+                .name = static_table[index].name,
+                .value = static_table[index].value,
+            };
+            count += 1;
+            pos += 1;
+        } else if (first & 0x40 != 0) {
+            // Literal with Name Reference: 01NTXXXX
+            const is_static = (first & 0x10) != 0;
+            const name_index: u64 = first & 0x0f;
+            if (!is_static) return error.DynamicTableUnsupported;
+            if (name_index >= static_table.len) return error.InvalidStaticIndex;
+            pos += 1;
+            const value_result = try decodeString(data, pos);
+            out_fields[count] = .{
+                .name = static_table[name_index].name,
+                .value = value_result.value,
+            };
+            count += 1;
+            pos = value_result.end;
+        } else if (first & 0x20 != 0) {
+            // Literal without Name Reference: 001NXXXX
+            pos += 1;
+            const name_result = try decodeString(data, pos);
+            const value_result = try decodeString(data, name_result.end);
+            out_fields[count] = .{
+                .name = name_result.value,
+                .value = value_result.value,
+            };
+            count += 1;
+            pos = value_result.end;
+        } else {
+            return error.UnsupportedRepresentation;
+        }
+    }
+
+    return count;
+}
+
+fn decodeString(data: []const u8, start: usize) !struct { value: []const u8, end: usize } {
+    if (start >= data.len) return error.IncompleteString;
+    const first = data[start];
+    // No Huffman support: H bit (0x80) must be 0
+    if (first & 0x80 != 0) return error.HuffmanNotSupported;
+    const len: usize = first & 0x7f;
+    const value_start = start + 1;
+    if (value_start + len > data.len) return error.IncompleteString;
+    return .{
+        .value = data[value_start .. value_start + len],
+        .end = value_start + len,
+    };
+}
+
+test "QPACK decode header block with static entries" {
+    // Encode then decode
+    const fields = [_]HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+
+    var encoded: [256]u8 = undefined;
+    const enc_len = try encodeHeaderBlock(&encoded, &fields);
+
+    var decoded: [16]HeaderField = undefined;
+    const dec_count = try decodeHeaderBlock(encoded[0..enc_len], &decoded);
+
+    try std.testing.expectEqual(@as(usize, 3), dec_count);
+    try std.testing.expectEqualStrings(":method", decoded[0].name);
+    try std.testing.expectEqualStrings("GET", decoded[0].value);
+    try std.testing.expectEqualStrings(":path", decoded[1].name);
+    try std.testing.expectEqualStrings("/", decoded[1].value);
+    try std.testing.expectEqualStrings(":scheme", decoded[2].name);
+    try std.testing.expectEqualStrings("https", decoded[2].value);
+}
+
+test "QPACK decode header block with literal value" {
+    const fields = [_]HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":authority", .value = "example.com" },
+    };
+
+    var encoded: [256]u8 = undefined;
+    const enc_len = try encodeHeaderBlock(&encoded, &fields);
+
+    var decoded: [16]HeaderField = undefined;
+    const dec_count = try decodeHeaderBlock(encoded[0..enc_len], &decoded);
+
+    try std.testing.expectEqual(@as(usize, 2), dec_count);
+    try std.testing.expectEqualStrings(":method", decoded[0].name);
+    try std.testing.expectEqualStrings("GET", decoded[0].value);
+    try std.testing.expectEqualStrings(":authority", decoded[1].name);
+    try std.testing.expectEqualStrings("example.com", decoded[1].value);
+}
+
+test "QPACK decode header block with custom headers" {
+    const fields = [_]HeaderField{
+        .{ .name = "x-custom", .value = "custom-value" },
+    };
+
+    var encoded: [256]u8 = undefined;
+    const enc_len = try encodeHeaderBlock(&encoded, &fields);
+
+    var decoded: [16]HeaderField = undefined;
+    const dec_count = try decodeHeaderBlock(encoded[0..enc_len], &decoded);
+
+    try std.testing.expectEqual(@as(usize, 1), dec_count);
+    try std.testing.expectEqualStrings("x-custom", decoded[0].name);
+    try std.testing.expectEqualStrings("custom-value", decoded[0].value);
+}
+
+test "QPACK decode :status 200" {
+    const fields = [_]HeaderField{
+        .{ .name = ":status", .value = "200" },
+    };
+
+    var encoded: [256]u8 = undefined;
+    const enc_len = try encodeHeaderBlock(&encoded, &fields);
+
+    var decoded: [16]HeaderField = undefined;
+    const dec_count = try decodeHeaderBlock(encoded[0..enc_len], &decoded);
+
+    try std.testing.expectEqual(@as(usize, 1), dec_count);
+    try std.testing.expectEqualStrings(":status", decoded[0].name);
+    try std.testing.expectEqualStrings("200", decoded[0].value);
+}

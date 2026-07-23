@@ -222,3 +222,191 @@ test "HTTP/3 request encodeHeaders" {
     try std.testing.expectEqual(@as(u8, 0x00), buf[1]); // DB
     try std.testing.expectEqual(@as(u8, 0xc8), buf[2]); // :method GET
 }
+
+/// Decode an HTTP/3 request from a byte buffer containing HEADERS + optional DATA frames.
+/// Returns the decoded request and the number of bytes consumed.
+pub fn decodeRequest(data: []const u8) !struct { request: DecodedRequest, consumed: usize } {
+    var pos: usize = 0;
+    var method: ?[]const u8 = null;
+    var path: ?[]const u8 = null;
+    var scheme: ?[]const u8 = null;
+    var authority: ?[]const u8 = null;
+    var body: ?[]const u8 = null;
+
+    // Parse HEADERS frame
+    const headers_result = try h3_frame.decodeFrame(data[pos..]);
+    if (headers_result.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+        return error.ExpectedHeadersFrame;
+    }
+    pos += headers_result.consumed;
+
+    // Decode QPACK header block
+    var fields: [32]qpack.HeaderField = undefined;
+    const field_count = try qpack.decodeHeaderBlock(headers_result.frame.payload, &fields);
+
+    for (fields[0..field_count]) |field| {
+        if (std.mem.eql(u8, field.name, ":method")) {
+            method = field.value;
+        } else if (std.mem.eql(u8, field.name, ":path")) {
+            path = field.value;
+        } else if (std.mem.eql(u8, field.name, ":scheme")) {
+            scheme = field.value;
+        } else if (std.mem.eql(u8, field.name, ":authority")) {
+            authority = field.value;
+        }
+    }
+
+    if (method == null) return error.MissingMethod;
+    if (path == null) return error.MissingPath;
+
+    // Parse optional DATA frame
+    if (pos < data.len) {
+        const data_result = h3_frame.decodeFrame(data[pos..]) catch null;
+        if (data_result) |dr| {
+            if (dr.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+                body = dr.frame.payload;
+                pos += dr.consumed;
+            }
+        }
+    }
+
+    return .{
+        .request = .{
+            .method = method.?,
+            .path = path.?,
+            .scheme = scheme orelse "https",
+            .authority = authority,
+            .body = body,
+        },
+        .consumed = pos,
+    };
+}
+
+/// Decode an HTTP/3 response from a byte buffer containing HEADERS + optional DATA frames.
+pub fn decodeResponse(data: []const u8) !struct { response: DecodedResponse, consumed: usize } {
+    var pos: usize = 0;
+    var status: ?u16 = null;
+    var body: ?[]const u8 = null;
+
+    // Parse HEADERS frame
+    const headers_result = try h3_frame.decodeFrame(data[pos..]);
+    if (headers_result.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+        return error.ExpectedHeadersFrame;
+    }
+    pos += headers_result.consumed;
+
+    // Decode QPACK header block
+    var fields: [32]qpack.HeaderField = undefined;
+    const field_count = try qpack.decodeHeaderBlock(headers_result.frame.payload, &fields);
+
+    for (fields[0..field_count]) |field| {
+        if (std.mem.eql(u8, field.name, ":status")) {
+            status = std.fmt.parseInt(u16, field.value, 10) catch return error.InvalidStatusCode;
+        }
+    }
+
+    if (status == null) return error.MissingStatus;
+
+    // Parse optional DATA frame
+    if (pos < data.len) {
+        const data_result = h3_frame.decodeFrame(data[pos..]) catch null;
+        if (data_result) |dr| {
+            if (dr.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+                body = dr.frame.payload;
+                pos += dr.consumed;
+            }
+        }
+    }
+
+    return .{
+        .response = .{
+            .status = status.?,
+            .body = body,
+        },
+        .consumed = pos,
+    };
+}
+
+/// A decoded HTTP request (borrows from the input buffer).
+pub const DecodedRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    body: ?[]const u8,
+};
+
+/// A decoded HTTP response (borrows from the input buffer).
+pub const DecodedResponse = struct {
+    status: u16,
+    body: ?[]const u8,
+
+    pub fn isSuccess(self: *const DecodedResponse) bool {
+        return self.status >= 200 and self.status < 300;
+    }
+};
+
+test "HTTP/3 request encode/decode roundtrip" {
+    const req = Request{
+        .method = "GET",
+        .path = "/index.html",
+        .scheme = "https",
+        .authority = "example.com",
+    };
+
+    var buf: [4096]u8 = undefined;
+    const len = try encodeRequest(&buf, req);
+
+    const result = try decodeRequest(buf[0..len]);
+    try std.testing.expectEqualStrings("GET", result.request.method);
+    try std.testing.expectEqualStrings("/index.html", result.request.path);
+    try std.testing.expectEqualStrings("https", result.request.scheme);
+    try std.testing.expectEqualStrings("example.com", result.request.authority.?);
+    try std.testing.expect(result.request.body == null);
+}
+
+test "HTTP/3 response encode/decode roundtrip" {
+    const resp = Response{
+        .status = 200,
+        .body = "Hello, HTTP/3!",
+    };
+
+    var buf: [4096]u8 = undefined;
+    const len = try encodeResponse(&buf, resp);
+
+    const result = try decodeResponse(buf[0..len]);
+    try std.testing.expectEqual(@as(u16, 200), result.response.status);
+    try std.testing.expect(result.response.isSuccess());
+    try std.testing.expectEqualStrings("Hello, HTTP/3!", result.response.body.?);
+}
+
+test "HTTP/3 POST request with body roundtrip" {
+    const req = Request{
+        .method = "POST",
+        .path = "/api/submit",
+        .body = "{\"key\":\"value\"}",
+    };
+
+    var buf: [4096]u8 = undefined;
+    const len = try encodeRequest(&buf, req);
+
+    const result = try decodeRequest(buf[0..len]);
+    try std.testing.expectEqualStrings("POST", result.request.method);
+    try std.testing.expectEqualStrings("/api/submit", result.request.path);
+    try std.testing.expectEqualStrings("{\"key\":\"value\"}", result.request.body.?);
+}
+
+test "HTTP/3 404 response roundtrip" {
+    const resp = Response{
+        .status = 404,
+        .body = "Not Found",
+    };
+
+    var buf: [4096]u8 = undefined;
+    const len = try encodeResponse(&buf, resp);
+
+    const result = try decodeResponse(buf[0..len]);
+    try std.testing.expectEqual(@as(u16, 404), result.response.status);
+    try std.testing.expect(!result.response.isSuccess());
+    try std.testing.expectEqualStrings("Not Found", result.response.body.?);
+}
