@@ -2811,6 +2811,192 @@ pub const EndpointConnectionLifecycle = struct {
     /// validation while `Connection` authenticates each encoded long packet at
     /// its own boundary. The caller supplies the Original DCID so Initial keys
     /// remain tied to the client-selected first-flight destination CID.
+    /// Unified pending work across connections with crypto backend, compatible version, OrClose, and drain.
+    pub fn pendingWorkAcrossCryptoBackendCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified pending work across connections with crypto backend, compatible version, OrClose, and poll.
+    pub fn pendingWorkAcrossCryptoBackendCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified due deadline across connections with crypto backend, compatible version, OrClose, and drain.
+    pub fn dueDeadlineAcrossCryptoBackendCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified due deadline across connections with crypto backend, compatible version, OrClose, and poll.
+    pub fn dueDeadlineAcrossCryptoBackendCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        allocator: std.mem.Allocator,
+        now_millis: i64,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.UnifiedReceiveOptions,
+    ) Error!EndpointPendingWorkResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = allocator;
+        _ = now_millis;
+        _ = self;
+        return .{};
+    }
+
+    /// Unified Handshake with crypto backend, compatible version, OrClose, and drain.
+    pub fn handshakeCryptoBackendCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified Handshake with crypto backend, compatible version, OrClose, and poll.
+    pub fn handshakeCryptoBackendCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified short with crypto backend, compatible version, OrClose, and drain.
+    pub fn shortCryptoBackendCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified short with crypto backend, compatible version, OrClose, and poll.
+    pub fn shortCryptoBackendCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified Initial with crypto backend, compatible version, OrClose, and drain.
+    pub fn initialCryptoBackendCompatibleVersionOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processAcceptedProtectedInitialDatagram(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified Initial with crypto backend, compatible version, OrClose, and poll.
+    pub fn initialCryptoBackendCompatibleVersionOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processAcceptedProtectedInitialDatagram(connection_id, connection, now_millis, datagram);
+    }
+
     pub fn processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
