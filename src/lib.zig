@@ -15,6 +15,7 @@ pub const tls13 = @import("tls/tls13.zig");
 pub const qlog = @import("qlog/qlog.zig");
 pub const cubic = @import("quic/cubic.zig");
 pub const pmtu = @import("quic/pmtu.zig");
+pub const h3 = @import("h3/frame.zig");
 pub const tls13_backend = @import("quic/tls13_backend.zig");
 comptime {
     // Keep tls13 reachable so its tests run under `zig build test`.
@@ -22,6 +23,7 @@ comptime {
     _ = qlog;
     _ = cubic;
     _ = pmtu;
+    _ = h3;
     _ = tls13_backend;
 }
 const endpoint_types = @import("quic/endpoint_types.zig");
