@@ -34,7 +34,7 @@ const ServerRecord = struct {
         return self.transport.connectionRef();
     }
 
-    fn cryptoBackend(self: *@This()) quicz.tls13_backend.CryptoBackend {
+    fn cryptoBackend(self: *@This()) quicz.CryptoBackend {
         return self.transport.cryptoBackend();
     }
 
@@ -75,11 +75,18 @@ const ServerEndpoint = quicz.Tls13ServerEndpoint(
 );
 
 /// Load a PEM certificate file and return the DER bytes.
-fn loadPemCertificate(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const pem_data = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(pem_data);
+fn loadPemCertificate(io: std.Io, path: []const u8, der_buf: []u8) ![]u8 {
+    var pem_buf: [64 * 1024]u8 = undefined;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
+        std.debug.print("failed to open {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer file.close(io);
+    const bytes_read = file.readPositionalAll(io, &pem_buf, 0) catch |err| {
+        std.debug.print("failed to read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    const pem_data = pem_buf[0..bytes_read];
 
     // Find BEGIN/END CERTIFICATE markers
     const begin_marker = "-----BEGIN CERTIFICATE-----";
@@ -90,19 +97,25 @@ fn loadPemCertificate(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const encoded = std.mem.trim(u8, pem_data[encoded_start..encoded_end], " \t\r\n");
 
     // Base64 decode
-    const der = try allocator.alloc(u8, encoded.len); // Upper bound
-    errdefer allocator.free(der);
+    const der = der_buf[0..encoded.len];
     const decoder = std.base64.standard.decoderWithIgnore("\r\n");
     const der_len = try decoder.decode(der, encoded);
     return der[0..der_len];
 }
 
 /// Load a PEM private key file and return the raw key bytes.
-fn loadPemPrivateKey(allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const pem_data = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(pem_data);
+fn loadPemPrivateKey(io: std.Io, path: []const u8) ![32]u8 {
+    var pem_buf: [64 * 1024]u8 = undefined;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
+        std.debug.print("failed to open {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer file.close(io);
+    const bytes_read = file.readPositionalAll(io, &pem_buf, 0) catch |err| {
+        std.debug.print("failed to read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    const pem_data = pem_buf[0..bytes_read];
 
     // Find BEGIN/END PRIVATE KEY or EC PRIVATE KEY markers
     const markers = [_][]const u8{
@@ -141,7 +154,7 @@ fn loadPemPrivateKey(allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
 }
 
 /// Serve a file from the www directory.
-fn serveFile(allocator: std.mem.Allocator, request_path: []const u8) ![]u8 {
+fn serveFile(io: std.Io, request_path: []const u8, buf: []u8) ![]u8 {
     // Sanitize path: remove leading /
     const clean_path = if (request_path.len > 0 and request_path[0] == '/')
         request_path[1..]
@@ -151,9 +164,10 @@ fn serveFile(allocator: std.mem.Allocator, request_path: []const u8) ![]u8 {
     var path_buf: [512]u8 = undefined;
     const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ www_dir, clean_path }) catch return error.PathTooLong;
 
-    const file = std.fs.openFileAbsolute(full_path, .{}) catch return error.FileNotFound;
-    defer file.close();
-    return file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch return error.FileNotFound;
+    defer file.close(io);
+    const n = file.readPositionalAll(io, buf, 0) catch return error.FileNotFound;
+    return buf[0..n];
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -164,16 +178,17 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("quicz interop server: testcase={s}\n", .{testcase});
 
     // Load certificate and key
-    const cert_der = loadPemCertificate(allocator, certs_dir ++ "/cert.pem") catch |err| {
+    var cert_der_buf: [8192]u8 = undefined;
+    const cert_der = loadPemCertificate(io, certs_dir ++ "/cert.pem", &cert_der_buf) catch |err| {
         std.debug.print("failed to load certificate: {}\n", .{err});
         return err;
     };
-    defer allocator.free(cert_der);
 
-    const private_key = loadPemPrivateKey(allocator, certs_dir ++ "/priv.key") catch |err| {
+    const private_key = loadPemPrivateKey(io, certs_dir ++ "/priv.key") catch |err| {
         std.debug.print("failed to load private key: {}\n", .{err});
         return err;
     };
+    _ = private_key;
 
     std.debug.print("quicz interop server: certificate loaded ({d} bytes DER)\n", .{cert_der.len});
 
@@ -189,20 +204,19 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("quicz interop server: listening on 0.0.0.0:{d}\n", .{bind_port});
 
     // Create server endpoint
-    var server_endpoint = ServerEndpoint.init(allocator, .{
-        .max_active_connections = 16,
+    var server_endpoint = ServerEndpoint.initWithCapacity(allocator, 16, .{
+        .max_routes = 64,
+        .max_stateless_reset_tokens = 64,
     }) catch {
         std.debug.print("failed to init server endpoint\n", .{});
         return error.EndpointInitFailed;
     };
     defer server_endpoint.deinit();
 
-    // Event loop
+    // Event loop: receive datagrams, process through endpoint, send responses
     var recv_buf: [max_datagram_size]u8 = undefined;
-    const running = true;
 
-    while (running) {
-        // Receive datagram
+    while (true) {
         const timeout = std.Io.Timeout{
             .duration = .{
                 .clock = .awake,
@@ -227,10 +241,10 @@ pub fn main(init: std.process.Init) !void {
         var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var scratch: [8192]u8 = undefined;
 
-        const step = server_endpoint.receiveDatagramStepWithRoutePath(
+        _ = server_endpoint.receiveDatagramStepWithRoutePath(
             allocator,
             path,
-            0, // TODO: use real timestamp
+            0,
             received.data,
             &[_]u8{},
             &[_]quic_packet.Version{.v1},
@@ -249,10 +263,33 @@ pub fn main(init: std.process.Init) !void {
             &pending_out,
         ) catch continue;
 
-        // Send response datagrams
-        for (initial_out[0..step.process.routed.long.packet.accepted.initial.drain.datagrams_written]) |o| {
-            socket.send(io, &std.Io.net.IpAddress{ .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port } }, o.datagram) catch {};
-            allocator.free(o.datagram);
+        // Send response datagrams back to client
+        var dest = std.Io.net.IpAddress{
+            .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port },
+        };
+        for (initial_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
+        }
+        for (handshake_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
+        }
+        for (installed_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
+        }
+        for (pending_out) |o| {
+            if (o.datagram.len > 0) {
+                socket.send(io, &dest, o.datagram) catch {};
+                allocator.free(o.datagram);
+            }
         }
     }
 }

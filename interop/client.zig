@@ -52,7 +52,7 @@ fn parseUrl(url: []const u8) !struct { host: []const u8, port: u16, path: []cons
 }
 
 /// Save downloaded data to a file in the downloads directory.
-fn saveFile(path: []const u8, data: []const u8) !void {
+fn saveFile(io: std.Io, path: []const u8, data: []const u8) !void {
     // Extract filename from path
     const filename = if (std.mem.lastIndexOf(u8, path, "/")) |slash|
         path[slash + 1 ..]
@@ -62,9 +62,9 @@ fn saveFile(path: []const u8, data: []const u8) !void {
     var buf: [512]u8 = undefined;
     const full_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ downloads_dir, filename }) catch return;
 
-    const file = try std.fs.cwd().createFile(full_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(data);
+    const file = std.Io.Dir.createFileAbsolute(io, full_path, .{}) catch return;
+    defer file.close(io);
+    file.writeStreamingAll(io, data) catch return;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -111,23 +111,34 @@ pub fn main(init: std.process.Init) !void {
     defer socket.close(io);
 
     // Create client endpoint
+    const client_handle: u64 = 1;
+    const client_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(socket.address.ip4.bytes, socket.address.ip4.port),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, first_url.port),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
+    const alpn = [_][]const u8{"hq-interop"};
+
     var client = Tls13ClientEndpoint.init(
         allocator,
+        client_handle,
+        client_path,
+        .{ .active_migration_disabled = true },
         .{
             .initial_max_data = 1_048_576,
             .initial_max_stream_data = 1_048_576,
             .initial_max_streams_bidi = 128,
             .initial_max_streams_uni = 128,
             .max_datagram_size = max_datagram_size,
-            .chosen_version = .v1,
-            .available_versions = &[_]quicz.packet.Version{.v1},
         },
         .{
-            .alpn = &[_][]const u8{"hq-interop"},
+            .alpn = &alpn,
             .server_name = first_url.host,
-            .skip_cert_verify = true, // TODO: load CA from /certs
+            .skip_cert_verify = true,
         },
-        undefined, // scratch
+        original_dcid,
+        client_scid,
     ) catch {
         std.debug.print("failed to init client endpoint\n", .{});
         return error.ClientInitFailed;
@@ -253,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Save file
         if (response_len > 0) {
-            saveFile(parsed.path, response_buf[0..response_len]) catch {
+            saveFile(io, parsed.path, response_buf[0..response_len]) catch {
                 std.debug.print("failed to save {s}\n", .{parsed.path});
             };
             std.debug.print("quicz interop client: saved {s} ({d} bytes)\n", .{ parsed.path, response_len });
