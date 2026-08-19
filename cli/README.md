@@ -58,6 +58,11 @@ quicz h3 https://host/api -X POST --data @body.json   # upload a request body fr
 quicz h3 https://host/api -D headers.txt              # dump response headers to a file
 quicz h3 https://host/api -o -                        # write body to stdout explicitly
 
+# HTTP/3/QUIC health probe: pass/fail verdict + failure stage (see below)
+quicz probe https://example.com --json
+quicz probe https://example.com -k --connect-timeout 5 --max-time 10
+quicz probe https://127.0.0.1:4433/ -k --resolve example.com:443:127.0.0.1
+
 # Static file server: HTTPS over TCP (browser) + HTTP/3 + /metrics + /echo
 quicz serve --dir ./dist --port 4433
 quicz serve --dir ./dist --port 4433 --cert cert.pem --key key.pem
@@ -73,6 +78,40 @@ quicz echo --client 127.0.0.1 4433 --data "ping"
 # (peer is `quicz echo --server`)
 quicz bench 127.0.0.1 4433 --size 1048576
 ```
+
+## Probe (HTTP/3 service health check)
+
+`quicz probe <url>` runs a single-shot HTTP/3/QUIC health check and attributes
+failure to one stage: DNS resolution, UDP reachability, QUIC/TLS handshake or
+the HTTP/3 request. It is the local diagnostic entry point of the `quicz.md`
+product plan (QUIC-aware probe/exporter).
+
+Checks, in order:
+
+1. URL parsing (https only)
+2. DNS resolution (resolved IPv4 is reported)
+3. QUIC 1-RTT handshake with TLS 1.3 and ALPN `h3` (certificate verified
+   against the system CA bundle unless `-k` / `--ca` is given)
+4. One HTTP/3 GET on the URL path
+
+Output is a text report by default; `--json` emits a structured result for CI.
+Exit code is 0 when every check passes, 1 otherwise.
+
+Failure stages: `invalid_url`, `dns_resolve_failed`, `udp_timeout`,
+`quic_handshake_failed`, `tls_cert_failed`, `http3_request_failed`. The
+distinction between `udp_timeout` (nothing ever arrived on UDP: blackholed,
+firewalled, or a closed port) and `quic_handshake_failed` (UDP works, but the
+handshake failed) is based on whether any UDP datagram was received, which the
+runtime client now tracks (`Client.datagramsReceived`).
+
+```bash
+./zig-out/bin/quicz probe https://cloudflare-quic.com/ --json
+./zig-out/bin/quicz probe https://127.0.0.1:4433/ -k          # local pass
+./zig-out/bin/quicz probe https://127.0.0.1:4544 -k            # closed port -> udp_timeout
+```
+
+Known limits: the client only negotiates `h3`, so `alpn_not_h3` and
+HTTP/2 fallback detection are not yet surfaced; these are a follow-up stage.
 
 ## Real-world H3 verification
 

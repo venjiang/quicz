@@ -198,6 +198,9 @@ pub const Client = struct {
     /// server-initiated unidirectional streams (control / QPACK). Off by
     /// default so the plain echo path keeps polling only streams it opened.
     h3_mode: bool = false,
+    /// Total UDP datagrams received by the recv task since init. Zero after a
+    /// failed handshake means nothing ever arrived on the UDP path.
+    udp_datagrams_received: usize = 0,
 
     const handshake_pending: u8 = 0;
     const handshake_confirmed: u8 = 1;
@@ -365,6 +368,13 @@ pub const Client = struct {
         if (self.handshake_state.load(.acquire) != handshake_confirmed) {
             return self.handshake_error orelse error.HandshakeFailed;
         }
+    }
+
+    /// Return how many UDP datagrams arrived since init. Lets diagnostics
+    /// distinguish "UDP path unreachable" from "UDP works but the QUIC or TLS
+    /// handshake failed" after a failed connect().
+    pub fn datagramsReceived(self: *const Client) usize {
+        return self.udp_datagrams_received;
     }
 
     /// Send `data` on a new bidirectional stream; returns the stream id.
@@ -601,6 +611,7 @@ pub const Client = struct {
                     continue;
                 },
             };
+            self.udp_datagrams_received += 1;
             const pooled_buf = self.datagram_pool.take();
             const copy = if (pooled_buf) |pb| blk: {
                 @memcpy(pb[0..received.data.len], received.data);
