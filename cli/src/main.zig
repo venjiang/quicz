@@ -1,7 +1,7 @@
 //! quicz CLI - daily QUIC / HTTP/3 development tool.
 //!
 //! Subcommands:
-//!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
+//!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -14,6 +14,7 @@ const std = @import("std");
 const test_certs = @import("test_certs");
 const quicz = @import("quicz");
 const tls_tcp = @import("tls_tcp.zig");
+const cookies = @import("cookies.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -83,7 +84,7 @@ fn printUsage() void {
         \\quicz - QUIC / HTTP/3 development tool
         \\
         \\Usage:
-        \\  quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
+        \\  quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
         \\  quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --client HOST PORT [--data BODY] [--ca PEM] [--timeout-ms MS]
@@ -334,6 +335,7 @@ const H3Job = struct {
     connect_timeout_ms: ?u64,
     write_out: ?[]const u8,
     max_filesize: ?usize,
+    cookie_jar: ?*cookies.CookieJar,
 };
 
 fn isRedirectStatus(status: u16) bool {
@@ -526,9 +528,19 @@ fn appendQuery(allocator: std.mem.Allocator, url: []const u8, query: []const u8)
     return std.fmt.allocPrint(allocator, "{s}?{s}", .{ url, query });
 }
 
+/// Unix seconds from the real-time clock, used for cookie expiry handling.
+fn unixNow(io: std.Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toSeconds();
+}
+
 fn h3Job(io: std.Io, ctx: *anyopaque) anyerror!void {
     const job: *const H3Job = @ptrCast(@alignCast(ctx));
     const t0 = std.Io.Timestamp.now(io, .awake);
+    // Function-scoped so it runs after the request (including redirect hops)
+    // complete; an if-scoped defer would fire before the request starts.
+    defer if (job.cookie_jar) |jar| jar.save(io) catch |e| {
+        if (!job.silent) std.debug.print("h3: cookie jar save failed: {s}\n", .{@errorName(e)});
+    };
 
     var current_url = job.url;
     var current_url_owned = false;
@@ -621,12 +633,29 @@ fn h3Job(io: std.Io, ctx: *anyopaque) anyerror!void {
             connected_port = parsed.port;
         }
 
+        var cookie_hdr_buf: ?[]u8 = null;
+        defer if (cookie_hdr_buf) |b| job.allocator.free(b);
+        var hop_headers: ?[]quicz.qpack.HeaderField = null;
+        defer if (hop_headers) |hh| job.allocator.free(hh);
+        const headers_for_request = blk: {
+            if (job.cookie_jar) |jar| {
+                if (try jar.headerFor(job.allocator, unixNow(io), parsed.host, parsed.path)) |cookie_hdr| {
+                    cookie_hdr_buf = cookie_hdr;
+                    const all = try job.allocator.alloc(quicz.qpack.HeaderField, job.headers.len + 1);
+                    hop_headers = all;
+                    @memcpy(all[0..job.headers.len], job.headers);
+                    all[job.headers.len] = .{ .name = "cookie", .value = cookie_hdr };
+                    break :blk all;
+                }
+            }
+            break :blk job.headers;
+        };
         const request = quicz.h3_request.Request{
             .method = job.method,
             .path = parsed.path,
             .scheme = "https",
             .authority = parsed.host,
-            .extra_headers = job.headers,
+            .extra_headers = headers_for_request,
             .body = job.body,
         };
         const sid = try h3cli.?.sendRequest(request);
@@ -636,6 +665,15 @@ fn h3Job(io: std.Io, ctx: *anyopaque) anyerror!void {
         if (job.max_filesize) |limit| {
             if (response.body) |b| {
                 if (b.len > limit) return error.MaxFilesizeExceeded;
+            }
+        }
+
+        if (job.cookie_jar) |jar| {
+            const now = unixNow(io);
+            for (response.headers) |h| {
+                if (std.mem.eql(u8, h.name, "set-cookie")) {
+                    jar.addSetCookie(job.allocator, now, parsed.host, h.value) catch {};
+                }
             }
         }
 
@@ -748,6 +786,8 @@ fn cmdH3(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Itera
     var connect_timeout_ms: ?u64 = null;
     var resolves = std.ArrayList(ResolveOverride).empty;
     defer resolves.deinit(allocator);
+    var cookie_jar: ?cookies.CookieJar = null;
+    defer if (cookie_jar) |*cj| cj.deinit();
 
     while (args.next()) |a| {
         if (std.mem.eql(u8, a, "-k")) {
@@ -806,7 +846,17 @@ fn cmdH3(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Itera
         } else if (std.mem.eql(u8, a, "-e") or std.mem.eql(u8, a, "--referer")) {
             try setHeader(allocator, &headers, "referer", try nextArg(args));
         } else if (std.mem.eql(u8, a, "-b") or std.mem.eql(u8, a, "--cookie")) {
-            try setHeader(allocator, &headers, "cookie", try nextArg(args));
+            const value = try nextArg(args);
+            if (value.len > 0 and value[0] == '@') {
+                if (cookie_jar == null) cookie_jar = cookies.CookieJar.init(allocator);
+                try cookie_jar.?.loadFromFile(io, value[1..]);
+            } else {
+                try setHeader(allocator, &headers, "cookie", value);
+            }
+        } else if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "--cookie-jar")) {
+            const jar_path = try nextArg(args);
+            if (cookie_jar == null) cookie_jar = cookies.CookieJar.init(allocator);
+            cookie_jar.?.save_path = jar_path;
         } else if (std.mem.eql(u8, a, "-w") or std.mem.eql(u8, a, "--write-out")) {
             write_out = try nextArg(args);
         } else if (std.mem.eql(u8, a, "--resolve")) {
@@ -890,6 +940,7 @@ fn cmdH3(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Itera
         .connect_timeout_ms = connect_timeout_ms,
         .write_out = write_out,
         .max_filesize = max_filesize,
+        .cookie_jar = if (cookie_jar) |*cj| cj else null,
     };
     try runWithTimeout(io, timeout_ms, h3Job, &job);
 }
@@ -1721,4 +1772,8 @@ test "resolve redirect location" {
     try std.testing.expectEqualStrings("https://a.com/a/../c", rel);
 
     try std.testing.expectError(error.NonHttpsRedirect, resolveLocation(allocator, "https://a.com/", "http://b.com/x"));
+}
+
+test "cookie jar module" {
+    _ = @import("cookies.zig");
 }

@@ -126,8 +126,14 @@ printed.
   body from a file.
 - `-A` / `--user-agent` overrides the default `User-Agent: quicz/0.1.0`;
   any `-H user-agent:` header is replaced.
-- `-u` / `--user user:pass` adds HTTP Basic auth; `-e` / `--referer` and
-  `-b` / `--cookie` set the `Referer` and `Cookie` headers.
+- `-u` / `--user user:pass` adds HTTP Basic auth; `-e` / `--referer` sets the
+  `Referer` header; `-b` / `--cookie 'name=value'` sets the `Cookie` header.
+- `-b @file` reads request cookies from a Netscape cookie jar
+  (curl-compatible format); `-c` / `--cookie-jar FILE` persists `Set-Cookie`
+  response headers into a Netscape jar. With `-L`, cookies collected on each
+  redirect hop are sent on the following hop automatically.
+- `-T` / `--upload-file FILE` sends a PUT with the file as the body and
+  `content-type: application/octet-stream` unless overridden.
 - `-T` / `--upload-file FILE` sends a PUT with the file as the body and
   `content-type: application/octet-stream` unless overridden.
 - `-G` / `--get` turns `--data` into a URL query string and keeps the method

@@ -385,13 +385,30 @@ test "HTTP/3 request encodeHeaders" {
 
 /// Decode an HTTP/3 request from a byte buffer containing HEADERS + optional DATA frames.
 /// Returns the decoded request and the number of bytes consumed.
-pub fn decodeRequest(data: []const u8) !struct { request: DecodedRequest, consumed: usize } {
+pub const DecodeRequestInfo = struct {
+    request: DecodedRequest,
+    consumed: usize,
+};
+
+pub fn decodeRequest(data: []const u8) !DecodeRequestInfo {
+    // Legacy behavior: non-pseudo request headers are discarded, so pass an
+    // empty sink to avoid exposing a dangling stack-backed slice.
+    return decodeRequestWithHeaders(data, &.{});
+}
+
+/// Like `decodeRequest`, but also copies non-pseudo request headers into
+/// `headers_out` (up to its capacity) and links them from
+/// `request.headers`. Header slices borrow the input buffer, so `data` must
+/// outlive the returned request. Callers that don't need the headers should
+/// keep using `decodeRequest`.
+pub fn decodeRequestWithHeaders(data: []const u8, headers_out: []qpack.HeaderField) !DecodeRequestInfo {
     var pos: usize = 0;
     var method: ?[]const u8 = null;
     var path: ?[]const u8 = null;
     var scheme: ?[]const u8 = null;
     var authority: ?[]const u8 = null;
     var body: ?[]const u8 = null;
+    var header_count: usize = 0;
 
     // Skip GREASE / unknown extension frames that may precede the initial
     // HEADERS frame (RFC 9114 §7.2.8, §9), then require HEADERS.
@@ -420,6 +437,9 @@ pub fn decodeRequest(data: []const u8) !struct { request: DecodedRequest, consum
             scheme = field.value;
         } else if (std.mem.eql(u8, field.name, ":authority")) {
             authority = field.value;
+        } else if (header_count < headers_out.len) {
+            headers_out[header_count] = field;
+            header_count += 1;
         }
     }
 
@@ -444,6 +464,7 @@ pub fn decodeRequest(data: []const u8) !struct { request: DecodedRequest, consum
             .scheme = scheme orelse "https",
             .authority = authority,
             .body = body,
+            .headers = headers_out[0..header_count],
         },
         .consumed = pos,
     };
@@ -597,6 +618,10 @@ pub const DecodedRequest = struct {
     scheme: []const u8,
     authority: ?[]const u8,
     body: ?[]const u8,
+    /// Non-pseudo request headers, in receive order. Empty when the caller
+    /// used `decodeRequest` (which discards them); populated only by
+    /// `decodeRequestWithHeaders`. Field slices borrow the input buffer.
+    headers: []const qpack.HeaderField = &.{},
 };
 
 /// A decoded HTTP response (borrows from the input buffer).
@@ -761,10 +786,29 @@ pub fn encodeRequestWithDynamic(
 }
 
 /// Decode an HTTP/3 request using QPACK dynamic table references.
+pub const DynamicDecodeRequestInfo = struct {
+    request: DecodedRequest,
+    consumed: usize,
+    required_insert_count: u64,
+};
+
+/// Decode an HTTP/3 request using QPACK dynamic table references, discarding
+/// non-pseudo request headers (legacy behavior).
 pub fn decodeRequestWithDynamic(
     data: []const u8,
     dynamic_table: *const qpack.DynamicTable,
-) !struct { request: DecodedRequest, consumed: usize, required_insert_count: u64 } {
+) !DynamicDecodeRequestInfo {
+    return decodeRequestWithDynamicWithHeaders(data, dynamic_table, &.{});
+}
+
+/// Like `decodeRequestWithDynamic`, but also copies non-pseudo request
+/// headers into `headers_out` (up to its capacity) and links them from
+/// `request.headers` (which borrows `headers_out`).
+pub fn decodeRequestWithDynamicWithHeaders(
+    data: []const u8,
+    dynamic_table: *const qpack.DynamicTable,
+    headers_out: []qpack.HeaderField,
+) !DynamicDecodeRequestInfo {
     var pos: usize = 0;
     var method: ?[]const u8 = null;
     var path: ?[]const u8 = null;
@@ -789,6 +833,7 @@ pub fn decodeRequestWithDynamic(
     const decoded_block = try qpack.decodeHeaderBlockWithDynamicInfo(headers_result.frame.payload, &fields, dynamic_table);
     const field_count = decoded_block.field_count;
 
+    var header_count: usize = 0;
     for (fields[0..field_count]) |field| {
         // Enforce per-field length + casing limits before use (RFC 9204 §3.1).
         try h3_limits.validateHeaderField(field.name, field.value);
@@ -800,6 +845,9 @@ pub fn decodeRequestWithDynamic(
             scheme = field.value;
         } else if (std.mem.eql(u8, field.name, ":authority")) {
             authority = field.value;
+        } else if (header_count < headers_out.len) {
+            headers_out[header_count] = field;
+            header_count += 1;
         }
     }
 
@@ -824,6 +872,7 @@ pub fn decodeRequestWithDynamic(
             .scheme = scheme orelse "https",
             .authority = authority,
             .body = body,
+            .headers = headers_out[0..header_count],
         },
         .consumed = pos,
         .required_insert_count = decoded_block.required_insert_count,

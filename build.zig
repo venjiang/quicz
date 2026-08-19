@@ -173,6 +173,23 @@ pub fn build(b: *std.Build) void {
     const run_h3_server_cmd = b.addRunArtifact(exe_h3_server);
     run_h3_server.dependOn(&run_h3_server_cmd.step);
 
+    // Cookie-jar demo HTTP/3 server (Set-Cookie + redirect + cookie echo)
+    const exe_h3_cookie_server = b.addExecutable(.{
+        .name = "quicz-h3-cookie-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/h3_cookie_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_h3_cookie_server);
+    const run_h3_cookie_server = b.step("run-h3-cookie-server", "Run HTTP/3 cookie demo server on 127.0.0.1:4434");
+    const run_h3_cookie_server_cmd = b.addRunArtifact(exe_h3_cookie_server);
+    run_h3_cookie_server.dependOn(&run_h3_cookie_server_cmd.step);
+
     // DATAGRAM echo (RFC 9221)
     const exe_datagram_echo = b.addExecutable(.{
         .name = "quicz-datagram-echo",

@@ -87,6 +87,9 @@ pub const H3Server = struct {
         /// True while the QPACK decoder awaits insertions from the peer's
         /// encoder stream (RFC 9204 §2.2.1). `wire` keeps accumulating.
         blocked: bool = false,
+        /// Sink for non-pseudo request headers, kept in the stream so
+        /// `decoded.headers` stays valid until the handler runs.
+        request_headers: [32]qpack.HeaderField = undefined,
         decoded: ?h3_request.DecodedRequest = null,
     };
 
@@ -439,7 +442,7 @@ pub const H3Server = struct {
             // QPACK block), not just its payload.
             const headers_wire = rs.wire.items[0..frame.consumed];
             const decoded = if (self.dec_table) |*dt| blk: {
-                const r = h3_request.decodeRequestWithDynamic(headers_wire, dt) catch |e| {
+                const r = h3_request.decodeRequestWithDynamicWithHeaders(headers_wire, dt, &rs.request_headers) catch |e| {
                     if (e == error.BlockedByQpack) {
                         rs.blocked = true;
                         return .{ .result = .blocked, .consumed = data.len };
@@ -448,7 +451,7 @@ pub const H3Server = struct {
                 };
                 ric = r.required_insert_count;
                 break :blk r.request;
-            } else (try h3_request.decodeRequest(headers_wire)).request;
+            } else (try h3_request.decodeRequestWithHeaders(headers_wire, &rs.request_headers)).request;
             try self.sendSectionAcknowledgement(stream_id, ric);
 
             // Retain only the HEADERS frame in `wire` (the decoded request
@@ -534,14 +537,15 @@ pub const H3Server = struct {
     /// needs insertions from the peer's encoder stream (blocked stream).
     fn tryProcessRequest(self: *H3Server, stream_id: u64, request_data: []const u8) !bool {
         var request_required_insert_count: u64 = 0;
+        var stack_headers: [32]qpack.HeaderField = undefined;
         const decoded = if (self.dec_table) |*dt| blk: {
-            const result = h3_request.decodeRequestWithDynamic(request_data, dt) catch |err| {
+            const result = h3_request.decodeRequestWithDynamicWithHeaders(request_data, dt, &stack_headers) catch |err| {
                 if (err == error.BlockedByQpack) return false;
                 return err;
             };
             request_required_insert_count = result.required_insert_count;
             break :blk result.request;
-        } else (try h3_request.decodeRequest(request_data)).request;
+        } else (try h3_request.decodeRequestWithHeaders(request_data, &stack_headers)).request;
 
         try self.sendSectionAcknowledgement(stream_id, request_required_insert_count);
 
@@ -709,7 +713,7 @@ pub const H3Server = struct {
             const frame = h3_frame.decodeFrame(rs.wire.items) catch continue;
             if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) continue;
             const headers_wire = rs.wire.items[0..frame.consumed];
-            const r = h3_request.decodeRequestWithDynamic(headers_wire, &self.dec_table.?) catch |e| switch (e) {
+            const r = h3_request.decodeRequestWithDynamicWithHeaders(headers_wire, &self.dec_table.?, &rs.request_headers) catch |e| switch (e) {
                 error.BlockedByQpack => continue,
                 else => return e,
             };
