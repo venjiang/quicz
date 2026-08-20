@@ -72,6 +72,9 @@ const ProbeResult = struct {
     http_status: ?u16,
     alt_svc_h3: ?bool,
     alt_svc_value: ?[]const u8,
+    fallback_reachable: ?bool,
+    fallback_http_version: ?[]const u8,
+    fallback_http_status: ?u16,
     failure_stage: ?ProbeStage,
     handshake_ms: u64,
     request_ms: u64,
@@ -189,6 +192,24 @@ fn formatProbeJson(result: ProbeResult, buf: []u8) ![]const u8 {
     try w.writeAll(",\n  \"alt_svc_value\": ");
     if (result.alt_svc_value) |v| {
         try w.print("\"{s}\"", .{v});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"fallback_reachable\": ");
+    if (result.fallback_reachable) |r| {
+        try w.writeAll(if (r) "true" else "false");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"fallback_http_version\": ");
+    if (result.fallback_http_version) |v| {
+        try w.print("\"{s}\"", .{v});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"fallback_http_status\": ");
+    if (result.fallback_http_status) |s| {
+        try w.print("{d}", .{s});
     } else {
         try w.writeAll("null");
     }
@@ -313,6 +334,14 @@ fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
         try put(buf, &pos, "\n");
     }
 
+    if (result.fallback_reachable) |reachable| {
+        try put(buf, &pos, "quic_fallback_reachable{target=\"");
+        try put(buf, &pos, tgt);
+        try put(buf, &pos, "\"} ");
+        pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (reachable) 1 else 0)})).len;
+        try put(buf, &pos, "\n");
+    }
+
     return buf[0..pos];
 }
 
@@ -335,6 +364,9 @@ fn formatProbeNagios(result: ProbeResult, buf: []u8) ![]const u8 {
         });
         if (result.alt_svc_h3) |found| {
             try w.print(" alt_svc_h3={s}", .{if (found) "yes" else "no"});
+        }
+        if (result.fallback_reachable) |r| {
+            try w.print(" fallback={s}", .{if (r) "ok" else "fail"});
         }
         try w.print(" | quic_probe_success=1 quic_handshake_duration_seconds={d:.3} quic_request_duration_seconds={d:.3}\n", .{
             @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0,
@@ -381,6 +413,9 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
         .http_status = null,
         .alt_svc_h3 = null,
         .alt_svc_value = null,
+        .fallback_reachable = null,
+        .fallback_http_version = null,
+        .fallback_http_status = null,
         .failure_stage = .invalid_url,
         .handshake_ms = 0,
         .request_ms = 0,
@@ -618,6 +653,27 @@ fn checkAltSvc(allocator: std.mem.Allocator, io: std.Io, result: *ProbeResult, o
         return;
     };
 
+    // Fallback is reachable (TCP+TLS+HTTP succeeded).
+    result.fallback_reachable = true;
+
+    // Parse HTTP status line for version and status code.
+    if (std.mem.indexOfScalar(u8, headers, '\n')) |_| {
+        var line_it = std.mem.splitScalar(u8, headers, '\n');
+        if (line_it.next()) |status_line_raw| {
+            const status_line = std.mem.trim(u8, status_line_raw, "\r");
+            // Format: "HTTP/1.1 200 OK" or "HTTP/2 200 OK"
+            if (std.mem.indexOfScalar(u8, status_line, ' ')) |sp1| {
+                result.fallback_http_version = try allocator.dupe(u8, status_line[0..sp1]);
+                const rest = std.mem.trim(u8, status_line[sp1..], " ");
+                if (std.mem.indexOfScalar(u8, rest, ' ')) |sp2| {
+                    result.fallback_http_status = try std.fmt.parseInt(u16, rest[0..sp2], 10);
+                } else {
+                    result.fallback_http_status = try std.fmt.parseInt(u16, rest, 10);
+                }
+            }
+        }
+    }
+
     // Parse Alt-Svc header.
     var it = std.mem.splitScalar(u8, headers, '\n');
     while (it.next()) |raw| {
@@ -752,6 +808,9 @@ test "probe invalid url stage" {
         .http_status = null,
         .alt_svc_h3 = null,
         .alt_svc_value = null,
+        .fallback_reachable = null,
+        .fallback_http_version = null,
+        .fallback_http_status = null,
         .failure_stage = .invalid_url,
         .handshake_ms = 0,
         .request_ms = 0,
