@@ -37,6 +37,7 @@ const HandshakeType = struct {
 
 const ExtType = struct {
     const server_name: u16 = 0;
+    const supported_groups: u16 = 10;
     const supported_versions: u16 = 43;
     const key_share: u16 = 51;
     const alpn: u16 = 16;
@@ -274,13 +275,22 @@ pub const TlsClientStream = struct {
         const ch_len = buildClientHello(&ch_buf, client_random, x25519_public, cfg.server_name);
         const ch_msg = ch_buf[0..ch_len];
         transcript.update(ch_msg);
-        try sendRecord(out, ContentType.handshake, ch_msg);
 
         // Read ServerHello (plaintext).
-        const sh_rec = try readRecord(in, &recv_buf);
-        if (sh_rec.content_type != ContentType.handshake) return error.TlsUnexpectedMessage;
-        const sh = try parseServerHello(sh_rec.payload);
-        transcript.update(sh_rec.payload);
+        const sh_rec = readRecord(in, &recv_buf) catch {
+            std.log.err("tls_client: failed to read ServerHello", .{});
+            return error.TlsHandshakeFailed;
+        };
+        if (sh_rec.content_type == ContentType.alert) {
+            if (sh_rec.payload.len >= 2) {
+            }
+            return error.TlsHandshakeFailed;
+        }
+        if (sh_rec.content_type != ContentType.handshake) {
+            std.log.err("tls_client: expected handshake record, got type={d}", .{sh_rec.content_type});
+            return error.TlsUnexpectedMessage;
+        }
+        const sh = parseServerHello(sh_rec.payload) catch {
 
         // Compute shared secret and derive handshake keys.
         const shared_secret = try X25519.scalarmult(x25519_secret, sh.server_public);
@@ -295,19 +305,25 @@ pub const TlsClientStream = struct {
 
         // Read EncryptedExtensions.
         var dec_buf: [record_max]u8 = undefined;
-        const ee_msg = try readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq);
-        try checkHandshakeType(ee_msg, HandshakeType.encrypted_extensions);
-        transcript.update(ee_msg);
+        const ee_msg = readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq) catch {
+            std.log.err("tls_client: failed to read EncryptedExtensions", .{});
+            return error.TlsHandshakeFailed;
+        };
+        checkHandshakeType(ee_msg, HandshakeType.encrypted_extensions) catch {
 
         // Read Certificate.
-        const cert_msg = try readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq);
-        try checkHandshakeType(cert_msg, HandshakeType.certificate);
-        transcript.update(cert_msg);
+        const cert_msg = readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq) catch {
+            std.log.err("tls_client: failed to read Certificate", .{});
+            return error.TlsHandshakeFailed;
+        };
+        checkHandshakeType(cert_msg, HandshakeType.certificate) catch {
 
         // Read CertificateVerify.
-        const cv_msg = try readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq);
-        try checkHandshakeType(cv_msg, HandshakeType.certificate_verify);
-        const cv_body = readHandshakeBody(cv_msg);
+        const cv_msg = readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq) catch {
+            std.log.err("tls_client: failed to read CertificateVerify", .{});
+            return error.TlsHandshakeFailed;
+        };
+        checkHandshakeType(cv_msg, HandshakeType.certificate_verify) catch {
         if (cv_body.len < 4) return error.TlsDecodeError;
         _ = readU16(cv_body[0..2]); // sig_scheme
         _ = readU16(cv_body[2..4]); // sig_len
@@ -337,8 +353,14 @@ pub const TlsClientStream = struct {
         transcript.update(cv_msg);
 
         // Read Server Finished.
-        const sf_msg = try readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq);
-        try checkHandshakeType(sf_msg, HandshakeType.finished);
+        const sf_msg = readHandshakeMessage(in, &dec_buf, server_hs_key, server_hs_iv, &server_hs_seq) catch {
+            std.log.err("tls_client: failed to read Server Finished", .{});
+            return error.TlsHandshakeFailed;
+        };
+        checkHandshakeType(sf_msg, HandshakeType.finished) catch {
+            std.log.err("tls_client: expected Finished, got type={d}", .{sf_msg[0]});
+            return error.TlsHandshakeFailed;
+        };
         if (sf_msg.len < 36) return error.TlsBadFinished;
         const expected_vd = tls13.KeySchedule.computeFinishedVerifyData(ks.server_handshake_traffic_secret, transcript.current());
         if (!crypto.timing_safe.eql([32]u8, sf_msg[4..36].*, expected_vd)) return error.TlsBadFinished;

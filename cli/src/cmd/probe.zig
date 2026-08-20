@@ -612,6 +612,9 @@ fn checkAltSvc(allocator: std.mem.Allocator, io: std.Io, result: *ProbeResult, o
     };
     defer tcp.close(io);
 
+    if (common.g_verbose) std.debug.print("* alt-svc: TCP connected to {d}.{d}.{d}.{d}:{d}\n", .{ ip[0], ip[1], ip[2], ip[3], parsed_port });
+
+
     var recv_buf: [65536]u8 = undefined;
     var send_buf: [65536]u8 = undefined;
     var reader = tcp.reader(io, &recv_buf);
