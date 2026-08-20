@@ -100,8 +100,13 @@ Checks, in order:
    against the system CA bundle unless `-k` / `--ca` is given)
 4. One HTTP/3 GET on the URL path
 
-Output is a text report by default; `--json` emits a structured result for CI.
-Exit code is 0 when every check passes, 1 otherwise.
+Output is a text report by default; `--json` emits a structured result for
+CI, and `--prometheus` emits Prometheus text exposition format (metric names
+follow the `quicz.md` plan: `quic_probe_success`, `quic_handshake_success`,
+`quic_alpn_h3_success`, `quic_http3_request_success`, `quic_failure_stage`,
+`quic_handshake_duration_seconds`, `quic_request_duration_seconds`) so a
+scrape endpoint can wrap a probe directly. Exit code is 0 when every check
+passes, 1 otherwise.
 
 Failure stages: `invalid_url`, `dns_resolve_failed`, `udp_timeout`,
 `quic_handshake_failed`, `tls_cert_failed`, `http3_request_failed`. The
@@ -114,6 +119,7 @@ runtime client now tracks (`Client.datagramsReceived`).
 ./zig-out/bin/quicz probe https://cloudflare-quic.com/ --json
 ./zig-out/bin/quicz probe https://127.0.0.1:4433/ -k          # local pass
 ./zig-out/bin/quicz probe https://127.0.0.1:4544 -k            # closed port -> udp_timeout
+./zig-out/bin/quicz probe https://example.com --prometheus     # scrape endpoint format
 ```
 
 Known limits: the client only negotiates `h3`, so `alpn_not_h3` and

@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
-//!   quicz probe <url> [--json] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
+//!   quicz probe <url> [--json|--prometheus] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -1100,6 +1100,111 @@ fn renderProbeJson(result: ProbeResult) void {
     std.debug.print("{s}", .{json});
 }
 
+/// Escape a Prometheus label value (`\`, `"`, newline). URL targets are
+/// plain ASCII in practice, but exporters must not emit invalid exposition.
+fn escapePromLabel(out: []u8, pos: *usize, value: []const u8) !void {
+    for (value) |ch| {
+        switch (ch) {
+            '\\' => {
+                if (pos.* + 2 > out.len) return error.NoSpaceLeft;
+                out[pos.*] = '\\';
+                out[pos.* + 1] = '\\';
+                pos.* += 2;
+            },
+            '"' => {
+                if (pos.* + 2 > out.len) return error.NoSpaceLeft;
+                out[pos.*] = '\\';
+                out[pos.* + 1] = '"';
+                pos.* += 2;
+            },
+            '\n' => {
+                if (pos.* + 2 > out.len) return error.NoSpaceLeft;
+                out[pos.*] = '\\';
+                out[pos.* + 1] = 'n';
+                pos.* += 2;
+            },
+            else => {
+                if (pos.* + 1 > out.len) return error.NoSpaceLeft;
+                out[pos.*] = ch;
+                pos.* += 1;
+            },
+        }
+    }
+}
+
+/// Render the probe result in Prometheus text exposition format. Metric
+/// names follow the `quicz.md` product plan (quic_*); a scrape of a failed
+/// probe carries the failure stage as a label for alerting.
+fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
+    var pos: usize = 0;
+    const put = struct {
+        fn w(out: []u8, p: *usize, s: []const u8) !void {
+            if (p.* + s.len > out.len) return error.NoSpaceLeft;
+            @memcpy(out[p.*..][0..s.len], s);
+            p.* += s.len;
+        }
+    }.w;
+
+    var esc: [2048]u8 = undefined;
+    var epos: usize = 0;
+    try escapePromLabel(&esc, &epos, result.target);
+    const tgt = esc[0..epos];
+
+    try put(buf, &pos, "# HELP quic_probe_success Whether the HTTP/3/QUIC probe passed all checks.\n");
+    try put(buf, &pos, "# TYPE quic_probe_success gauge\n");
+    try put(buf, &pos, "quic_probe_success{target=\"");
+    try put(buf, &pos, tgt);
+    try put(buf, &pos, "\"} ");
+    pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (result.isOk()) 1 else 0)})).len;
+    try put(buf, &pos, "\n");
+
+    try put(buf, &pos, "quic_udp_reachable{target=\"");
+    try put(buf, &pos, tgt);
+    try put(buf, &pos, "\"} ");
+    pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (result.udp_reachable) 1 else 0)})).len;
+    try put(buf, &pos, "\n");
+
+    try put(buf, &pos, "quic_handshake_success{target=\"");
+    try put(buf, &pos, tgt);
+    try put(buf, &pos, "\"} ");
+    pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (result.quic_handshake_success) 1 else 0)})).len;
+    try put(buf, &pos, "\n");
+
+    try put(buf, &pos, "quic_alpn_h3_success{target=\"");
+    try put(buf, &pos, tgt);
+    try put(buf, &pos, "\"} ");
+    pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (std.mem.eql(u8, result.alpn orelse "", "h3")) 1 else 0)})).len;
+    try put(buf, &pos, "\n");
+
+    try put(buf, &pos, "quic_http3_request_success{target=\"");
+    try put(buf, &pos, tgt);
+    try put(buf, &pos, "\"} ");
+    pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (result.http3_request_success) 1 else 0)})).len;
+    try put(buf, &pos, "\n");
+
+    if (result.failure_stage) |stage| {
+        const stage_name = probeStageName(stage);
+        var esc_stage_buf: [64]u8 = undefined;
+        var s_pos: usize = 0;
+        try escapePromLabel(&esc_stage_buf, &s_pos, stage_name);
+        try put(buf, &pos, "quic_failure_stage{target=\"");
+        try put(buf, &pos, tgt);
+        try put(buf, &pos, "\",stage=\"");
+        try put(buf, &pos, esc_stage_buf[0..s_pos]);
+        try put(buf, &pos, "\"} 1\n");
+    }
+
+    pos += (try std.fmt.bufPrint(buf[pos..], "quic_handshake_duration_seconds{{target=\"{s}\"}} {d:.3}\n", .{ tgt, @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0 })).len;
+    pos += (try std.fmt.bufPrint(buf[pos..], "quic_request_duration_seconds{{target=\"{s}\"}} {d:.3}\n", .{ tgt, @as(f64, @floatFromInt(result.request_ms)) / 1000.0 })).len;
+    return buf[0..pos];
+}
+
+fn renderProbePrometheus(result: ProbeResult) void {
+    var buf: [4096]u8 = undefined;
+    const out = formatProbePrometheus(result, &buf) catch return;
+    std.debug.print("{s}", .{out});
+}
+
 const ProbeWork = struct {
     allocator: std.mem.Allocator,
     opts: ProbeOptions,
@@ -1243,12 +1348,14 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
         std.process.exit(2);
     };
     var opts = ProbeOptions{ .target = target };
-    var json = false;
+    var output: enum { text, json, prometheus } = .text;
     var resolves = std.ArrayList(ResolveOverride).empty;
     defer resolves.deinit(allocator);
     while (args.next()) |a| {
         if (std.mem.eql(u8, a, "--json")) {
-            json = true;
+            output = .json;
+        } else if (std.mem.eql(u8, a, "--prometheus")) {
+            output = .prometheus;
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
             g_verbose = true;
         } else if (std.mem.eql(u8, a, "-k") or std.mem.eql(u8, a, "--insecure")) {
@@ -1275,8 +1382,34 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
 
     var work = ProbeWork{ .allocator = allocator, .opts = opts };
     try runWithTimeout(io, opts.timeout_ms, probeWork, &work);
-    if (json) renderProbeJson(work.result) else renderProbeText(work.result);
+    switch (output) {
+        .json => renderProbeJson(work.result),
+        .prometheus => renderProbePrometheus(work.result),
+        .text => renderProbeText(work.result),
+    }
     if (!work.result.isOk()) std.process.exit(1);
+}
+
+test "probe prometheus rendering" {
+    var buf: [4096]u8 = undefined;
+    const out = try formatProbePrometheus(.{
+        .target = "https://example.com/x",
+        .dns_ok = true,
+        .resolved_ip = .{ 127, 0, 0, 1 },
+        .udp_reachable = false,
+        .quic_handshake_success = false,
+        .alpn = null,
+        .http3_request_success = false,
+        .http_status = null,
+        .failure_stage = .udp_timeout,
+        .handshake_ms = 2004,
+        .request_ms = 0,
+    }, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_probe_success{target=\"https://example.com/x\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_udp_reachable{target=\"https://example.com/x\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_failure_stage{target=\"https://example.com/x\",stage=\"udp_timeout\"} 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_handshake_duration_seconds{target=\"https://example.com/x\"} 2.004") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_request_duration_seconds") != null);
 }
 
 test "probe target normalization" {
