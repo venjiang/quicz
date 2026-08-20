@@ -4,6 +4,7 @@
 const std = @import("std");
 const quicz = @import("quicz");
 const common = @import("../common.zig");
+const tls_tcp_client = @import("../tls_tcp_client.zig");
 
 // Shared helpers re-exported for readability inside this module.
 const nextArg = common.nextArg;
@@ -69,6 +70,8 @@ const ProbeResult = struct {
     alpn: ?[]const u8,
     http3_request_success: bool,
     http_status: ?u16,
+    alt_svc_h3: ?bool,
+    alt_svc_value: ?[]const u8,
     failure_stage: ?ProbeStage,
     handshake_ms: u64,
     request_ms: u64,
@@ -86,6 +89,7 @@ const ProbeOptions = struct {
     connect_timeout_ms: ?u64 = null,
     timeout_ms: u64 = 10000,
     user_agent: []const u8 = "quicz-probe/0.1",
+    check_alt_svc: bool = true,
 };
 
 const ProbeStageName = enum { invalid_url, dns_resolve_failed, udp_timeout, quic_handshake_failed, tls_cert_failed, http3_request_failed };
@@ -130,6 +134,12 @@ fn renderProbeText(result: ProbeResult) void {
     if (result.http_status) |code| {
         std.debug.print("  http_status:   {d}\n", .{code});
     }
+    if (result.alt_svc_h3) |found| {
+        std.debug.print("  alt_svc_h3:    {s}\n", .{if (found) "yes" else "no"});
+        if (result.alt_svc_value) |v| {
+            std.debug.print("  alt_svc_value: {s}\n", .{v});
+        }
+    }
     if (result.failure_stage) |stage| {
         std.debug.print("  failure_stage: {s}\n", .{probeStageName(stage)});
         std.debug.print("  verdict:       fail\n", .{});
@@ -167,6 +177,18 @@ fn formatProbeJson(result: ProbeResult, buf: []u8) ![]const u8 {
     try w.writeAll(",\n  \"http_status\": ");
     if (result.http_status) |code| {
         try w.print("{d}", .{code});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"alt_svc_h3\": ");
+    if (result.alt_svc_h3) |found| {
+        try w.writeAll(if (found) "true" else "false");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"alt_svc_value\": ");
+    if (result.alt_svc_value) |v| {
+        try w.print("\"{s}\"", .{v});
     } else {
         try w.writeAll("null");
     }
@@ -282,6 +304,15 @@ fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
 
     pos += (try std.fmt.bufPrint(buf[pos..], "quic_handshake_duration_seconds{{target=\"{s}\"}} {d:.3}\n", .{ tgt, @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0 })).len;
     pos += (try std.fmt.bufPrint(buf[pos..], "quic_request_duration_seconds{{target=\"{s}\"}} {d:.3}\n", .{ tgt, @as(f64, @floatFromInt(result.request_ms)) / 1000.0 })).len;
+
+    if (result.alt_svc_h3) |found| {
+        try put(buf, &pos, "quic_alt_svc_h3{target=\"");
+        try put(buf, &pos, tgt);
+        try put(buf, &pos, "\"} ");
+        pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (found) 1 else 0)})).len;
+        try put(buf, &pos, "\n");
+    }
+
     return buf[0..pos];
 }
 
@@ -297,10 +328,15 @@ fn renderProbePrometheus(result: ProbeResult) void {
 fn formatProbeNagios(result: ProbeResult, buf: []u8) ![]const u8 {
     var w = std.Io.Writer.fixed(buf);
     if (result.isOk()) {
-        try w.print("QUIC-H3 OK - {s} handshake={d:.3}s request={d:.3}s | quic_probe_success=1 quic_handshake_duration_seconds={d:.3} quic_request_duration_seconds={d:.3}\n", .{
+        try w.print("QUIC-H3 OK - {s} handshake={d:.3}s request={d:.3}s", .{
             result.target,
             @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0,
             @as(f64, @floatFromInt(result.request_ms)) / 1000.0,
+        });
+        if (result.alt_svc_h3) |found| {
+            try w.print(" alt_svc_h3={s}", .{if (found) "yes" else "no"});
+        }
+        try w.print(" | quic_probe_success=1 quic_handshake_duration_seconds={d:.3} quic_request_duration_seconds={d:.3}\n", .{
             @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0,
             @as(f64, @floatFromInt(result.request_ms)) / 1000.0,
         });
@@ -343,14 +379,19 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
         .alpn = null,
         .http3_request_success = false,
         .http_status = null,
+        .alt_svc_h3 = null,
+        .alt_svc_value = null,
         .failure_stage = .invalid_url,
         .handshake_ms = 0,
         .request_ms = 0,
     };
 
-    const parsed = parseH3Url(opts.target) catch {
+    const parsed = parseH3Url(opts.target) catch |e| {
+        if (common.g_verbose) std.debug.print("* probe parse URL error: {s}\n", .{@errorName(e)});
         return result;
     };
+    const parsed_host = parsed.host;
+    const parsed_port = parsed.port;
 
     const ip = resolveHostWithOverrides(io, parsed.host, parsed.port, opts.resolve) catch {
         result.failure_stage = .dns_resolve_failed;
@@ -358,6 +399,13 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
     };
     result.dns_ok = true;
     result.resolved_ip = ip;
+
+    // Always run Alt-Svc check as a best-effort supplementary check.
+    defer {
+        if (opts.check_alt_svc) {
+            checkAltSvc(allocator, io, &result, opts, ip, parsed_host, parsed_port) catch {};
+        }
+    }
 
     var maybe_bundle: ?std.crypto.Certificate.Bundle = null;
     if (opts.ca_path) |pem| {
@@ -451,6 +499,7 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
     result.http3_request_success = true;
     result.http_status = response.status;
     result.failure_stage = null;
+
     return result;
 }
 
@@ -489,6 +538,8 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
             opts.timeout_ms = try std.math.mul(u64, secs, 1000);
         } else if (std.mem.eql(u8, a, "-A") or std.mem.eql(u8, a, "--user-agent")) {
             opts.user_agent = try nextArg(args);
+        } else if (std.mem.eql(u8, a, "--no-alt-svc")) {
+            opts.check_alt_svc = false;
         } else {
             std.debug.print("probe: unknown option: {s}\n", .{a});
             return error.UnknownOption;
@@ -511,6 +562,78 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
     }
     if (!work.result.isOk()) std.process.exit(1);
 }
+
+/// Perform a best-effort Alt-Svc check via TCP+TLS.  This is supplementary —
+/// failures here do not affect the probe pass/fail verdict.
+fn checkAltSvc(allocator: std.mem.Allocator, io: std.Io, result: *ProbeResult, opts: ProbeOptions, ip: [4]u8, parsed_host: []const u8, parsed_port: u16) !void {
+    result.alt_svc_h3 = false;
+    result.alt_svc_value = null;
+
+    // TCP connect to the resolved IP.
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = ip, .port = parsed_port } };
+    const tcp = addr.connect(io, .{ .mode = .stream }) catch {
+        if (common.g_verbose) std.debug.print("* alt-svc: TCP connect failed\n", .{});
+        return;
+    };
+    defer tcp.close(io);
+
+    var recv_buf: [65536]u8 = undefined;
+    var send_buf: [65536]u8 = undefined;
+    var reader = tcp.reader(io, &recv_buf);
+    var writer = tcp.writer(io, &send_buf);
+
+    // TLS handshake (client).
+    const now = std.Io.Clock.real.now(io);
+    var tls = tls_tcp_client.TlsClientStream.handshake(&reader.interface, &writer.interface, .{
+        .server_name = parsed_host,
+        .insecure = opts.insecure,
+        .ca_bundle = null,
+    }, now.toSeconds()) catch {
+        if (common.g_verbose) std.debug.print("* alt-svc: TLS handshake failed\n", .{});
+        return;
+    };
+
+    // HTTP/1.1 GET request.
+    const host = parsed_host;
+    var req_buf: [4096]u8 = undefined;
+    const req = try std.fmt.bufPrint(&req_buf, "GET / HTTP/1.1\r\nHost: {s}\r\nUser-Agent: {s}\r\nConnection: close\r\n\r\n", .{ host, opts.user_agent });
+    tls.write(req) catch {
+        if (common.g_verbose) std.debug.print("* alt-svc: HTTP request write failed\n", .{});
+        return;
+    };
+
+    // Read response headers.
+    var resp_buf: [65536]u8 = undefined;
+    var resp_len: usize = 0;
+    var header_end: ?usize = null;
+    while (header_end == null) {
+        if (resp_len >= resp_buf.len) break;
+        const n = tls.read(resp_buf[resp_len..]) catch break;
+        if (n == 0) break;
+        resp_len += n;
+        header_end = std.mem.indexOf(u8, resp_buf[0..resp_len], "\r\n\r\n");
+    }
+    const headers = if (header_end) |end| resp_buf[0..end] else blk: {
+        if (resp_len > 0) break :blk resp_buf[0..resp_len];
+        return;
+    };
+
+    // Parse Alt-Svc header.
+    var it = std.mem.splitScalar(u8, headers, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, "\r");
+        if (std.ascii.startsWithIgnoreCase(line, "alt-svc:")) {
+            const value = std.mem.trim(u8, line["alt-svc:".len..], " \t");
+            result.alt_svc_value = try allocator.dupe(u8, value);
+            // Check for h3 protocol.
+            if (std.mem.indexOf(u8, value, "h3") != null) {
+                result.alt_svc_h3 = true;
+            }
+            break;
+        }
+    }
+}
+
 
 test "probe nagios rendering" {
     var buf: [2048]u8 = undefined;
@@ -627,6 +750,8 @@ test "probe invalid url stage" {
         .alpn = null,
         .http3_request_success = false,
         .http_status = null,
+        .alt_svc_h3 = null,
+        .alt_svc_value = null,
         .failure_stage = .invalid_url,
         .handshake_ms = 0,
         .request_ms = 0,
