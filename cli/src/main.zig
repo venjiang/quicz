@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
-//!   quicz probe <url> [--json|--prometheus] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
+//!   quicz probe <url> [--json|--prometheus|--nagios] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -1205,6 +1205,34 @@ fn renderProbePrometheus(result: ProbeResult) void {
     std.debug.print("{s}", .{out});
 }
 
+/// Nagios/Icinga plugin output: one status line plus pipe-separated perfdata.
+/// Nagios exit conventions are applied by the caller (0 OK, 2 CRITICAL,
+/// 3 UNKNOWN); see `check_quic` in the quicz.md plan.
+fn formatProbeNagios(result: ProbeResult, buf: []u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    if (result.isOk()) {
+        try w.print("QUIC-H3 OK - {s} handshake={d:.3}s request={d:.3}s | quic_probe_success=1 quic_handshake_duration_seconds={d:.3} quic_request_duration_seconds={d:.3}\n", .{
+            result.target,
+            @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0,
+            @as(f64, @floatFromInt(result.request_ms)) / 1000.0,
+            @as(f64, @floatFromInt(result.handshake_ms)) / 1000.0,
+            @as(f64, @floatFromInt(result.request_ms)) / 1000.0,
+        });
+    } else {
+        const stage = if (result.failure_stage) |s_| probeStageName(s_) else "unknown";
+        try w.print("QUIC-H3 CRITICAL - {s} failure_stage={s} | quic_probe_success=0\n", .{
+            result.target, stage,
+        });
+    }
+    return w.buffered();
+}
+
+fn renderProbeNagios(result: ProbeResult) void {
+    var buf: [2048]u8 = undefined;
+    const out = formatProbeNagios(result, &buf) catch return;
+    std.debug.print("{s}", .{out});
+}
+
 const ProbeWork = struct {
     allocator: std.mem.Allocator,
     opts: ProbeOptions,
@@ -1348,7 +1376,7 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
         std.process.exit(2);
     };
     var opts = ProbeOptions{ .target = target };
-    var output: enum { text, json, prometheus } = .text;
+    var output: enum { text, json, prometheus, nagios } = .text;
     var resolves = std.ArrayList(ResolveOverride).empty;
     defer resolves.deinit(allocator);
     while (args.next()) |a| {
@@ -1356,6 +1384,8 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
             output = .json;
         } else if (std.mem.eql(u8, a, "--prometheus")) {
             output = .prometheus;
+        } else if (std.mem.eql(u8, a, "--nagios")) {
+            output = .nagios;
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
             g_verbose = true;
         } else if (std.mem.eql(u8, a, "-k") or std.mem.eql(u8, a, "--insecure")) {
@@ -1385,9 +1415,50 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
     switch (output) {
         .json => renderProbeJson(work.result),
         .prometheus => renderProbePrometheus(work.result),
+        .nagios => renderProbeNagios(work.result),
         .text => renderProbeText(work.result),
     }
+    if (output == .nagios) {
+        // Nagios plugin exit codes: 0 OK, 2 CRITICAL, 3 UNKNOWN.
+        if (!work.result.isOk()) std.process.exit(2);
+        return;
+    }
     if (!work.result.isOk()) std.process.exit(1);
+}
+
+test "probe nagios rendering" {
+    var buf: [2048]u8 = undefined;
+    const ok = try formatProbeNagios(.{
+        .target = "https://example.com",
+        .dns_ok = true,
+        .resolved_ip = .{ 127, 0, 0, 1 },
+        .udp_reachable = true,
+        .quic_handshake_success = true,
+        .alpn = "h3",
+        .http3_request_success = true,
+        .http_status = 200,
+        .failure_stage = null,
+        .handshake_ms = 107,
+        .request_ms = 15,
+    }, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, ok, "QUIC-H3 OK - https://example.com handshake=0.107s request=0.015s") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ok, "quic_probe_success=1") != null);
+
+    const fail = try formatProbeNagios(.{
+        .target = "https://192.0.2.1",
+        .dns_ok = true,
+        .resolved_ip = .{ 192, 0, 2, 1 },
+        .udp_reachable = false,
+        .quic_handshake_success = false,
+        .alpn = null,
+        .http3_request_success = false,
+        .http_status = null,
+        .failure_stage = .udp_timeout,
+        .handshake_ms = 2052,
+        .request_ms = 0,
+    }, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, fail, "QUIC-H3 CRITICAL - https://192.0.2.1 failure_stage=udp_timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fail, "quic_probe_success=0") != null);
 }
 
 test "probe prometheus rendering" {

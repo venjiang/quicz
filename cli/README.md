@@ -101,12 +101,14 @@ Checks, in order:
 4. One HTTP/3 GET on the URL path
 
 Output is a text report by default; `--json` emits a structured result for
-CI, and `--prometheus` emits Prometheus text exposition format (metric names
+CI, `--prometheus` emits Prometheus text exposition format (metric names
 follow the `quicz.md` plan: `quic_probe_success`, `quic_handshake_success`,
 `quic_alpn_h3_success`, `quic_http3_request_success`, `quic_failure_stage`,
 `quic_handshake_duration_seconds`, `quic_request_duration_seconds`) so a
-scrape endpoint can wrap a probe directly. Exit code is 0 when every check
-passes, 1 otherwise.
+scrape endpoint can wrap a probe directly, and `--nagios` emits a
+Nagios/Icinga plugin status line (`QUIC-H3 OK|CRITICAL - ... | perfdata`).
+Exit codes: 0 = pass, 1 = probe failure (2 in `--nagios` mode, Nagios
+CRITICAL), 2 = usage error (3 is reserved for `--nagios` UNKNOWN).
 
 Failure stages: `invalid_url`, `dns_resolve_failed`, `udp_timeout`,
 `quic_handshake_failed`, `tls_cert_failed`, `http3_request_failed`. The
@@ -120,6 +122,7 @@ runtime client now tracks (`Client.datagramsReceived`).
 ./zig-out/bin/quicz probe https://127.0.0.1:4433/ -k          # local pass
 ./zig-out/bin/quicz probe https://127.0.0.1:4544 -k            # closed port -> udp_timeout
 ./zig-out/bin/quicz probe https://example.com --prometheus     # scrape endpoint format
+./zig-out/bin/quicz probe https://example.com --nagios              # Nagios/Icinga plugin
 ```
 
 Known limits: the client only negotiates `h3`, so `alpn_not_h3` and
