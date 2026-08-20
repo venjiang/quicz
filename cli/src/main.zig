@@ -2,6 +2,7 @@
 //!
 //! Subcommands:
 //!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
+//!   quicz probe <url> [--json] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -86,6 +87,8 @@ fn printUsage() void {
         \\
         \\Usage:
         \\  quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
+        \\  quicz probe <url> [--json] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
+        \\                                     (scheme-less URLs are treated as https://; other schemes are rejected)
         \\  quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --client HOST PORT [--data BODY] [--ca PEM] [--timeout-ms MS]
@@ -948,6 +951,17 @@ fn cmdH3(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Itera
 
 // ---------------------------------------------------------------- probe
 
+/// Normalize the probe target URL. Returns the URL unchanged when it already
+/// has the `https://` scheme, prefixes `https://` for scheme-less inputs
+/// (curl-like convenience), and returns null for any explicit non-https
+/// scheme (http://, ftp://, ...) so the caller can report a usage error
+/// instead of silently rewriting an explicit scheme.
+fn normalizeProbeTarget(raw: []const u8, buf: []u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, raw, "https://")) return raw;
+    if (std.mem.indexOf(u8, raw, "://") != null) return null;
+    return std.fmt.bufPrint(buf, "https://{s}", .{raw}) catch return null;
+}
+
 /// HTTP/3/QUIC service health probe (`quicz probe <url>`). Follows the
 /// `quicz.md` product plan: report DNS, UDP reachability, QUIC/TLS handshake,
 /// ALPN and an HTTP/3 request, and attribute failures to a single stage.
@@ -1222,7 +1236,12 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
 }
 
 fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Iterator) !void {
-    const target = try nextArg(args);
+    const raw = try nextArg(args);
+    var target_buf: [4096]u8 = undefined;
+    const target = normalizeProbeTarget(raw, &target_buf) orelse {
+        std.debug.print("probe: unsupported URL '{s}' (only https:// is supported)\n", .{raw});
+        std.process.exit(2);
+    };
     var opts = ProbeOptions{ .target = target };
     var json = false;
     var resolves = std.ArrayList(ResolveOverride).empty;
@@ -1258,6 +1277,16 @@ fn cmdProbe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
     try runWithTimeout(io, opts.timeout_ms, probeWork, &work);
     if (json) renderProbeJson(work.result) else renderProbeText(work.result);
     if (!work.result.isOk()) std.process.exit(1);
+}
+
+test "probe target normalization" {
+    var buf: [4096]u8 = undefined;
+    try std.testing.expectEqualStrings("https://example.com", normalizeProbeTarget("https://example.com", &buf).?);
+    try std.testing.expectEqualStrings("https://example.com", normalizeProbeTarget("example.com", &buf).?);
+    try std.testing.expectEqualStrings("https://host:8443/x", normalizeProbeTarget("host:8443/x", &buf).?);
+    try std.testing.expect(normalizeProbeTarget("http://example.com", &buf) == null);
+    try std.testing.expect(normalizeProbeTarget("ftp://example.com", &buf) == null);
+    try std.testing.expect(normalizeProbeTarget("ws://example.com", &buf) == null);
 }
 
 test "probe stage names" {

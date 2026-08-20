@@ -86,6 +86,12 @@ failure to one stage: DNS resolution, UDP reachability, QUIC/TLS handshake or
 the HTTP/3 request. It is the local diagnostic entry point of the `quicz.md`
 product plan (QUIC-aware probe/exporter).
 
+A scheme-less URL (`example.com`, `host:8443/`) is treated as `https://`
+(curl-like convenience). An explicit non-https scheme (`http://`, `ftp://`,
+...) is rejected with a usage error and exit code 2 instead of being silently
+rewritten. Exit codes: 0 = all checks passed, 1 = probe failure (see
+`failure_stage`), 2 = usage error.
+
 Checks, in order:
 
 1. URL parsing (https only)
