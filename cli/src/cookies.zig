@@ -464,3 +464,7 @@ test "cookie jar upsert, matching, and round trip" {
     }
     try std.testing.expectEqual(jar.cookies.items.len, reparsed.len);
 }
+
+test "cookie jar module" {
+    _ = @import("cookies.zig");
+}

@@ -208,3 +208,31 @@ pub fn parseH3Url(url: []const u8) !H3Target {
 }
 
 pub const max_cli_response_body_size: usize = 256 * 1024 * 1024;
+
+test "parse h3 url" {
+    const t = try parseH3Url("https://example.com:8443/path?q=1");
+    try std.testing.expectEqualStrings("example.com", t.host);
+    try std.testing.expectEqual(@as(u16, 8443), t.port);
+    try std.testing.expectEqualStrings("/path?q=1", t.path);
+
+    const t2 = try parseH3Url("https://127.0.0.1/");
+    try std.testing.expectEqual(@as(u16, 443), t2.port);
+    try std.testing.expectEqualStrings("/", t2.path);
+
+    try std.testing.expectError(error.HttpsOnly, parseH3Url("http://x/"));
+}
+
+
+test "parse ipv4" {
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, try parseIpv4("127.0.0.1"));
+    try std.testing.expectError(error.InvalidCharacter, parseIpv4("not-an-ip"));
+}
+
+test "parse resolve spec" {
+    const o = try parseResolveSpec("example.com:443:127.0.0.1");
+    try std.testing.expectEqualStrings("example.com", o.host);
+    try std.testing.expectEqual(@as(u16, 443), o.port);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, o.addr);
+    try std.testing.expectError(error.BadResolveSpec, parseResolveSpec("example.com:443"));
+    try std.testing.expectError(error.BadResolveSpec, parseResolveSpec(":443:127.0.0.1"));
+}
