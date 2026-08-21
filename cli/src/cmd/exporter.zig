@@ -11,6 +11,7 @@ const ResolveOverride = common.ResolveOverride;
 const parseResolveSpec = common.parseResolveSpec;
 
 const default_port: u16 = 9633;
+const default_interval_ms: u64 = 60_000;
 const max_target_len: usize = 1024;
 var g_allocator: ?std.mem.Allocator = null;
 var g_io: ?std.Io = null;
@@ -22,6 +23,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Ite
 const ExporterConfig = struct {
     targets: []const []const u8,
     probe_options: probe.ProbeOptions,
+    interval_ms: u64,
+};
+
+const ExporterCache = struct {
+    results: []probe.ProbeResult,
+    lock: std.Io.RwLock = .init,
+
+    fn init(allocator: std.mem.Allocator, count: usize) !ExporterCache {
+        const results = try allocator.alloc(probe.ProbeResult, count);
+        for (results) |*result| result.* = probe.emptyProbeResult("");
+        return .{ .results = results };
+    }
+
+    fn deinit(self: *const ExporterCache, allocator: std.mem.Allocator) void {
+        for (self.results) |result| probe.deinitProbeResult(allocator, &result);
+        allocator.free(self.results);
+    }
 };
 
 fn appendNormalizedTarget(allocator: std.mem.Allocator, targets: *std.ArrayList([]const u8), raw: []const u8) !void {
@@ -41,6 +59,7 @@ fn appendNormalizedTarget(allocator: std.mem.Allocator, targets: *std.ArrayList(
 fn cmdExporter(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Iterator) !void {
     var bind: [4]u8 = .{ 127, 0, 0, 1 };
     var port: u16 = default_port;
+    var interval_ms: u64 = default_interval_ms;
     var targets: std.ArrayList([]const u8) = .empty;
     defer {
         for (targets.items) |target| allocator.free(target);
@@ -65,6 +84,13 @@ fn cmdExporter(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args
             bind = try parseIpv4(try nextArg(args));
         } else if (std.mem.eql(u8, arg, "--port")) {
             port = try std.fmt.parseInt(u16, try nextArg(args), 10);
+        } else if (std.mem.eql(u8, arg, "--interval")) {
+            const seconds = try std.fmt.parseInt(u64, try nextArg(args), 10);
+            if (seconds < 1) {
+                std.debug.print("exporter: --interval must be at least 1 second\n", .{});
+                return error.InvalidInterval;
+            }
+            interval_ms = try std.math.mul(u64, seconds, 1000);
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             common.g_verbose = true;
         } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--insecure")) {
@@ -97,7 +123,12 @@ fn cmdExporter(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args
     const config = ExporterConfig{
         .targets = targets.items,
         .probe_options = probe_options,
+        .interval_ms = interval_ms,
     };
+    var cache = try ExporterCache.init(allocator, targets.items.len);
+    defer cache.deinit(allocator);
+    try refreshCache(io, &cache, &config);
+
     var address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = bind, .port = port } };
     var server = address.listen(io, .{ .reuse_address = true }) catch |err| {
         std.debug.print("exporter: failed to listen on {d}.{d}.{d}.{d}:{d}: {s}\n", .{
@@ -107,15 +138,19 @@ fn cmdExporter(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args
     };
     defer server.deinit(io);
 
-    std.debug.print("quicz exporter: http://{d}.{d}.{d}.{d}:{d}/metrics | targets={d}\n", .{
-        bind[0], bind[1], bind[2], bind[3], port, targets.items.len,
+    std.debug.print("quicz exporter: http://{d}.{d}.{d}.{d}:{d}/metrics | targets={d} interval={d}s\n", .{
+        bind[0], bind[1], bind[2], bind[3], port, targets.items.len, interval_ms / 1000,
     });
-    try serveExporter(io, &server, &config);
-}
-
-fn serveExporter(io: std.Io, server: *std.Io.net.Server, config: *const ExporterConfig) std.Io.Cancelable!void {
     var group: std.Io.Group = .init;
     defer group.cancel(io);
+    group.concurrent(io, probeLoop, .{ &cache, &config }) catch |err| {
+        std.debug.print("exporter: probe loop failed to start: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    try serveExporter(io, &server, &cache, &group);
+}
+
+fn serveExporter(io: std.Io, server: *std.Io.net.Server, cache: *ExporterCache, group: *std.Io.Group) std.Io.Cancelable!void {
     while (true) {
         var stream = server.accept(io) catch |err| switch (err) {
             error.Canceled => |canceled| return canceled,
@@ -124,14 +159,14 @@ fn serveExporter(io: std.Io, server: *std.Io.net.Server, config: *const Exporter
                 return;
             },
         };
-        group.concurrent(io, handleConnection, .{ stream, config }) catch |err| {
+        group.concurrent(io, handleConnection, .{ stream, cache }) catch |err| {
             std.debug.print("exporter: connection handler failed to start: {s}\n", .{@errorName(err)});
             stream.close(io);
         };
     }
 }
 
-fn handleConnection(stream: std.Io.net.Stream, config: *const ExporterConfig) void {
+fn handleConnection(stream: std.Io.net.Stream, cache: *ExporterCache) void {
     const io = g_io orelse return;
     defer stream.close(io);
 
@@ -144,7 +179,7 @@ fn handleConnection(stream: std.Io.net.Stream, config: *const ExporterConfig) vo
     };
 
     const allocator = g_allocator orelse return;
-    const body = buildMetrics(allocator, io, config) catch {
+    const body = buildMetrics(allocator, io, cache) catch {
         sendHttpResponse(io, stream, 500, "Internal Server Error", "text/plain; charset=utf-8", "probe failed\n", request_target.head_only) catch {};
         return;
     };
@@ -198,16 +233,43 @@ fn readRequestHead(io: std.Io, stream: std.Io.net.Stream, buf: []u8) ?usize {
     return null;
 }
 
-fn buildMetrics(allocator: std.mem.Allocator, io: std.Io, config: *const ExporterConfig) ![]u8 {
-    var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(allocator);
-    var metric_buf: [16384]u8 = undefined;
+fn probeLoop(cache: *ExporterCache, config: *const ExporterConfig) void {
+    const io = g_io orelse return;
+    while (true) {
+        const duration_ms = std.math.cast(i64, config.interval_ms) orelse return;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(duration_ms), .awake) catch |err| switch (err) {
+            error.Canceled => return,
+        };
+        refreshCache(io, cache, config) catch {};
+    }
+}
 
+fn refreshCache(io: std.Io, cache: *ExporterCache, config: *const ExporterConfig) !void {
+    const allocator = g_allocator orelse return error.MissingAllocator;
     for (config.targets, 0..) |target, target_index| {
         var options = config.probe_options;
         options.target = target;
         const result = try probe.runProbeOnce(allocator, io, options);
-        defer probe.deinitProbeResult(allocator, &result);
+        if (cache.lock.lock(io)) |_| {
+            probe.deinitProbeResult(allocator, &cache.results[target_index]);
+            cache.results[target_index] = result;
+            cache.lock.unlock(io);
+        } else |_| {
+            probe.deinitProbeResult(allocator, &result);
+            return;
+        }
+    }
+}
+
+fn buildMetrics(allocator: std.mem.Allocator, io: std.Io, cache: *ExporterCache) ![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+    var metric_buf: [16384]u8 = undefined;
+
+    cache.lock.lockShared(io) catch return error.LockFailed;
+    defer cache.lock.unlockShared(io);
+
+    for (cache.results, 0..) |result, target_index| {
         const metrics = try probe.formatProbePrometheus(result, &metric_buf);
         if (target_index == 0) {
             try body.appendSlice(allocator, metrics);

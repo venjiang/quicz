@@ -3,7 +3,7 @@
 //! Subcommands:
 //!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
 //!   quicz probe <url> [--json|--prometheus|--nagios] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
-//!   quicz exporter --target URL [--target URL]... [--bind IP] [--port N]
+//!   quicz exporter --target URL [--target URL]... [--bind IP] [--port N] [--interval SECS]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -85,7 +85,7 @@ fn printUsage() void {
         \\  quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
         \\  quicz probe <url> [--json] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
         \\                                     (scheme-less URLs are treated as https://; other schemes are rejected)
-        \\  quicz exporter --target URL [--target URL]... [--bind IP] [--port N]
+        \\  quicz exporter --target URL [--target URL]... [--bind IP] [--port N] [--interval SECS]
         \\  quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --client HOST PORT [--data BODY] [--ca PEM] [--timeout-ms MS]

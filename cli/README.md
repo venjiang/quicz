@@ -153,15 +153,17 @@ format at `http://<bind>:<port>/metrics`. It is the always-on form of the probe
 product plan and can be scraped by Prometheus directly.
 
 ```bash
-quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633
+quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633 --interval 30
 curl -s http://127.0.0.1:9633/metrics
 ```
 
 Probe options are shared with `quicz probe` (`-k`, `--ca`, `--resolve`,
-`--connect-timeout`, `--max-time`, `-A`, `--no-alt-svc`, `-v`). Each scrape
-runs one live probe per target, serially, so the reported metrics reflect the
-state at scrape time. Metric names and labels match `quicz probe --prometheus`;
-with multiple targets the `# HELP`/`# TYPE` metadata lines are emitted once.
+`--connect-timeout`, `--max-time`, `-A`, `--no-alt-svc`, `-v`). `--interval`
+controls the background refresh period in seconds (default 60). Probes run in
+the background and results are cached; `/metrics` serves the latest snapshot
+without re-probing, so scrapes stay fast even with many targets or long
+timeouts. Metric names and labels match `quicz probe --prometheus`; with
+multiple targets the `# HELP`/`# TYPE` metadata lines are emitted once.
 Only `GET`/`HEAD` requests to `/metrics` are served; other paths and methods
 return 404.
 

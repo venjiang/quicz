@@ -119,15 +119,17 @@ EDNS/TC；IPv4 字面量目标跳过该查询。
 它是 probe 产品计划的常驻形态，可直接接入 Prometheus 抓取。
 
 ```bash
-quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633
+quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633 --interval 30
 curl -s http://127.0.0.1:9633/metrics
 ```
 
 probe 选项与 `quicz probe` 共用（`-k`、`--ca`、`--resolve`、
-`--connect-timeout`、`--max-time`、`-A`、`--no-alt-svc`、`-v`）。每次抓取会对
-每个 target 串行执行一次实时探测，指标反映抓取时刻的状态。指标名与
-`quicz probe --prometheus` 一致；多 target 时 `# HELP`/`# TYPE` 元数据只输出一次。
-只服务 `/metrics` 的 `GET`/`HEAD`，其它路径与方法返回 404。
+`--connect-timeout`、`--max-time`、`-A`、`--no-alt-svc`、`-v`）。`--interval`
+控制后台刷新周期（秒，默认 60）。探测在后台执行并缓存结果，`/metrics` 直接
+返回最近一次快照，不再每次抓取实时探测，因此即使 target 多或超时较长，
+scrape 也保持快速。指标名与 `quicz probe --prometheus` 一致；多 target 时
+`# HELP`/`# TYPE` 元数据只输出一次。只服务 `/metrics` 的 `GET`/`HEAD`，
+其它路径与方法返回 404。
 
 ## 线上 H3 验证
 
