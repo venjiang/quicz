@@ -470,7 +470,6 @@ fn cmdServe(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.It
     tcp_serve_task.await(io) catch {};
 }
 
-
 test "sanitize rel path rejects traversal" {
     try std.testing.expectEqualStrings("a/b", try sanitizeRelPath("/a/b"));
     try std.testing.expectError(error.BadPath, sanitizeRelPath("/a/../b"));

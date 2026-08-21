@@ -39,7 +39,6 @@ pub const std_options: std.Options = .{
 /// the library's internal runtime logs so a successful request stays clean
 /// even when the peer retransmits a packet the client cannot yet decrypt.
 /// `-v` re-enables those runtime logs for connection debugging.
-
 fn cliLog(
     comptime message_level: std.log.Level,
     comptime scope: @EnumLiteral(),
@@ -48,7 +47,6 @@ fn cliLog(
 ) void {
     if (common.g_verbose) std.log.defaultLog(message_level, scope, format, args);
 }
-
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;

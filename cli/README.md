@@ -99,12 +99,17 @@ Checks, in order:
 3. QUIC 1-RTT handshake with TLS 1.3 and ALPN `h3` (certificate verified
    against the system CA bundle unless `-k` / `--ca` is given)
 4. One HTTP/3 GET on the URL path
+5. Best-effort TCP+TLS HTTP/1.1 request on the same URL path. This reports the
+   response status, whether `Alt-Svc` advertises an `h3` endpoint, and whether
+   the fallback transport was used when the HTTP/3 probe failed. `--no-alt-svc`
+   skips this supplementary check.
 
 Output is a text report by default; `--json` emits a structured result for
 CI, `--prometheus` emits Prometheus text exposition format (metric names
 follow the `quicz.md` plan: `quic_probe_success`, `quic_handshake_success`,
 `quic_alpn_h3_success`, `quic_http3_request_success`, `quic_failure_stage`,
-`quic_handshake_duration_seconds`, `quic_request_duration_seconds`) so a
+`quic_handshake_duration_seconds`, `quic_request_duration_seconds`,
+`quic_alt_svc_h3`, `quic_fallback_reachable`, `quic_fallback_detected`) so a
 scrape endpoint can wrap a probe directly, and `--nagios` emits a
 Nagios/Icinga plugin status line (`QUIC-H3 OK|CRITICAL - ... | perfdata`).
 Exit codes: 0 = pass, 1 = probe failure (2 in `--nagios` mode, Nagios
@@ -125,8 +130,11 @@ runtime client now tracks (`Client.datagramsReceived`).
 ./zig-out/bin/quicz probe https://example.com --nagios              # Nagios/Icinga plugin
 ```
 
-Known limits: the client only negotiates `h3`, so `alpn_not_h3` and
-HTTP/2 fallback detection are not yet surfaced; these are a follow-up stage.
+Known limits: the QUIC client only negotiates `h3`, so `alpn_not_h3` cannot be
+observed. The fallback request uses Zig's standard TLS client without an ALPN
+extension and therefore reports HTTP/1.1, not negotiated HTTP/2. When `-k`
+disables certificate verification, that TLS client also suppresses SNI; the
+verified path always sends the URL hostname as SNI.
 
 ## Real-world H3 verification
 

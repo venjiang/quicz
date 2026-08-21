@@ -222,7 +222,6 @@ test "parse h3 url" {
     try std.testing.expectError(error.HttpsOnly, parseH3Url("http://x/"));
 }
 
-
 test "parse ipv4" {
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, try parseIpv4("127.0.0.1"));
     try std.testing.expectError(error.InvalidCharacter, parseIpv4("not-an-ip"));

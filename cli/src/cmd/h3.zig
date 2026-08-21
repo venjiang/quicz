@@ -30,7 +30,6 @@ const ServerConnection = common.ServerConnection;
 const alpn_h3 = common.alpn_h3;
 const alpn_hq = common.alpn_hq;
 
-
 pub fn run(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Iterator) !void {
     try cmdH3(allocator, io, args);
 }

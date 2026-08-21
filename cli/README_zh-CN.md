@@ -70,6 +70,36 @@ quicz echo --client 127.0.0.1 4433 --data "ping"
 quicz bench 127.0.0.1 4433 --size 1048576
 ```
 
+## Probe（HTTP/3 健康检查）
+
+`quicz probe <url>` 输出一次 HTTP/3/QUIC 健康检查，并把失败归因到单一阶段：
+URL、DNS、UDP、QUIC/TLS 握手或 HTTP/3 请求。无 scheme 的目标自动按 `https://`
+处理；显式 `http://`、`ftp://` 等非 HTTPS scheme 报用法错误并退出 2。
+
+检查顺序：
+
+1. 解析 HTTPS URL。
+2. 解析 IPv4 地址。
+3. 执行 QUIC 1-RTT + TLS 1.3 + ALPN `h3`（默认系统 CA，`-k` 跳过，`--ca` 指定 PEM）。
+4. 对原 URL path 发起 HTTP/3 GET。
+5. 额外尽力发起 TCP+TLS HTTP/1.1 GET，报告状态码、`Alt-Svc` 是否包含 `h3`、
+   以及 HTTP/3 失败时是否出现 fallback；`--no-alt-svc` 可跳过该附加检查。
+
+输出支持 text / `--json` / `--prometheus` / `--nagios`。通过退出 0，探测失败
+退出 1，用法错误退出 2（`--nagios` 探测失败按 CRITICAL 退出 2）。JSON 会转义
+`Alt-Svc` 中的引号等字符；Prometheus 输出包含
+`quic_alt_svc_h3`、`quic_fallback_reachable` 和 `quic_fallback_detected`。
+
+```bash
+./zig-out/bin/quicz probe https://cloudflare-quic.com/ --json
+./zig-out/bin/quicz probe https://127.0.0.1:4433/ -k
+./zig-out/bin/quicz probe https://example.com --prometheus
+```
+
+边界：QUIC 客户端只协商 `h3`，因此无法观察 `alpn_not_h3`；fallback 请求使用
+Zig 标准 TLS client 且不发送 ALPN，所以报告的是 HTTP/1.1 而不是协商 HTTP/2。
+`-k` 时标准 TLS client 也会省略 SNI；证书校验开启时始终发送 URL hostname。
+
 ## 线上 H3 验证
 
 `h3` 子命令已针对真实线上 HTTP/3 服务器做端到端验证（QUIC 握手 + HTTP/3 + QPACK），
