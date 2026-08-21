@@ -63,6 +63,10 @@ quicz probe https://example.com --json
 quicz probe https://example.com -k --connect-timeout 5 --max-time 10
 quicz probe https://127.0.0.1:4433/ -k --resolve example.com:443:127.0.0.1
 
+# Prometheus exporter: serves live probe results at /metrics
+quicz exporter --target https://127.0.0.1:4433/ -k --bind 127.0.0.1 --port 9633
+curl -s http://127.0.0.1:9633/metrics
+
 # Static file server: HTTPS over TCP (browser) + HTTP/3 + /metrics + /echo
 quicz serve --dir ./dist --port 4433
 quicz serve --dir ./dist --port 4433 --cert cert.pem --key key.pem
@@ -135,6 +139,26 @@ observed. The fallback request uses Zig's standard TLS client without an ALPN
 extension and therefore reports HTTP/1.1, not negotiated HTTP/2. When `-k`
 disables certificate verification, that TLS client also suppresses SNI; the
 verified path always sends the URL hostname as SNI.
+
+## Exporter (Prometheus metrics endpoint)
+
+`quicz exporter` runs a small HTTP server that repeats `quicz probe` against
+one or more HTTPS targets and exposes the results in Prometheus text exposition
+format at `http://<bind>:<port>/metrics`. It is the always-on form of the probe
+product plan and can be scraped by Prometheus directly.
+
+```bash
+quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633
+curl -s http://127.0.0.1:9633/metrics
+```
+
+Probe options are shared with `quicz probe` (`-k`, `--ca`, `--resolve`,
+`--connect-timeout`, `--max-time`, `-A`, `--no-alt-svc`, `-v`). Each scrape
+runs one live probe per target, serially, so the reported metrics reflect the
+state at scrape time. Metric names and labels match `quicz probe --prometheus`;
+with multiple targets the `# HELP`/`# TYPE` metadata lines are emitted once.
+Only `GET`/`HEAD` requests to `/metrics` are served; other paths and methods
+return 404.
 
 ## Real-world H3 verification
 

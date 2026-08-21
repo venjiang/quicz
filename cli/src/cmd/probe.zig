@@ -41,7 +41,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: *std.process.Args.Ite
 /// (curl-like convenience), and returns null for any explicit non-https
 /// scheme (http://, ftp://, ...) so the caller can report a usage error
 /// instead of silently rewriting an explicit scheme.
-fn normalizeProbeTarget(raw: []const u8, buf: []u8) ?[]const u8 {
+pub fn normalizeProbeTarget(raw: []const u8, buf: []u8) ?[]const u8 {
     if (std.mem.startsWith(u8, raw, "https://")) return raw;
     if (std.mem.indexOf(u8, raw, "://") != null) return null;
     return std.fmt.bufPrint(buf, "https://{s}", .{raw}) catch return null;
@@ -57,9 +57,10 @@ const ProbeStage = enum {
     quic_handshake_failed,
     tls_cert_failed,
     http3_request_failed,
+    probe_timeout,
 };
 
-const ProbeResult = struct {
+pub const ProbeResult = struct {
     target: []const u8,
     dns_ok: bool,
     resolved_ip: ?[4]u8,
@@ -83,7 +84,7 @@ const ProbeResult = struct {
     }
 };
 
-const ProbeOptions = struct {
+pub const ProbeOptions = struct {
     target: []const u8,
     insecure: bool = false,
     ca_path: ?[]const u8 = null,
@@ -94,7 +95,7 @@ const ProbeOptions = struct {
     check_alt_svc: bool = true,
 };
 
-const ProbeStageName = enum { invalid_url, dns_resolve_failed, udp_timeout, quic_handshake_failed, tls_cert_failed, http3_request_failed };
+const ProbeStageName = enum { invalid_url, dns_resolve_failed, udp_timeout, quic_handshake_failed, tls_cert_failed, http3_request_failed, probe_timeout };
 
 fn probeStageName(stage: ProbeStage) []const u8 {
     return switch (stage) {
@@ -104,6 +105,7 @@ fn probeStageName(stage: ProbeStage) []const u8 {
         .quic_handshake_failed => "quic_handshake_failed",
         .tls_cert_failed => "tls_cert_failed",
         .http3_request_failed => "http3_request_failed",
+        .probe_timeout => "probe_timeout",
     };
 }
 
@@ -127,7 +129,7 @@ fn completeProbe(
     return result.*;
 }
 
-fn deinitProbeResult(allocator: std.mem.Allocator, result: *const ProbeResult) void {
+pub fn deinitProbeResult(allocator: std.mem.Allocator, result: *const ProbeResult) void {
     if (result.alt_svc_value) |value| allocator.free(value);
 }
 
@@ -325,7 +327,7 @@ fn escapePromLabel(out: []u8, pos: *usize, value: []const u8) !void {
 /// Render the probe result in Prometheus text exposition format. Metric
 /// names follow the `quicz.md` product plan (quic_*); a scrape of a failed
 /// probe carries the failure stage as a label for alerting.
-fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
+pub fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
     var pos: usize = 0;
     const put = struct {
         fn w(out: []u8, p: *usize, s: []const u8) !void {
@@ -472,6 +474,40 @@ const ProbeWork = struct {
     opts: ProbeOptions,
     result: ProbeResult = undefined,
 };
+
+pub fn emptyProbeResult(target: []const u8) ProbeResult {
+    return .{
+        .target = target,
+        .dns_ok = false,
+        .resolved_ip = null,
+        .udp_reachable = false,
+        .quic_handshake_success = false,
+        .alpn = null,
+        .http3_request_success = false,
+        .http_status = null,
+        .failure_stage = .invalid_url,
+        .handshake_ms = 0,
+        .request_ms = 0,
+    };
+}
+
+/// Run one probe under its configured whole-probe timeout. This is the
+/// reusable entry point for command wrappers such as the exporter.
+pub fn runProbeOnce(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !ProbeResult {
+    var work = ProbeWork{
+        .allocator = allocator,
+        .opts = opts,
+        .result = emptyProbeResult(opts.target),
+    };
+    runWithTimeout(io, opts.timeout_ms, probeWork, &work) catch |err| {
+        if (err == error.Timeout) {
+            work.result.failure_stage = .probe_timeout;
+            return work.result;
+        }
+        return err;
+    };
+    return work.result;
+}
 
 fn probeWork(io: std.Io, ctx: *anyopaque) anyerror!void {
     const work: *ProbeWork = @ptrCast(@alignCast(ctx));

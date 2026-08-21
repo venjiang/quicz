@@ -3,6 +3,7 @@
 //! Subcommands:
 //!   quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
 //!   quicz probe <url> [--json|--prometheus|--nagios] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
+//!   quicz exporter --target URL [--target URL]... [--bind IP] [--port N]
 //!   quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
 //!   quicz echo --client HOST PORT [--data BODY] [--ca PEM]
@@ -19,6 +20,7 @@ const common = @import("common.zig");
 comptime {
     _ = @import("cmd/h3.zig");
     _ = @import("cmd/probe.zig");
+    _ = @import("cmd/exporter.zig");
     _ = @import("cmd/serve.zig");
     _ = @import("cmd/echo.zig");
     _ = @import("cmd/bench.zig");
@@ -26,6 +28,7 @@ comptime {
 }
 const h3 = @import("cmd/h3.zig");
 const probe = @import("cmd/probe.zig");
+const exporter = @import("cmd/exporter.zig");
 const serve = @import("cmd/serve.zig");
 const echo = @import("cmd/echo.zig");
 const bench = @import("cmd/bench.zig");
@@ -61,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, sub, "h3")) return h3.run(allocator, io, &args);
     if (std.mem.eql(u8, sub, "probe")) return probe.run(allocator, io, &args);
+    if (std.mem.eql(u8, sub, "exporter")) return exporter.run(allocator, io, &args);
     if (std.mem.eql(u8, sub, "serve")) return serve.run(allocator, io, &args);
     if (std.mem.eql(u8, sub, "echo")) return echo.run(allocator, io, &args);
     if (std.mem.eql(u8, sub, "bench")) return bench.run(allocator, io, &args);
@@ -80,6 +84,7 @@ fn printUsage() void {
         \\  quicz h3 <url> [-k] [-G] [-v] [-i] [-I] [-L] [-s] [-f] [-o FILE] [-D FILE] [--max-redirects N] [--max-filesize BYTES] [-X METHOD] [-A UA] [-u USER:PASS] [-e URL] [-b COOKIE|@FILE] [-c FILE] [-T FILE] [-w FORMAT] [-H NAME:VALUE]... [-d BODY] [--data @FILE] [--resolve HOST:PORT:ADDR] [--ca PEM] [--connect-timeout SECS] [--max-time SECS]
         \\  quicz probe <url> [--json] [-k] [--ca PEM] [--resolve HOST:PORT:ADDR] [--connect-timeout SECS] [--max-time SECS] [-A UA]
         \\                                     (scheme-less URLs are treated as https://; other schemes are rejected)
+        \\  quicz exporter --target URL [--target URL]... [--bind IP] [--port N]
         \\  quicz serve [--dir DIR] [--index FILE] [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --server [--port N] [--bind IP] [--cert PEM] [--key PEM]
         \\  quicz echo --client HOST PORT [--data BODY] [--ca PEM] [--timeout-ms MS]

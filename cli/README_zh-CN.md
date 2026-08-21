@@ -55,6 +55,14 @@ quicz h3 https://host/api -X POST --data @body.json   # 从文件读取请求体
 quicz h3 https://host/api -D headers.txt              # 把响应头保存到文件
 quicz h3 https://host/api -o -                        # 显式把正文写到 stdout
 
+# HTTP/3/QUIC 健康检查：pass/fail + 失败阶段（见下方）
+quicz probe https://example.com --json
+quicz probe https://127.0.0.1:4433/ -k --resolve example.com:443:127.0.0.1
+
+# Prometheus exporter：在 /metrics 暴露实时 probe 结果
+quicz exporter --target https://127.0.0.1:4433/ -k --bind 127.0.0.1 --port 9633
+curl -s http://127.0.0.1:9633/metrics
+
 # 静态文件服务：TCP HTTPS（浏览器）+ HTTP/3 + /metrics + /echo
 quicz serve --dir ./dist --port 4433
 quicz serve --dir ./dist --port 4433 --cert cert.pem --key key.pem
@@ -99,6 +107,23 @@ URL、DNS、UDP、QUIC/TLS 握手或 HTTP/3 请求。无 scheme 的目标自动�
 边界：QUIC 客户端只协商 `h3`，因此无法观察 `alpn_not_h3`；fallback 请求使用
 Zig 标准 TLS client 且不发送 ALPN，所以报告的是 HTTP/1.1 而不是协商 HTTP/2。
 `-k` 时标准 TLS client 也会省略 SNI；证书校验开启时始终发送 URL hostname。
+
+## Exporter（Prometheus 指标端点）
+
+`quicz exporter` 运行一个小型 HTTP 服务，对配置的一个或多个 HTTPS 目标重复执行
+`quicz probe`，并在 `http://<bind>:<port>/metrics` 暴露 Prometheus 文本格式指标。
+它是 probe 产品计划的常驻形态，可直接接入 Prometheus 抓取。
+
+```bash
+quicz exporter --target https://example.com --target https://cloudflare-quic.com/ --bind 127.0.0.1 --port 9633
+curl -s http://127.0.0.1:9633/metrics
+```
+
+probe 选项与 `quicz probe` 共用（`-k`、`--ca`、`--resolve`、
+`--connect-timeout`、`--max-time`、`-A`、`--no-alt-svc`、`-v`）。每次抓取会对
+每个 target 串行执行一次实时探测，指标反映抓取时刻的状态。指标名与
+`quicz probe --prometheus` 一致；多 target 时 `# HELP`/`# TYPE` 元数据只输出一次。
+只服务 `/metrics` 的 `GET`/`HEAD`，其它路径与方法返回 404。
 
 ## 线上 H3 验证
 
