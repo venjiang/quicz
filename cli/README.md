@@ -141,9 +141,10 @@ Known limits: the QUIC client only negotiates `h3`, so `alpn_not_h3` cannot be
 observed. The fallback request uses Zig's standard TLS client without an ALPN
 extension and therefore reports HTTP/1.1, not negotiated HTTP/2. When `-k`
 disables certificate verification, that TLS client also suppresses SNI; the
-verified path always sends the URL hostname as SNI. The SVCB lookup queries
-the first IPv4 nameserver from `/etc/resolv.conf` over UDP 53 without EDNS/TC
-handling; IPv4-literal targets skip it.
+verified path always sends the URL hostname as SNI. The SVCB lookup tries
+the IPv4 nameservers from `/etc/resolv.conf` in order over UDP 53 with EDNS(0)
+(4096-byte payload); a truncated answer is retried over TCP. IPv4-literal
+targets skip it.
 
 ## Exporter (Prometheus metrics endpoint)
 

@@ -109,8 +109,9 @@ URL、DNS、UDP、QUIC/TLS 握手或 HTTP/3 请求。无 scheme 的目标自动�
 边界：QUIC 客户端只协商 `h3`，因此无法观察 `alpn_not_h3`；fallback 请求使用
 Zig 标准 TLS client 且不发送 ALPN，所以报告的是 HTTP/1.1 而不是协商 HTTP/2。
 `-k` 时标准 TLS client 也会省略 SNI；证书校验开启时始终发送 URL hostname。
-SVCB 查询使用 `/etc/resolv.conf` 的第一个 IPv4 nameserver，走 UDP 53，不处理
-EDNS/TC；IPv4 字面量目标跳过该查询。
+SVCB 查询按顺序尝试 `/etc/resolv.conf` 的 IPv4 nameserver，走 UDP 53 并带
+EDNS(0)（4096 字节 payload）；UDP 响应被截断（TC）时改用 TCP 重查。
+IPv4 字面量目标跳过该查询。
 
 ## Exporter（Prometheus 指标端点）
 
