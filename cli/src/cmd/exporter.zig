@@ -245,19 +245,26 @@ fn probeLoop(cache: *ExporterCache, config: *const ExporterConfig) void {
 }
 
 fn refreshCache(io: std.Io, cache: *ExporterCache, config: *const ExporterConfig) !void {
-    const allocator = g_allocator orelse return error.MissingAllocator;
-    for (config.targets, 0..) |target, target_index| {
-        var options = config.probe_options;
-        options.target = target;
-        const result = try probe.runProbeOnce(allocator, io, options);
-        if (cache.lock.lock(io)) |_| {
-            probe.deinitProbeResult(allocator, &cache.results[target_index]);
-            cache.results[target_index] = result;
-            cache.lock.unlock(io);
-        } else |_| {
-            probe.deinitProbeResult(allocator, &result);
-            return;
-        }
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (config.targets, 0..) |_, target_index| {
+        group.concurrent(io, probeAndStore, .{ cache, config, target_index }) catch return error.SpawnFailed;
+    }
+    try group.await(io);
+}
+
+fn probeAndStore(cache: *ExporterCache, config: *const ExporterConfig, target_index: usize) void {
+    const io = g_io orelse return;
+    const allocator = g_allocator orelse return;
+    var options = config.probe_options;
+    options.target = config.targets[target_index];
+    const result = probe.runProbeOnce(allocator, io, options) catch return;
+    if (cache.lock.lock(io)) |_| {
+        probe.deinitProbeResult(allocator, &cache.results[target_index]);
+        cache.results[target_index] = result;
+        cache.lock.unlock(io);
+    } else |_| {
+        probe.deinitProbeResult(allocator, &result);
     }
 }
 

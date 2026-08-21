@@ -161,7 +161,8 @@ curl -s http://127.0.0.1:9633/metrics
 Probe options are shared with `quicz probe` (`-k`, `--ca`, `--resolve`,
 `--connect-timeout`, `--max-time`, `-A`, `--no-alt-svc`, `-v`). `--interval`
 controls the background refresh period in seconds (default 60). Probes run in
-the background and results are cached; `/metrics` serves the latest snapshot
+the background concurrently across targets and results are cached; `/metrics`
+serves the latest snapshot
 without re-probing, so scrapes stay fast even with many targets or long
 timeouts. Metric names and labels match `quicz probe --prometheus`; with
 multiple targets the `# HELP`/`# TYPE` metadata lines are emitted once.

@@ -126,7 +126,7 @@ curl -s http://127.0.0.1:9633/metrics
 
 probe 选项与 `quicz probe` 共用（`-k`、`--ca`、`--resolve`、
 `--connect-timeout`、`--max-time`、`-A`、`--no-alt-svc`、`-v`）。`--interval`
-控制后台刷新周期（秒，默认 60）。探测在后台执行并缓存结果，`/metrics` 直接
+控制后台刷新周期（秒，默认 60）。探测在后台并行执行并缓存结果，`/metrics` 直接
 返回最近一次快照，不再每次抓取实时探测，因此即使 target 多或超时较长，
 scrape 也保持快速。指标名与 `quicz probe --prometheus` 一致；多 target 时
 `# HELP`/`# TYPE` 元数据只输出一次。只服务 `/metrics` 的 `GET`/`HEAD`，
