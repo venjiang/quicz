@@ -4,6 +4,7 @@
 const std = @import("std");
 const quicz = @import("quicz");
 const common = @import("../common.zig");
+const svcb = @import("../svcb.zig");
 
 // Shared helpers re-exported for readability inside this module.
 const nextArg = common.nextArg;
@@ -75,6 +76,12 @@ pub const ProbeResult = struct {
     fallback_http_version: ?[]const u8 = null,
     fallback_http_status: ?u16 = null,
     fallback_detected: ?bool = null,
+    svcb_query_ok: bool = false,
+    svcb_h3: bool = false,
+    svcb_priority: ?u16 = null,
+    svcb_target: ?[]const u8 = null,
+    svcb_alpn: ?[]const u8 = null,
+    svcb_port: ?u16 = null,
     failure_stage: ?ProbeStage,
     handshake_ms: u64,
     request_ms: u64,
@@ -131,6 +138,8 @@ fn completeProbe(
 
 pub fn deinitProbeResult(allocator: std.mem.Allocator, result: *const ProbeResult) void {
     if (result.alt_svc_value) |value| allocator.free(value);
+    if (result.svcb_target) |value| allocator.free(value);
+    if (result.svcb_alpn) |value| allocator.free(value);
 }
 
 fn writeJsonString(out: *std.Io.Writer, value: []const u8) !void {
@@ -180,6 +189,11 @@ fn renderProbeText(result: ProbeResult) void {
     std.debug.print("  dns:           {s}\n", .{if (result.dns_ok) "ok" else "fail"});
     if (result.resolved_ip) |ip| {
         std.debug.print("  resolved_ip:   {d}.{d}.{d}.{d}\n", .{ ip[0], ip[1], ip[2], ip[3] });
+    }
+    if (result.svcb_query_ok) {
+        std.debug.print("  svcb_h3:       {s}\n", .{if (result.svcb_h3) "yes" else "no"});
+        if (result.svcb_alpn) |alpn| std.debug.print("  svcb_alpn:     {s}\n", .{alpn});
+        if (result.svcb_port) |port| std.debug.print("  svcb_port:     {d}\n", .{port});
     }
     std.debug.print("  udp_reachable: {s}\n", .{if (result.udp_reachable) "ok" else "fail"});
     std.debug.print("  handshake:     {s}\n", .{if (result.quic_handshake_success) "ok" else "fail"});
@@ -273,6 +287,22 @@ fn formatProbeJson(result: ProbeResult, buf: []u8) ![]const u8 {
     try w.writeAll(",\n  \"fallback_detected\": ");
     if (result.fallback_detected) |detected| {
         try w.writeAll(if (detected) "true" else "false");
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"svcb_query_ok\": ");
+    try w.writeAll(if (result.svcb_query_ok) "true" else "false");
+    try w.writeAll(",\n  \"svcb_h3\": ");
+    try w.writeAll(if (result.svcb_h3) "true" else "false");
+    try w.writeAll(",\n  \"svcb_alpn\": ");
+    if (result.svcb_alpn) |v| {
+        try writeJsonString(&w, v);
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\n  \"svcb_port\": ");
+    if (result.svcb_port) |p| {
+        try w.print("{d}", .{p});
     } else {
         try w.writeAll("null");
     }
@@ -413,6 +443,14 @@ pub fn formatProbePrometheus(result: ProbeResult, buf: []u8) ![]const u8 {
         try put(buf, &pos, "\n");
     }
 
+    if (result.svcb_query_ok) {
+        try put(buf, &pos, "quic_svcb_h3{target=\"");
+        try put(buf, &pos, tgt);
+        try put(buf, &pos, "\"} ");
+        pos += (try std.fmt.bufPrint(buf[pos..], "{d}", .{@as(u8, if (result.svcb_h3) 1 else 0)})).len;
+        try put(buf, &pos, "\n");
+    }
+
     return buf[0..pos];
 }
 
@@ -436,6 +474,9 @@ fn formatProbeNagios(result: ProbeResult, buf: []u8) ![]const u8 {
         if (result.alt_svc_h3) |found| {
             try w.print(" alt_svc_h3={s}", .{if (found) "yes" else "no"});
         }
+        if (result.svcb_query_ok) {
+            try w.print(" svcb_h3={s}", .{if (result.svcb_h3) "yes" else "no"});
+        }
         if (result.fallback_reachable) |r| {
             try w.print(" fallback={s}", .{if (r) "ok" else "fail"});
         }
@@ -450,6 +491,9 @@ fn formatProbeNagios(result: ProbeResult, buf: []u8) ![]const u8 {
         });
         if (result.fallback_reachable) |reachable| {
             try w.print(" fallback={s}", .{if (reachable) "ok" else "fail"});
+        }
+        if (result.svcb_query_ok) {
+            try w.print(" svcb_h3={s}", .{if (result.svcb_h3) "yes" else "no"});
         }
         if (result.fallback_detected) |detected| {
             try w.print(" fallback_detected={s}", .{if (detected) "yes" else "no"});
@@ -550,6 +594,15 @@ fn runProbe(allocator: std.mem.Allocator, io: std.Io, opts: ProbeOptions) !Probe
     };
     result.dns_ok = true;
     result.resolved_ip = ip;
+
+    const svcb_info = svcb.queryHttpsSvc(allocator, io, parsed_host);
+    defer svcb_info.deinit(allocator);
+    result.svcb_query_ok = svcb_info.query_ok;
+    result.svcb_h3 = svcb_info.h3;
+    result.svcb_priority = svcb_info.priority;
+    result.svcb_target = if (svcb_info.target) |target| allocator.dupe(u8, target) catch null else null;
+    result.svcb_alpn = if (svcb_info.alpn) |alpn| allocator.dupe(u8, alpn) catch null else null;
+    result.svcb_port = svcb_info.port;
 
     var maybe_bundle: ?std.crypto.Certificate.Bundle = null;
     if (opts.ca_path) |pem| {
@@ -917,6 +970,10 @@ test "probe prometheus rendering" {
         .alt_svc_h3 = true,
         .fallback_reachable = true,
         .fallback_detected = false,
+        .svcb_query_ok = true,
+        .svcb_h3 = true,
+        .svcb_alpn = "h3",
+        .svcb_port = 443,
         .failure_stage = .udp_timeout,
         .handshake_ms = 2004,
         .request_ms = 0,
@@ -929,6 +986,7 @@ test "probe prometheus rendering" {
     try std.testing.expect(std.mem.indexOf(u8, out, "quic_alt_svc_h3{target=\"https://example.com/x\"} 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "quic_fallback_reachable{target=\"https://example.com/x\"} 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "quic_fallback_detected{target=\"https://example.com/x\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quic_svcb_h3{target=\"https://example.com/x\"} 1") != null);
 }
 
 test "probe target normalization" {

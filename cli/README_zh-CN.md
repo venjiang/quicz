@@ -88,15 +88,17 @@ URL、DNS、UDP、QUIC/TLS 握手或 HTTP/3 请求。无 scheme 的目标自动�
 
 1. 解析 HTTPS URL。
 2. 解析 IPv4 地址。
-3. 执行 QUIC 1-RTT + TLS 1.3 + ALPN `h3`（默认系统 CA，`-k` 跳过，`--ca` 指定 PEM）。
-4. 对原 URL path 发起 HTTP/3 GET。
-5. 额外尽力发起 TCP+TLS HTTP/1.1 GET，报告状态码、`Alt-Svc` 是否包含 `h3`、
+3. 尽力查询 DNS HTTPS/SVCB（type 65）记录，报告域名是否通过 SVCB alpn 宣告
+   HTTP/3。该检查是补充项，不改变最终 pass/fail。
+4. 执行 QUIC 1-RTT + TLS 1.3 + ALPN `h3`（默认系统 CA，`-k` 跳过，`--ca` 指定 PEM）。
+5. 对原 URL path 发起 HTTP/3 GET。
+6. 额外尽力发起 TCP+TLS HTTP/1.1 GET，报告状态码、`Alt-Svc` 是否包含 `h3`、
    以及 HTTP/3 失败时是否出现 fallback；`--no-alt-svc` 可跳过该附加检查。
 
 输出支持 text / `--json` / `--prometheus` / `--nagios`。通过退出 0，探测失败
 退出 1，用法错误退出 2（`--nagios` 探测失败按 CRITICAL 退出 2）。JSON 会转义
 `Alt-Svc` 中的引号等字符；Prometheus 输出包含
-`quic_alt_svc_h3`、`quic_fallback_reachable` 和 `quic_fallback_detected`。
+`quic_alt_svc_h3`、`quic_fallback_reachable`、`quic_fallback_detected` 和 `quic_svcb_h3`。
 
 ```bash
 ./zig-out/bin/quicz probe https://cloudflare-quic.com/ --json
@@ -107,6 +109,8 @@ URL、DNS、UDP、QUIC/TLS 握手或 HTTP/3 请求。无 scheme 的目标自动�
 边界：QUIC 客户端只协商 `h3`，因此无法观察 `alpn_not_h3`；fallback 请求使用
 Zig 标准 TLS client 且不发送 ALPN，所以报告的是 HTTP/1.1 而不是协商 HTTP/2。
 `-k` 时标准 TLS client 也会省略 SNI；证书校验开启时始终发送 URL hostname。
+SVCB 查询使用 `/etc/resolv.conf` 的第一个 IPv4 nameserver，走 UDP 53，不处理
+EDNS/TC；IPv4 字面量目标跳过该查询。
 
 ## Exporter（Prometheus 指标端点）
 

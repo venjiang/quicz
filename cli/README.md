@@ -100,10 +100,13 @@ Checks, in order:
 
 1. URL parsing (https only)
 2. DNS resolution (resolved IPv4 is reported)
-3. QUIC 1-RTT handshake with TLS 1.3 and ALPN `h3` (certificate verified
+3. Best-effort DNS HTTPS/SVCB (type 65) lookup: reports whether the domain
+   advertises HTTP/3 via its SVCB alpn parameter. Supplementary; never changes
+   the pass/fail verdict.
+4. QUIC 1-RTT handshake with TLS 1.3 and ALPN `h3` (certificate verified
    against the system CA bundle unless `-k` / `--ca` is given)
-4. One HTTP/3 GET on the URL path
-5. Best-effort TCP+TLS HTTP/1.1 request on the same URL path. This reports the
+5. One HTTP/3 GET on the URL path
+6. Best-effort TCP+TLS HTTP/1.1 request on the same URL path. This reports the
    response status, whether `Alt-Svc` advertises an `h3` endpoint, and whether
    the fallback transport was used when the HTTP/3 probe failed. `--no-alt-svc`
    skips this supplementary check.
@@ -113,7 +116,7 @@ CI, `--prometheus` emits Prometheus text exposition format (metric names
 follow the `quicz.md` plan: `quic_probe_success`, `quic_handshake_success`,
 `quic_alpn_h3_success`, `quic_http3_request_success`, `quic_failure_stage`,
 `quic_handshake_duration_seconds`, `quic_request_duration_seconds`,
-`quic_alt_svc_h3`, `quic_fallback_reachable`, `quic_fallback_detected`) so a
+`quic_alt_svc_h3`, `quic_fallback_reachable`, `quic_fallback_detected`, `quic_svcb_h3`) so a
 scrape endpoint can wrap a probe directly, and `--nagios` emits a
 Nagios/Icinga plugin status line (`QUIC-H3 OK|CRITICAL - ... | perfdata`).
 Exit codes: 0 = pass, 1 = probe failure (2 in `--nagios` mode, Nagios
@@ -138,7 +141,9 @@ Known limits: the QUIC client only negotiates `h3`, so `alpn_not_h3` cannot be
 observed. The fallback request uses Zig's standard TLS client without an ALPN
 extension and therefore reports HTTP/1.1, not negotiated HTTP/2. When `-k`
 disables certificate verification, that TLS client also suppresses SNI; the
-verified path always sends the URL hostname as SNI.
+verified path always sends the URL hostname as SNI. The SVCB lookup queries
+the first IPv4 nameserver from `/etc/resolv.conf` over UDP 53 without EDNS/TC
+handling; IPv4-literal targets skip it.
 
 ## Exporter (Prometheus metrics endpoint)
 
