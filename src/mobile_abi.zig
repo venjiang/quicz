@@ -127,6 +127,41 @@ const MobileClient = struct {
     }
 };
 
+const mobile_client_creation_stack_size = 8 * 1024 * 1024;
+
+const MobileClientCreation = struct {
+    config: *const ClientConfig,
+    verify_server: bool,
+    client: ?*MobileClient = null,
+    failure: ?anyerror = null,
+
+    fn run(self: *MobileClientCreation) void {
+        self.client = MobileClient.create(self.config, self.verify_server) catch |err| {
+            self.failure = err;
+            return;
+        };
+    }
+};
+
+/// MobileClient contains the QUIC transport state by value. Debug builds need
+/// more stack than Swift concurrency workers provide while constructing that
+/// state, so creation uses a short-lived, bounded large-stack thread. The
+/// returned client and its std.Io runtime are safe to use from the caller.
+fn createMobileClient(config: *const ClientConfig, verify_server: bool) !*MobileClient {
+    var creation = MobileClientCreation{
+        .config = config,
+        .verify_server = verify_server,
+    };
+    const thread = try std.Thread.spawn(
+        .{ .stack_size = mobile_client_creation_stack_size },
+        MobileClientCreation.run,
+        .{&creation},
+    );
+    thread.join();
+    if (creation.failure) |failure| return failure;
+    return creation.client orelse error.ClientCreationFailed;
+}
+
 pub fn capabilityMask() u64 {
     return bit(.stream) |
         bit(.datagram) |
@@ -156,7 +191,7 @@ pub export fn quicz_mobile_client_create_unverified(
     const valid_config = config orelse return code(.invalid_argument);
     const output = client_out orelse return code(.invalid_argument);
     output.* = null;
-    const client = MobileClient.create(valid_config, false) catch |err| return switch (err) {
+    const client = createMobileClient(valid_config, false) catch |err| return switch (err) {
         error.InvalidArgument => code(.invalid_argument),
         error.OutOfMemory => code(.allocation_failed),
         else => code(.open_failed),
@@ -172,7 +207,7 @@ pub export fn quicz_mobile_client_create(
     const valid_config = config orelse return code(.invalid_argument);
     const output = client_out orelse return code(.invalid_argument);
     output.* = null;
-    const client = MobileClient.create(valid_config, true) catch |err| return switch (err) {
+    const client = createMobileClient(valid_config, true) catch |err| return switch (err) {
         error.InvalidArgument => code(.invalid_argument),
         error.OutOfMemory => code(.allocation_failed),
         else => code(.open_failed),
@@ -347,4 +382,39 @@ test "mobile client ABI rejects incomplete configuration" {
     };
     try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_create_unverified(&config, &client));
     try std.testing.expect(client == null);
+}
+
+const SmallStackCreateContext = struct {
+    config: ClientConfig,
+    result: i32 = code(.open_failed),
+};
+
+fn createClientFromSmallStack(context: *SmallStackCreateContext) void {
+    var client: ?*anyopaque = null;
+    context.result = quicz_mobile_client_create_unverified(&context.config, &client);
+    if (client) |handle| quicz_mobile_client_destroy(handle);
+}
+
+test "mobile client creation is safe on a 512 KiB caller stack" {
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-stack-test";
+    var context = SmallStackCreateContext{ .config = .{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = 4433,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    } };
+    const thread = try std.Thread.spawn(
+        .{ .stack_size = 512 * 1024 },
+        createClientFromSmallStack,
+        .{&context},
+    );
+    thread.join();
+    try std.testing.expectEqual(code(.ok), context.result);
 }

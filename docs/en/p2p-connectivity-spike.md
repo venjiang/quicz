@@ -58,15 +58,19 @@ outside quicz.
   connect to a real Host listener, verify its certificate, and complete 100
   serial 8-byte echoes on one bidirectional stream. One Debug sample measured
   53.524 ms for the handshake and 9.863/18.339/23.116 ms for p50/p95/p99 RTT.
+- A Swift benchmark on a physical iPhone 14 Pro used the same XCFramework C
+  ABI to connect to the Host listener, verify its certificate, complete 100
+  serial 8-byte echoes, close, and release the Host connection state. One
+  Debug Wi-Fi sample measured 3030.383 ms for the handshake and
+  11.810/15.769/19.374 ms for p50/p95/p99 RTT.
 
-The iPhoneOS Debug binary can be signed, installed, and launched. Calling
-`quicz_mobile_client_create` from a Swift concurrency worker currently copies
-the roughly 190 KiB `Client` value through a roughly 512 KiB thread stack and
-triggers SIGBUS. The same reproduction no longer crashes on a dedicated 8 MiB
-thread, then waits in the LAN connection stage. The physical-iPhone verified
-stream gate therefore remains open. Until the ABI initializes this state in
-place on the heap, a production Swift adapter must serialize blocking ABI calls
-on a dedicated large-stack thread instead of an arbitrary Swift Task worker.
+The original iPhoneOS Debug binary copied the roughly 190 KiB `Client` value
+through a roughly 512 KiB Swift concurrency worker stack during
+`quicz_mobile_client_create`, causing SIGBUS. The C ABI now uses a short-lived
+internal 8 MiB thread only for construction. The same 512 KiB stack regression
+test changed from a deterministic crash to passing, and the physical-iPhone
+benchmark now passes from a normal Swift Task. The public ABI and Client
+lifecycle are unchanged.
 
 Build the mobile boundary:
 
@@ -96,8 +100,7 @@ addresses; it must never advertise the wildcard address to a peer.
 - Relay-mediated candidate exchange and real-NAT hole-punch validation.
 - Rendezvous and relay datagram protocols.
 - An iOS API for transferring a discovery-owned socket into QUIC.
-- Physical-iPhone verified streams, iOS lifecycle, and real cellular-network
-  validation.
+- Physical-iPhone lifecycle and real cellular-network validation.
 - Seamless migration of an established application stream between relay and
   direct paths.
 
