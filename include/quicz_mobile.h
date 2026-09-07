@@ -17,6 +17,7 @@ enum quicz_mobile_capability {
     QUICZ_MOBILE_CAPABILITY_MIGRATION = 1ull << 3,
     QUICZ_MOBILE_CAPABILITY_MULTIPATH = 1ull << 4,
     QUICZ_MOBILE_CAPABILITY_STUN = 1ull << 5,
+    QUICZ_MOBILE_CAPABILITY_HOLE_PUNCH = 1ull << 6,
 };
 
 enum quicz_mobile_result {
@@ -27,6 +28,7 @@ enum quicz_mobile_result {
     QUICZ_MOBILE_CONNECTION_FAILED = 4,
     QUICZ_MOBILE_STREAM_FAILED = 5,
     QUICZ_MOBILE_DISCOVERY_FAILED = 6,
+    QUICZ_MOBILE_PUNCH_FAILED = 7,
 };
 
 typedef struct quicz_mobile_client quicz_mobile_client;
@@ -49,6 +51,17 @@ typedef struct quicz_mobile_ipv4_endpoint {
     uint16_t port;
 } quicz_mobile_ipv4_endpoint;
 
+typedef struct quicz_mobile_punch_config {
+    quicz_mobile_ipv4_endpoint remote;
+    uint8_t key[32];
+    uint8_t attempt_id[16];
+    uint8_t nonce[16];
+    uint32_t initial_retry_ms;
+    uint32_t maximum_retry_ms;
+    uint8_t max_attempts;
+    uint8_t reserved[3];
+} quicz_mobile_punch_config;
+
 uint32_t quicz_mobile_abi_version(void);
 uint64_t quicz_mobile_capabilities(void);
 
@@ -65,12 +78,20 @@ int32_t quicz_mobile_client_create(
     quicz_mobile_client **client_out
 );
 int32_t quicz_mobile_client_connect(quicz_mobile_client *client);
+int32_t quicz_mobile_client_bound_ipv4(
+    quicz_mobile_client *client,
+    quicz_mobile_ipv4_endpoint *endpoint_out
+);
 int32_t quicz_mobile_client_discover_ipv4(
     quicz_mobile_client *client,
     const quicz_mobile_ipv4_endpoint *stun_server,
     uint32_t timeout_ms,
     uint8_t max_attempts,
     quicz_mobile_ipv4_endpoint *mapped_endpoint_out
+);
+int32_t quicz_mobile_client_punch_ipv4(
+    quicz_mobile_client *client,
+    const quicz_mobile_punch_config *config
 );
 int32_t quicz_mobile_client_open_bidi(
     quicz_mobile_client *client,

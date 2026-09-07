@@ -11,6 +11,7 @@ const ServerConnection = quicz.runtime.server.ServerConnection;
 const punch_wire = quicz.connectivity.punch_wire;
 const PunchAttempt = quicz.connectivity.punch_attempt.PunchAttempt;
 const PunchState = quicz.connectivity.punch_attempt.State;
+const punch_driver = quicz.connectivity.punch_driver;
 
 fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
     var mutable_connection = connection;
@@ -20,21 +21,18 @@ fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
     stream.send(buffer[0..received], true) catch {};
 }
 
-fn receivePunch(
+const PunchContext = struct {
     io: std.Io,
     socket: std.Io.net.Socket,
-    key: punch_wire.Key,
-) ![punch_wire.packet_length]u8 {
-    var buffer: [256]u8 = undefined;
-    const received = try socket.receiveTimeout(io, &buffer, .{ .duration = .{
-        .clock = .awake,
-        .raw = std.Io.Duration.fromMilliseconds(1_000),
-    } });
-    _ = try punch_wire.decode(key, received.data);
-    if (received.data.len != punch_wire.packet_length) return error.InvalidPunchPacket;
-    var packet: [punch_wire.packet_length]u8 = undefined;
-    @memcpy(&packet, received.data);
-    return packet;
+    remote: std.Io.net.IpAddress,
+    attempt: *PunchAttempt,
+    failure: *?anyerror,
+};
+
+fn runPunch(context: PunchContext) std.Io.Cancelable!void {
+    punch_driver.run(context.io, context.socket, context.remote, context.attempt) catch |err| {
+        context.failure.* = err;
+    };
 }
 
 pub fn main() !void {
@@ -57,30 +55,33 @@ pub fn main() !void {
 
     const app_port = app_socket.address.ip4.port;
     const host_port = host_socket.address.ip4.port;
-    var app_candidate = app_socket.address;
-    var host_candidate = host_socket.address;
+    const app_candidate = app_socket.address;
+    const host_candidate = host_socket.address;
     const attempt_id: punch_wire.AttemptId = .{0x11} ** 16;
     const key: punch_wire.Key = .{0x42} ** 32;
     var app_attempt = try PunchAttempt.init(key, attempt_id, .{0xa1} ** 16, .{});
     var host_attempt = try PunchAttempt.init(key, attempt_id, .{0xb2} ** 16, .{});
     const punch_started = std.Io.Timestamp.now(io, .awake);
-    const app_probe = app_attempt.nextProbe(0).?;
-    const host_probe = host_attempt.nextProbe(0).?;
-
-    // Both peers send before either receives, matching simultaneous outbound
-    // probing through stateful firewalls and NATs.
-    try app_socket.send(io, &host_candidate, &app_probe);
-    try host_socket.send(io, &app_candidate, &host_probe);
-    const received_by_host = try receivePunch(io, host_socket, key);
-    const received_by_app = try receivePunch(io, app_socket, key);
-    const host_result = try host_attempt.receive(&received_by_host);
-    const app_result = try app_attempt.receive(&received_by_app);
-    try host_socket.send(io, &app_candidate, &host_result.acknowledgement.?);
-    try app_socket.send(io, &host_candidate, &app_result.acknowledgement.?);
-    const app_confirmation = try receivePunch(io, app_socket, key);
-    const host_confirmation = try receivePunch(io, host_socket, key);
-    _ = try app_attempt.receive(&app_confirmation);
-    _ = try host_attempt.receive(&host_confirmation);
+    var app_failure: ?anyerror = null;
+    var host_failure: ?anyerror = null;
+    var punch_group: std.Io.Group = .init;
+    try punch_group.concurrent(io, runPunch, .{PunchContext{
+        .io = io,
+        .socket = app_socket,
+        .remote = host_candidate,
+        .attempt = &app_attempt,
+        .failure = &app_failure,
+    }});
+    try punch_group.concurrent(io, runPunch, .{PunchContext{
+        .io = io,
+        .socket = host_socket,
+        .remote = app_candidate,
+        .attempt = &host_attempt,
+        .failure = &host_failure,
+    }});
+    punch_group.await(io) catch {};
+    if (app_failure) |err| return err;
+    if (host_failure) |err| return err;
     if (app_attempt.state != PunchState.validated) return error.AppPathNotValidated;
     if (host_attempt.state != PunchState.validated) return error.HostPathNotValidated;
     const punch_finished = std.Io.Timestamp.now(io, .awake);

@@ -39,6 +39,11 @@ outside quicz.
 - `connectivity.punch_attempt` requires authenticated traffic in both
   directions, rejects stale attempts and wrong nonces, and applies an
   exponential retry schedule capped at five probes.
+- `connectivity.punch_driver` drives that state machine against one remote
+  endpoint without taking socket ownership.
+- `connectivity.candidate` validates bounded host/reflexive/relay candidate
+  sets, rejects wildcard and multicast endpoints, creates only same-family
+  pairs, applies the RFC 8445 pair-priority formula, and caps pair growth.
 - `runtime.Client.initWithSocket` takes ownership of a caller-bound IPv4 UDP
   socket, preserving the NAT mapping created during discovery.
 - The shared-socket loopback proves STUN discovery and a QUIC
@@ -59,10 +64,23 @@ zig build mobile-static \
   --prefix /tmp/quicz-ios
 ```
 
+Build an XCFramework containing arm64 iPhoneOS and arm64 Simulator slices:
+
+```bash
+scripts/build_mobile_xcframework.sh zig-out/QuiczMobile.xcframework
+```
+
+The generated XCFramework contains separate `ios-arm64` and
+`ios-arm64-simulator` slices with the same public header.
+
+The bound-endpoint ABI can return `0.0.0.0` for a wildcard socket. Platform
+candidate gathering must combine the bound port with reachable interface
+addresses; it must never advertise the wildcard address to a peer.
+
 ## Deliberately not implemented yet
 
 - Real STUN service and cellular-network validation.
-- Candidate-pair scheduling and full UDP hole-punch orchestration.
+- Relay-mediated candidate exchange and real-NAT hole-punch validation.
 - Rendezvous and relay datagram protocols.
 - An iOS API for transferring a discovery-owned socket into QUIC.
 - iOS lifecycle and real cellular-network validation.

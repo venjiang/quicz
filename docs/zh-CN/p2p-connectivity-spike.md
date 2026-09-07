@@ -26,6 +26,8 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 - `connectivity.stun_transaction`在调用方socket上执行最多五次尝试的有界Binding transaction。
 - `connectivity.punch_wire`使用短期rendezvous key认证幂等probe/ack，篡改packet在路径路由前被拒绝。
 - `connectivity.punch_attempt`要求双向认证流量，拒绝旧attempt和错误nonce，并使用最多五次probe的指数退避。
+- `connectivity.punch_driver`在不接管socket所有权的前提下驱动单个remote endpoint打洞状态机。
+- `connectivity.candidate`校验有界host/reflexive/relay候选集合，拒绝wildcard和multicast，只生成同地址族pair，使用RFC 8445 pair priority公式并限制pair膨胀。
 - `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
 - shared-socket loopback证明STUN发现和QUIC stream echo使用同一个客户端UDP端口。
 - P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。一次macOS loopback样本为双向probe 229微秒、QUIC handshake加echo 29.686毫秒；这只作为回归证据，不代表真实网络性能。
@@ -39,10 +41,21 @@ zig build mobile-static \
   --prefix /tmp/quicz-ios
 ```
 
+生成同时包含arm64 iPhoneOS和arm64 Simulator slice的XCFramework：
+
+```bash
+scripts/build_mobile_xcframework.sh zig-out/QuiczMobile.xcframework
+```
+
+生成的XCFramework包含独立`ios-arm64`和`ios-arm64-simulator` slice，并共享同一公开header。
+
+wildcard socket的bound endpoint可能返回`0.0.0.0`。平台候选收集必须把bound port与可达接口地址组合，
+不得向peer发布wildcard地址。
+
 ## 明确尚未实现
 
 - 真实STUN服务与蜂窝网络验证。
-- Candidate pair调度与完整UDP打洞编排。
+- Relay候选交换与真实NAT打洞验证。
 - Rendezvous和Relay datagram协议。
 - 将discovery-owned socket移交QUIC的iOS API。
 - iOS生命周期与真实蜂窝网络验证。

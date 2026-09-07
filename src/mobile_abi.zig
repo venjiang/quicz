@@ -24,6 +24,7 @@ pub const Capability = enum(u6) {
     migration = 3,
     multipath = 4,
     stun = 5,
+    hole_punch = 6,
 };
 
 pub const Result = enum(i32) {
@@ -34,11 +35,23 @@ pub const Result = enum(i32) {
     connection_failed = 4,
     stream_failed = 5,
     discovery_failed = 6,
+    punch_failed = 7,
 };
 
 pub const Ipv4Endpoint = extern struct {
     address: [4]u8,
     port: u16,
+};
+
+pub const PunchConfig = extern struct {
+    remote: Ipv4Endpoint,
+    key: quicz.connectivity.punch_wire.Key,
+    attempt_id: quicz.connectivity.punch_wire.AttemptId,
+    nonce: quicz.connectivity.punch_wire.Nonce,
+    initial_retry_ms: u32,
+    maximum_retry_ms: u32,
+    max_attempts: u8,
+    reserved: [3]u8,
 };
 
 pub const ClientConfig = extern struct {
@@ -61,6 +74,7 @@ const MobileClient = struct {
     alpn: []u8,
     alpn_list: [1][]const u8,
     ca_bundle: std.crypto.Certificate.Bundle,
+    server_endpoint: Ipv4Endpoint,
     client: Client,
 
     fn create(config: *const ClientConfig, verify_server: bool) !*MobileClient {
@@ -83,6 +97,7 @@ const MobileClient = struct {
         state.alpn = try allocator.dupe(u8, alpn);
         errdefer allocator.free(state.alpn);
         state.alpn_list = .{state.alpn};
+        state.server_endpoint = .{ .address = config.server_ipv4, .port = config.server_port };
         state.ca_bundle = .empty;
         errdefer state.ca_bundle.deinit(allocator);
         if (verify_server) {
@@ -118,7 +133,8 @@ pub fn capabilityMask() u64 {
         bit(.path_validation) |
         bit(.migration) |
         bit(.multipath) |
-        bit(.stun);
+        bit(.stun) |
+        bit(.hole_punch);
 }
 
 fn bit(capability: Capability) u64 {
@@ -171,6 +187,20 @@ pub export fn quicz_mobile_client_connect(handle: ?*anyopaque) callconv(.c) i32 
     return code(.ok);
 }
 
+pub export fn quicz_mobile_client_bound_ipv4(
+    handle: ?*anyopaque,
+    endpoint_out: ?*Ipv4Endpoint,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const output = endpoint_out orelse return code(.invalid_argument);
+    const address = switch (client.client.socket.address) {
+        .ip4 => |endpoint| endpoint,
+        .ip6 => return code(.open_failed),
+    };
+    output.* = .{ .address = address.bytes, .port = address.port };
+    return code(.ok);
+}
+
 pub export fn quicz_mobile_client_discover_ipv4(
     handle: ?*anyopaque,
     stun_server: ?*const Ipv4Endpoint,
@@ -193,6 +223,38 @@ pub export fn quicz_mobile_client_discover_ipv4(
         .ipv4 => |endpoint| output.* = .{ .address = endpoint.address, .port = endpoint.port },
         .ipv6 => return code(.discovery_failed),
     }
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_punch_ipv4(
+    handle: ?*anyopaque,
+    config: ?*const PunchConfig,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const valid_config = config orelse return code(.invalid_argument);
+    if (!std.mem.allEqual(u8, &valid_config.reserved, 0) or
+        !std.mem.eql(u8, &valid_config.remote.address, &client.server_endpoint.address) or
+        valid_config.remote.port != client.server_endpoint.port) return code(.invalid_argument);
+    var attempt = quicz.connectivity.punch_attempt.PunchAttempt.init(
+        valid_config.key,
+        valid_config.attempt_id,
+        valid_config.nonce,
+        .{
+            .initial_retry_ms = valid_config.initial_retry_ms,
+            .maximum_retry_ms = valid_config.maximum_retry_ms,
+            .max_attempts = valid_config.max_attempts,
+        },
+    ) catch return code(.invalid_argument);
+    const remote = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = valid_config.remote.address,
+        .port = valid_config.remote.port,
+    } };
+    quicz.connectivity.punch_driver.run(
+        client.client.io,
+        client.client.socket,
+        remote,
+        &attempt,
+    ) catch return code(.punch_failed);
     return code(.ok);
 }
 
@@ -266,7 +328,7 @@ fn code(result: Result) i32 {
 
 test "mobile ABI reports only implemented transport capabilities" {
     try std.testing.expectEqual(@as(u32, 1), quicz_mobile_abi_version());
-    try std.testing.expectEqual(@as(u64, 0x3f), quicz_mobile_capabilities());
+    try std.testing.expectEqual(@as(u64, 0x7f), quicz_mobile_capabilities());
 }
 
 test "mobile client ABI rejects incomplete configuration" {
