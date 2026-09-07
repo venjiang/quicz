@@ -25,9 +25,10 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 - `connectivity.stun`编码RFC 8489 Binding request，解析transaction匹配的IPv4/IPv6 XOR-MAPPED-ADDRESS success response。
 - `connectivity.stun_transaction`在调用方socket上执行最多五次尝试的有界Binding transaction。
 - `connectivity.punch_wire`使用短期rendezvous key认证幂等probe/ack，篡改packet在路径路由前被拒绝。
+- `connectivity.punch_attempt`要求双向认证流量，拒绝旧attempt和错误nonce，并使用最多五次probe的指数退避。
 - `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
 - shared-socket loopback证明STUN发现和QUIC stream echo使用同一个客户端UDP端口。
-- P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。
+- P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。一次macOS loopback样本为双向probe 229微秒、QUIC handshake加echo 29.686毫秒；这只作为回归证据，不代表真实网络性能。
 
 构建移动端边界：
 

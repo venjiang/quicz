@@ -36,6 +36,9 @@ outside quicz.
   most five attempts on a caller-owned socket.
 - `connectivity.punch_wire` authenticates idempotent probe/ack packets with a
   short-lived rendezvous key and rejects tampering before path routing.
+- `connectivity.punch_attempt` requires authenticated traffic in both
+  directions, rejects stale attempts and wrong nonces, and applies an
+  exponential retry schedule capped at five probes.
 - `runtime.Client.initWithSocket` takes ownership of a caller-bound IPv4 UDP
   socket, preserving the NAT mapping created during discovery.
 - The shared-socket loopback proves STUN discovery and a QUIC
@@ -43,7 +46,9 @@ outside quicz.
 - The P2P loopback proves both peers send authenticated probes before receive,
   validate acknowledgements, transfer those sockets into the QUIC client and
   server, verify the server certificate, and exchange a stream without port
-  changes.
+  changes. One macOS loopback sample measured 229 microseconds for the
+  bidirectional probe and 29.686 milliseconds for QUIC handshake plus echo;
+  these are regression evidence, not real-network performance claims.
 
 Build the mobile boundary:
 

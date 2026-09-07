@@ -52,6 +52,7 @@ pub const connectivity = struct {
     pub const stun = @import("connectivity/stun.zig");
     pub const stun_transaction = @import("connectivity/stun_transaction.zig");
     pub const punch_wire = @import("connectivity/punch_wire.zig");
+    pub const punch_attempt = @import("connectivity/punch_attempt.zig");
 };
 const integration_tests = @import("quic/integration_tests.zig");
 pub const udp_event_loop = @import("quic/udp_event_loop.zig");
@@ -95,6 +96,7 @@ comptime {
     _ = connectivity.stun;
     _ = connectivity.stun_transaction;
     _ = connectivity.punch_wire;
+    _ = connectivity.punch_attempt;
     _ = integration_tests;
     _ = udp_event_loop;
     _ = zero_rtt;

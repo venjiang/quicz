@@ -8,7 +8,9 @@ const test_certs = @import("test_certs.zig");
 const Client = quicz.runtime.client.Client;
 const Server = quicz.runtime.server.Server;
 const ServerConnection = quicz.runtime.server.ServerConnection;
-const punch = quicz.connectivity.punch_wire;
+const punch_wire = quicz.connectivity.punch_wire;
+const PunchAttempt = quicz.connectivity.punch_attempt.PunchAttempt;
+const PunchState = quicz.connectivity.punch_attempt.State;
 
 fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
     var mutable_connection = connection;
@@ -21,14 +23,18 @@ fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
 fn receivePunch(
     io: std.Io,
     socket: std.Io.net.Socket,
-    key: punch.Key,
-) !punch.Message {
+    key: punch_wire.Key,
+) ![punch_wire.packet_length]u8 {
     var buffer: [256]u8 = undefined;
     const received = try socket.receiveTimeout(io, &buffer, .{ .duration = .{
         .clock = .awake,
         .raw = std.Io.Duration.fromMilliseconds(1_000),
     } });
-    return punch.decode(key, received.data);
+    _ = try punch_wire.decode(key, received.data);
+    if (received.data.len != punch_wire.packet_length) return error.InvalidPunchPacket;
+    var packet: [punch_wire.packet_length]u8 = undefined;
+    @memcpy(&packet, received.data);
+    return packet;
 }
 
 pub fn main() !void {
@@ -53,12 +59,13 @@ pub fn main() !void {
     const host_port = host_socket.address.ip4.port;
     var app_candidate = app_socket.address;
     var host_candidate = host_socket.address;
-    const attempt_id: punch.AttemptId = .{0x11} ** 16;
-    const key: punch.Key = .{0x42} ** 32;
-    const app_nonce: punch.Nonce = .{0xa1} ** 16;
-    const host_nonce: punch.Nonce = .{0xb2} ** 16;
-    const app_probe = punch.encode(key, .{ .kind = .probe, .attempt_id = attempt_id, .nonce = app_nonce });
-    const host_probe = punch.encode(key, .{ .kind = .probe, .attempt_id = attempt_id, .nonce = host_nonce });
+    const attempt_id: punch_wire.AttemptId = .{0x11} ** 16;
+    const key: punch_wire.Key = .{0x42} ** 32;
+    var app_attempt = try PunchAttempt.init(key, attempt_id, .{0xa1} ** 16, .{});
+    var host_attempt = try PunchAttempt.init(key, attempt_id, .{0xb2} ** 16, .{});
+    const punch_started = std.Io.Timestamp.now(io, .awake);
+    const app_probe = app_attempt.nextProbe(0).?;
+    const host_probe = host_attempt.nextProbe(0).?;
 
     // Both peers send before either receives, matching simultaneous outbound
     // probing through stateful firewalls and NATs.
@@ -66,20 +73,17 @@ pub fn main() !void {
     try host_socket.send(io, &app_candidate, &host_probe);
     const received_by_host = try receivePunch(io, host_socket, key);
     const received_by_app = try receivePunch(io, app_socket, key);
-    if (received_by_host.kind != .probe or received_by_app.kind != .probe) return error.ExpectedProbe;
-    if (!std.mem.eql(u8, &received_by_host.attempt_id, &attempt_id) or
-        !std.mem.eql(u8, &received_by_app.attempt_id, &attempt_id)) return error.AttemptMismatch;
-
-    const host_ack = try punch.acknowledgement(key, received_by_host);
-    const app_ack = try punch.acknowledgement(key, received_by_app);
-    try host_socket.send(io, &app_candidate, &host_ack);
-    try app_socket.send(io, &host_candidate, &app_ack);
+    const host_result = try host_attempt.receive(&received_by_host);
+    const app_result = try app_attempt.receive(&received_by_app);
+    try host_socket.send(io, &app_candidate, &host_result.acknowledgement.?);
+    try app_socket.send(io, &host_candidate, &app_result.acknowledgement.?);
     const app_confirmation = try receivePunch(io, app_socket, key);
     const host_confirmation = try receivePunch(io, host_socket, key);
-    if (app_confirmation.kind != .acknowledgement or
-        !std.mem.eql(u8, &app_confirmation.nonce, &app_nonce)) return error.AppPathNotValidated;
-    if (host_confirmation.kind != .acknowledgement or
-        !std.mem.eql(u8, &host_confirmation.nonce, &host_nonce)) return error.HostPathNotValidated;
+    _ = try app_attempt.receive(&app_confirmation);
+    _ = try host_attempt.receive(&host_confirmation);
+    if (app_attempt.state != PunchState.validated) return error.AppPathNotValidated;
+    if (host_attempt.state != PunchState.validated) return error.HostPathNotValidated;
+    const punch_finished = std.Io.Timestamp.now(io, .awake);
 
     const alpn = [_][]const u8{"quicz-p2p-spike"};
     var server = try Server.initWithSocket(allocator, io, host_socket, .{
@@ -110,11 +114,18 @@ pub fn main() !void {
     app_socket_transferred = true;
     defer client.deinit();
     const payload = "authenticated P2P QUIC stream";
+    const echo_started = std.Io.Timestamp.now(io, .awake);
     if (!try client.runEchoSession(payload)) return error.EchoMismatch;
+    const echo_finished = std.Io.Timestamp.now(io, .awake);
     if (client.localPort() != app_port or server.localPort() != host_port) return error.PortChanged;
 
     std.debug.print(
-        "P2P QUIC: app={d} host={d} probe=authenticated tls=verified echo=ok\n",
-        .{ app_port, host_port },
+        "P2P QUIC: app={d} host={d} probe_us={d} handshake_echo_us={d} tls=verified echo=ok\n",
+        .{
+            app_port,
+            host_port,
+            @divTrunc(punch_started.durationTo(punch_finished).nanoseconds, 1_000),
+            @divTrunc(echo_started.durationTo(echo_finished).nanoseconds, 1_000),
+        },
     );
 }
