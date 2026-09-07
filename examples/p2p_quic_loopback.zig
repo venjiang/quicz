@@ -102,6 +102,7 @@ pub fn main() !void {
         .cert_der = identity.certificate_der,
         .private_key = &identity.private_key_seed,
         .private_key_algorithm = .ed25519,
+        .max_connections = 1,
     });
     host_socket_transferred = true;
     defer server.deinit();

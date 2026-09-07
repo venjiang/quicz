@@ -33,6 +33,9 @@ const max_datagram_size: usize = 8192;
 /// the receive path keeps the larger allowance. Loopback benchmarks that
 /// want jumbo packets can raise this (4096 is a safe middle ground).
 const send_mtu: usize = 1350;
+/// One accepted connection routes the client's original destination CID, the
+/// server CID, and bounded replacement CIDs used during rotation/migration.
+const route_slots_per_connection: usize = 4;
 
 const ServerRecord = struct {
     handle: u64,
@@ -277,9 +280,14 @@ pub const Server = struct {
             .ip6 => return error.UnsupportedServerSocketFamily,
         }
         enlargeSocketReceiveBuffer(socket.handle);
+        const route_capacity = std.math.mul(
+            usize,
+            config.max_connections,
+            route_slots_per_connection,
+        ) catch std.math.maxInt(usize);
         const server_ep = try ServerEndpoint.initWithCapacity(allocator, config.max_connections, .{
-            .max_routes = config.max_connections,
-            .max_stateless_reset_tokens = config.max_connections,
+            .max_routes = route_capacity,
+            .max_stateless_reset_tokens = route_capacity,
         });
         return .{
             .allocator = allocator,
