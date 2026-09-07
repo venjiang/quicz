@@ -31,6 +31,9 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 - `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
 - shared-socket loopback证明STUN发现和QUIC stream echo使用同一个客户端UDP端口。
 - P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。一次macOS loopback样本为双向probe 229微秒、QUIC handshake加echo 29.686毫秒；这只作为回归证据，不代表真实网络性能。
+- iOS Simulator中的Swift基准已通过XCFramework C ABI连接真实Host listener，完成证书校验和单条双向stream上的100轮8字节串行回显；一次Debug样本为handshake 53.524毫秒、RTT p50/p95/p99分别为9.863/18.339/23.116毫秒。
+
+当前iPhoneOS Debug二进制已能签名、安装和启动，但Swift并发工作线程调用`quicz_mobile_client_create`时会因约190 KiB的`Client`值在约512 KiB线程栈上产生多次临时拷贝而触发SIGBUS。固定8 MiB线程后同一复现不再崩溃，随后停在LAN连接阶段；因此实体iPhone的认证stream echo仍未通过。生产Swift适配器在ABI完成堆上原位初始化前必须使用专用大栈串行线程，不得在任意Swift Task线程直接调用阻塞ABI。
 
 构建移动端边界：
 
@@ -58,7 +61,7 @@ wildcard socket的bound endpoint可能返回`0.0.0.0`。平台候选收集必须
 - Relay候选交换与真实NAT打洞验证。
 - Rendezvous和Relay datagram协议。
 - 将discovery-owned socket移交QUIC的iOS API。
-- iOS生命周期与真实蜂窝网络验证。
+- 实体iPhone的认证stream、生命周期与真实蜂窝网络验证。
 - 活动应用stream在Relay与Direct路径之间无感迁移。
 
 能力位不得提前声明这些未完成能力。
@@ -70,7 +73,7 @@ wildcard socket的bound endpoint可能返回`0.0.0.0`。平台候选收集必须
 3. 增加一个owned UDP socket，在同一本地端口上先运行STUN，再驱动QUIC；loopback spike已完成。
 4. 证明iPhone与Host之间的认证stream echo。
 5. 增加有界Direct探测与即时Relay fallback。
-6. 在相同LAN、Wi-Fi、蜂窝、CGNAT、UDP禁用和网络切换矩阵下，与隔离Iroh参照比较成功率和延迟。
+6. 在相同LAN、Wi-Fi、蜂窝、CGNAT、UDP禁用和网络切换矩阵下，与Mons WSS Relay基线比较成功率和延迟。
 
 参考：[RFC 8489](https://www.rfc-editor.org/info/rfc8489/)、
 [RFC 8445](https://www.rfc-editor.org/info/rfc8445/)和

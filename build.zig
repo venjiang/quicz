@@ -127,6 +127,25 @@ pub fn build(b: *std.Build) void {
     );
     run_p2p_quic_loopback.dependOn(&b.addRunArtifact(p2p_quic_loopback).step);
 
+    const mobile_latency_server = b.addExecutable(.{
+        .name = "quicz-mobile-latency-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mobile_latency_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    const run_mobile_latency_server = b.step(
+        "run-mobile-latency-server",
+        "Run the QUIC echo server for iOS latency measurements",
+    );
+    const run_mobile_latency_server_command = b.addRunArtifact(mobile_latency_server);
+    if (b.args) |args| run_mobile_latency_server_command.addArgs(args);
+    run_mobile_latency_server.dependOn(&run_mobile_latency_server_command.step);
+
     // Echo server executable
     const exe_server = b.addExecutable(.{
         .name = "quicz-echo-server",

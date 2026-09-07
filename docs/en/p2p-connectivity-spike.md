@@ -54,6 +54,19 @@ outside quicz.
   changes. One macOS loopback sample measured 229 microseconds for the
   bidirectional probe and 29.686 milliseconds for QUIC handshake plus echo;
   these are regression evidence, not real-network performance claims.
+- A Swift benchmark running in iOS Simulator used the XCFramework C ABI to
+  connect to a real Host listener, verify its certificate, and complete 100
+  serial 8-byte echoes on one bidirectional stream. One Debug sample measured
+  53.524 ms for the handshake and 9.863/18.339/23.116 ms for p50/p95/p99 RTT.
+
+The iPhoneOS Debug binary can be signed, installed, and launched. Calling
+`quicz_mobile_client_create` from a Swift concurrency worker currently copies
+the roughly 190 KiB `Client` value through a roughly 512 KiB thread stack and
+triggers SIGBUS. The same reproduction no longer crashes on a dedicated 8 MiB
+thread, then waits in the LAN connection stage. The physical-iPhone verified
+stream gate therefore remains open. Until the ABI initializes this state in
+place on the heap, a production Swift adapter must serialize blocking ABI calls
+on a dedicated large-stack thread instead of an arbitrary Swift Task worker.
 
 Build the mobile boundary:
 
@@ -83,7 +96,8 @@ addresses; it must never advertise the wildcard address to a peer.
 - Relay-mediated candidate exchange and real-NAT hole-punch validation.
 - Rendezvous and relay datagram protocols.
 - An iOS API for transferring a discovery-owned socket into QUIC.
-- iOS lifecycle and real cellular-network validation.
+- Physical-iPhone verified streams, iOS lifecycle, and real cellular-network
+  validation.
 - Seamless migration of an established application stream between relay and
   direct paths.
 
@@ -97,7 +111,7 @@ The capability mask must not advertise these unfinished features.
    local port. Completed in the loopback spike.
 4. Prove authenticated stream echo across iPhone and Host.
 5. Add bounded direct probing with immediate relay fallback.
-6. Compare connection success and latency against an isolated Iroh reference
+6. Compare connection success and latency against the Mons WSS Relay baseline
    under the same LAN, Wi-Fi, cellular, CGNAT, UDP-blocked, and network-change
    matrix.
 
