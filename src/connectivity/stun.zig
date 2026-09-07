@@ -38,6 +38,17 @@ pub fn encodeBindingRequest(transaction_id: TransactionId) [header_length]u8 {
     return message;
 }
 
+pub fn decodeBindingRequest(message: []const u8) !TransactionId {
+    if (message.len != header_length) return error.InvalidMessageLength;
+    if (message[0] & 0xc0 != 0) return error.NotStun;
+    if (readU16(message[0..2]) != binding_request) return error.UnexpectedMessageType;
+    if (readU16(message[2..4]) != 0) return error.InvalidMessageLength;
+    if (readU32(message[4..8]) != magic_cookie) return error.InvalidMagicCookie;
+    var transaction_id: TransactionId = undefined;
+    @memcpy(&transaction_id, message[8..20]);
+    return transaction_id;
+}
+
 pub fn encodeBindingSuccessIpv4(
     transaction_id: TransactionId,
     address: [4]u8,
@@ -150,6 +161,7 @@ test "encodes RFC 8489 binding request header" {
         9,    10,   11,   12,
     };
     try std.testing.expectEqualSlices(u8, &expected, &encodeBindingRequest(transaction_id));
+    try std.testing.expectEqual(transaction_id, try decodeBindingRequest(&expected));
 }
 
 test "decodes IPv4 XOR-MAPPED-ADDRESS from matching binding success" {

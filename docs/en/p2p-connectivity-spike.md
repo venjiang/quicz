@@ -22,17 +22,28 @@ outside quicz.
 
 - `mobile-static` builds an arm64 iOS static library and installs
   `quicz_mobile.h`.
-- ABI v1 exposes version and implemented transport capability negotiation.
+- ABI v1 exposes version/capability negotiation and blocking verified TLS
+  client lifecycle: create, connect, discover, open stream, send, receive,
+  close, and destroy. Swift callers must run blocking operations off the main
+  thread.
 - Swift can import the C header when compiling for iPhoneOS.
 - `connectivity.path_selector` selects the first validated path, migrates to a
   meaningfully faster path, falls back when the active path fails, and applies
   RTT hysteresis to avoid flapping.
 - `connectivity.stun` encodes RFC 8489 Binding requests and decodes matching
   IPv4/IPv6 XOR-MAPPED-ADDRESS success responses.
+- `connectivity.stun_transaction` runs a bounded Binding transaction with at
+  most five attempts on a caller-owned socket.
+- `connectivity.punch_wire` authenticates idempotent probe/ack packets with a
+  short-lived rendezvous key and rejects tampering before path routing.
 - `runtime.Client.initWithSocket` takes ownership of a caller-bound IPv4 UDP
   socket, preserving the NAT mapping created during discovery.
-- The shared-socket loopback proves STUN discovery and an authenticated QUIC
+- The shared-socket loopback proves STUN discovery and a QUIC
   stream echo use the same client UDP port.
+- The P2P loopback proves both peers send authenticated probes before receive,
+  validate acknowledgements, transfer those sockets into the QUIC client and
+  server, verify the server certificate, and exchange a stream without port
+  changes.
 
 Build the mobile boundary:
 
@@ -45,10 +56,10 @@ zig build mobile-static \
 
 ## Deliberately not implemented yet
 
-- STUN transaction timers and socket driving.
-- ICE candidate checks or UDP hole punching.
+- Real STUN service and cellular-network validation.
+- Candidate-pair scheduling and full UDP hole-punch orchestration.
 - Rendezvous and relay datagram protocols.
-- Endpoint, connection, and stream handles in the C ABI.
+- An iOS API for transferring a discovery-owned socket into QUIC.
 - iOS lifecycle and real cellular-network validation.
 - Seamless migration of an established application stream between relay and
   direct paths.

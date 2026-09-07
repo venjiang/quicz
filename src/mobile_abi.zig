@@ -6,6 +6,14 @@
 //! deliberately so callers cannot mistake QUIC transport support for NAT traversal.
 
 const std = @import("std");
+const quicz = @import("quicz");
+
+const Client = quicz.runtime.client.Client;
+
+// iOS does not export the dyld stack-introspection symbol used by Zig's
+// default Mach-O panic renderer. The ABI returns explicit status codes for
+// recoverable failures; invariant violations terminate without stack I/O.
+pub const panic = std.debug.no_panic;
 
 pub const abi_version: u32 = 1;
 
@@ -15,6 +23,93 @@ pub const Capability = enum(u6) {
     path_validation = 2,
     migration = 3,
     multipath = 4,
+    stun = 5,
+};
+
+pub const Result = enum(i32) {
+    ok = 0,
+    invalid_argument = 1,
+    allocation_failed = 2,
+    open_failed = 3,
+    connection_failed = 4,
+    stream_failed = 5,
+    discovery_failed = 6,
+};
+
+pub const Ipv4Endpoint = extern struct {
+    address: [4]u8,
+    port: u16,
+};
+
+pub const ClientConfig = extern struct {
+    server_ipv4: [4]u8,
+    server_port: u16,
+    allow_migration: u8,
+    reserved: u8,
+    server_name: ?[*]const u8,
+    server_name_length: usize,
+    alpn: ?[*]const u8,
+    alpn_length: usize,
+    ca_certificate_der: ?[*]const u8,
+    ca_certificate_der_length: usize,
+};
+
+const MobileClient = struct {
+    allocator: std.mem.Allocator,
+    threaded: std.Io.Threaded,
+    server_name: []u8,
+    alpn: []u8,
+    alpn_list: [1][]const u8,
+    ca_bundle: std.crypto.Certificate.Bundle,
+    client: Client,
+
+    fn create(config: *const ClientConfig, verify_server: bool) !*MobileClient {
+        const allocator = std.heap.c_allocator;
+        const server_name = requiredBytes(config.server_name, config.server_name_length) orelse return error.InvalidArgument;
+        const alpn = requiredBytes(config.alpn, config.alpn_length) orelse return error.InvalidArgument;
+        const ca_der = if (verify_server)
+            requiredBytes(config.ca_certificate_der, config.ca_certificate_der_length) orelse return error.InvalidArgument
+        else
+            &.{};
+        if (config.server_port == 0 or config.reserved != 0) return error.InvalidArgument;
+
+        const state = try allocator.create(MobileClient);
+        errdefer allocator.destroy(state);
+        state.allocator = allocator;
+        state.threaded = std.Io.Threaded.init(allocator, .{});
+        errdefer state.threaded.deinit();
+        state.server_name = try allocator.dupe(u8, server_name);
+        errdefer allocator.free(state.server_name);
+        state.alpn = try allocator.dupe(u8, alpn);
+        errdefer allocator.free(state.alpn);
+        state.alpn_list = .{state.alpn};
+        state.ca_bundle = .empty;
+        errdefer state.ca_bundle.deinit(allocator);
+        if (verify_server) {
+            try state.ca_bundle.bytes.appendSlice(allocator, ca_der);
+            const now = std.Io.Clock.real.now(state.threaded.io()).toSeconds();
+            try state.ca_bundle.parseCert(allocator, 0, now);
+        }
+        state.client = try Client.init(allocator, state.threaded.io(), .{
+            .server_host = config.server_ipv4,
+            .server_port = config.server_port,
+            .server_name = state.server_name,
+            .alpn = &state.alpn_list,
+            .ca_bundle = if (verify_server) &state.ca_bundle else null,
+            .insecure_skip_verify = !verify_server,
+            .active_migration_disabled = config.allow_migration == 0,
+        });
+        return state;
+    }
+
+    fn destroy(self: *MobileClient) void {
+        self.client.deinit();
+        self.ca_bundle.deinit(self.allocator);
+        self.threaded.deinit();
+        self.allocator.free(self.server_name);
+        self.allocator.free(self.alpn);
+        self.allocator.destroy(self);
+    }
 };
 
 pub fn capabilityMask() u64 {
@@ -22,7 +117,8 @@ pub fn capabilityMask() u64 {
         bit(.datagram) |
         bit(.path_validation) |
         bit(.migration) |
-        bit(.multipath);
+        bit(.multipath) |
+        bit(.stun);
 }
 
 fn bit(capability: Capability) u64 {
@@ -37,7 +133,156 @@ pub export fn quicz_mobile_capabilities() callconv(.c) u64 {
     return capabilityMask();
 }
 
+pub export fn quicz_mobile_client_create_unverified(
+    config: ?*const ClientConfig,
+    client_out: ?*?*anyopaque,
+) callconv(.c) i32 {
+    const valid_config = config orelse return code(.invalid_argument);
+    const output = client_out orelse return code(.invalid_argument);
+    output.* = null;
+    const client = MobileClient.create(valid_config, false) catch |err| return switch (err) {
+        error.InvalidArgument => code(.invalid_argument),
+        error.OutOfMemory => code(.allocation_failed),
+        else => code(.open_failed),
+    };
+    output.* = @ptrCast(client);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_create(
+    config: ?*const ClientConfig,
+    client_out: ?*?*anyopaque,
+) callconv(.c) i32 {
+    const valid_config = config orelse return code(.invalid_argument);
+    const output = client_out orelse return code(.invalid_argument);
+    output.* = null;
+    const client = MobileClient.create(valid_config, true) catch |err| return switch (err) {
+        error.InvalidArgument => code(.invalid_argument),
+        error.OutOfMemory => code(.allocation_failed),
+        else => code(.open_failed),
+    };
+    output.* = @ptrCast(client);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_connect(handle: ?*anyopaque) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    client.client.connect() catch return code(.connection_failed);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_discover_ipv4(
+    handle: ?*anyopaque,
+    stun_server: ?*const Ipv4Endpoint,
+    timeout_ms: u32,
+    max_attempts: u8,
+    mapped_endpoint_out: ?*Ipv4Endpoint,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const server = stun_server orelse return code(.invalid_argument);
+    const output = mapped_endpoint_out orelse return code(.invalid_argument);
+    const server_address = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = server.address,
+        .port = server.port,
+    } };
+    const mapped = client.client.discoverReflexiveAddress(server_address, .{
+        .timeout_ms = timeout_ms,
+        .max_attempts = max_attempts,
+    }) catch return code(.discovery_failed);
+    switch (mapped) {
+        .ipv4 => |endpoint| output.* = .{ .address = endpoint.address, .port = endpoint.port },
+        .ipv6 => return code(.discovery_failed),
+    }
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_open_bidi(
+    handle: ?*anyopaque,
+    stream_id_out: ?*u64,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const output = stream_id_out orelse return code(.invalid_argument);
+    output.* = client.client.openStream() catch return code(.stream_failed);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_send(
+    handle: ?*anyopaque,
+    stream_id: u64,
+    bytes: ?[*]const u8,
+    length: usize,
+    finish: u8,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const payload = optionalBytes(bytes, length) orelse return code(.invalid_argument);
+    client.client.sendOnStream(stream_id, payload, finish != 0) catch return code(.stream_failed);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_receive(
+    handle: ?*anyopaque,
+    stream_id: u64,
+    buffer: ?[*]u8,
+    capacity: usize,
+    received_out: ?*usize,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    const output = received_out orelse return code(.invalid_argument);
+    output.* = 0;
+    if (capacity == 0) return code(.invalid_argument);
+    const destination = buffer orelse return code(.invalid_argument);
+    output.* = client.client.receive(stream_id, destination[0..capacity]) catch return code(.stream_failed);
+    return code(.ok);
+}
+
+pub export fn quicz_mobile_client_close(handle: ?*anyopaque) callconv(.c) void {
+    const client = clientFromHandle(handle) orelse return;
+    client.client.close();
+}
+
+pub export fn quicz_mobile_client_destroy(handle: ?*anyopaque) callconv(.c) void {
+    const client = clientFromHandle(handle) orelse return;
+    client.destroy();
+}
+
+fn clientFromHandle(handle: ?*anyopaque) ?*MobileClient {
+    const pointer = handle orelse return null;
+    return @ptrCast(@alignCast(pointer));
+}
+
+fn requiredBytes(pointer: ?[*]const u8, length: usize) ?[]const u8 {
+    if (length == 0) return null;
+    return (pointer orelse return null)[0..length];
+}
+
+fn optionalBytes(pointer: ?[*]const u8, length: usize) ?[]const u8 {
+    if (length == 0) return &.{};
+    return (pointer orelse return null)[0..length];
+}
+
+fn code(result: Result) i32 {
+    return @intFromEnum(result);
+}
+
 test "mobile ABI reports only implemented transport capabilities" {
     try std.testing.expectEqual(@as(u32, 1), quicz_mobile_abi_version());
-    try std.testing.expectEqual(@as(u64, 0x1f), quicz_mobile_capabilities());
+    try std.testing.expectEqual(@as(u64, 0x3f), quicz_mobile_capabilities());
+}
+
+test "mobile client ABI rejects incomplete configuration" {
+    var client: ?*anyopaque = undefined;
+    const config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = 0,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = null,
+        .server_name_length = 0,
+        .alpn = null,
+        .alpn_length = 0,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_create_unverified(&config, &client));
+    try std.testing.expect(client == null);
 }

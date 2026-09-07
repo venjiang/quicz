@@ -256,6 +256,24 @@ pub const Server = struct {
         const local_ip = if (config.bind_addr) |ip| ip else [_]u8{ 127, 0, 0, 1 };
         var address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = local_ip, .port = config.port } };
         const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+        errdefer socket.close(io);
+        return initWithSocket(allocator, io, socket, config);
+    }
+
+    /// Create a server from an already-bound IPv4 UDP socket. On success the
+    /// server owns and closes the socket; on failure ownership stays with the
+    /// caller. Connectivity checks can therefore open the NAT mapping before
+    /// QUIC starts without changing the server port.
+    pub fn initWithSocket(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        socket: std.Io.net.Socket,
+        config: Config,
+    ) !Server {
+        switch (socket.address) {
+            .ip4 => {},
+            .ip6 => return error.UnsupportedServerSocketFamily,
+        }
         enlargeSocketReceiveBuffer(socket.handle);
         const server_ep = try ServerEndpoint.initWithCapacity(allocator, config.max_connections, .{
             .max_routes = config.max_connections,

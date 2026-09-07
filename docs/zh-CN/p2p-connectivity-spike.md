@@ -19,12 +19,15 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 ## 第一检查点已实现
 
 - `mobile-static`生成arm64 iOS静态库并安装`quicz_mobile.h`。
-- ABI v1提供版本与已实现传输能力协商。
+- ABI v1提供版本/能力协商，以及阻塞式verified TLS Client生命周期：create、connect、discover、open stream、send、receive、close和destroy。Swift必须在主线程之外执行阻塞调用。
 - Swift针对iPhoneOS编译时可以导入C header。
 - `connectivity.path_selector`选择首条已验证路径，在更快路径出现时迁移，活动路径失败时降级，并使用RTT迟滞避免抖动切换。
 - `connectivity.stun`编码RFC 8489 Binding request，解析transaction匹配的IPv4/IPv6 XOR-MAPPED-ADDRESS success response。
+- `connectivity.stun_transaction`在调用方socket上执行最多五次尝试的有界Binding transaction。
+- `connectivity.punch_wire`使用短期rendezvous key认证幂等probe/ack，篡改packet在路径路由前被拒绝。
 - `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
-- shared-socket loopback证明STUN发现和认证QUIC stream echo使用同一个客户端UDP端口。
+- shared-socket loopback证明STUN发现和QUIC stream echo使用同一个客户端UDP端口。
+- P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。
 
 构建移动端边界：
 
@@ -37,10 +40,10 @@ zig build mobile-static \
 
 ## 明确尚未实现
 
-- STUN transaction定时器与socket驱动。
-- ICE候选检查或UDP打洞。
+- 真实STUN服务与蜂窝网络验证。
+- Candidate pair调度与完整UDP打洞编排。
 - Rendezvous和Relay datagram协议。
-- C ABI中的Endpoint、Connection和Stream句柄。
+- 将discovery-owned socket移交QUIC的iOS API。
 - iOS生命周期与真实蜂窝网络验证。
 - 活动应用stream在Relay与Direct路径之间无感迁移。
 

@@ -17,6 +17,28 @@ fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
     stream.send(buffer[0..received], true) catch {};
 }
 
+const StunResponderContext = struct {
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+};
+
+fn respondToBindingRequest(context: StunResponderContext) std.Io.Cancelable!void {
+    var buffer: [256]u8 = undefined;
+    const request = context.socket.receiveTimeout(context.io, &buffer, .none) catch return;
+    const transaction_id = stun.decodeBindingRequest(request.data) catch return;
+    const observed_address = switch (request.from) {
+        .ip4 => |address| address,
+        .ip6 => return,
+    };
+    const response = stun.encodeBindingSuccessIpv4(
+        transaction_id,
+        observed_address.bytes,
+        observed_address.port,
+    );
+    var destination = request.from;
+    context.socket.send(context.io, &destination, &response) catch return;
+}
+
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
@@ -36,35 +58,12 @@ pub fn main() !void {
     defer if (!client_socket_transferred) client_socket.close(io);
     const original_client_port = client_socket.address.ip4.port;
 
-    const transaction_id = stun.TransactionId{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-    const request = stun.encodeBindingRequest(transaction_id);
-    var stun_server_address = stun_socket.address;
-    try client_socket.send(io, &stun_server_address, &request);
-
-    var stun_server_buffer: [256]u8 = undefined;
-    const timeout = std.Io.Timeout{ .duration = .{
-        .clock = .awake,
-        .raw = std.Io.Duration.fromMilliseconds(1_000),
-    } };
-    const stun_request = try stun_socket.receiveTimeout(io, &stun_server_buffer, timeout);
-    const observed_address = stun_request.from.ip4;
-    const response = stun.encodeBindingSuccessIpv4(
-        transaction_id,
-        observed_address.bytes,
-        observed_address.port,
-    );
-    var response_destination = stun_request.from;
-    try stun_socket.send(io, &response_destination, &response);
-
-    var stun_client_buffer: [256]u8 = undefined;
-    const stun_response = try client_socket.receiveTimeout(io, &stun_client_buffer, timeout);
-    const mapped_address = try stun.decodeBindingSuccess(stun_response.data, transaction_id);
-    switch (mapped_address) {
-        .ipv4 => |mapped| {
-            if (mapped.port != original_client_port) return error.StunPortMismatch;
-        },
-        .ipv6 => return error.UnexpectedAddressFamily,
-    }
+    const stun_server_address = stun_socket.address;
+    var stun_group: std.Io.Group = .init;
+    try stun_group.concurrent(io, respondToBindingRequest, .{StunResponderContext{
+        .io = io,
+        .socket = &stun_socket,
+    }});
 
     const alpn = [_][]const u8{"quicz-connectivity-spike"};
     var server = try Server.init(allocator, io, .{
@@ -86,6 +85,17 @@ pub fn main() !void {
     client_socket_transferred = true;
     defer client.deinit();
     if (client.localPort() != original_client_port) return error.QuicPortChanged;
+    const mapped_address = try client.discoverReflexiveAddress(stun_server_address, .{
+        .timeout_ms = 1_000,
+        .max_attempts = 1,
+    });
+    stun_group.await(io) catch {};
+    switch (mapped_address) {
+        .ipv4 => |mapped| {
+            if (mapped.port != original_client_port) return error.StunPortMismatch;
+        },
+        .ipv6 => return error.UnexpectedAddressFamily,
+    }
 
     const payload = "STUN and QUIC share one UDP socket";
     if (!try client.runEchoSession(payload)) return error.EchoMismatch;

@@ -296,6 +296,22 @@ pub const Client = struct {
         };
     }
 
+    /// Run STUN before the QUIC tasks start, reusing the exact UDP socket and
+    /// local port that will carry the later connection.
+    pub fn discoverReflexiveAddress(
+        self: *Client,
+        stun_server: std.Io.net.IpAddress,
+        config: quicz.connectivity.stun_transaction.Config,
+    ) !quicz.connectivity.stun.MappedAddress {
+        if (self.started) return error.ClientAlreadyStarted;
+        return quicz.connectivity.stun_transaction.discover(
+            self.io,
+            &self.socket,
+            stun_server,
+            config,
+        );
+    }
+
     pub fn deinit(self: *Client) void {
         if (self.started) {
             @atomicStore(bool, &self.stopping, true, .release);
