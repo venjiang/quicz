@@ -23,6 +23,8 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 - Swift针对iPhoneOS编译时可以导入C header。
 - `connectivity.path_selector`选择首条已验证路径，在更快路径出现时迁移，活动路径失败时降级，并使用RTT迟滞避免抖动切换。
 - `connectivity.stun`编码RFC 8489 Binding request，解析transaction匹配的IPv4/IPv6 XOR-MAPPED-ADDRESS success response。
+- `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
+- shared-socket loopback证明STUN发现和认证QUIC stream echo使用同一个客户端UDP端口。
 
 构建移动端边界：
 
@@ -48,7 +50,7 @@ zig build mobile-static \
 
 1. 保持完整QUIC回归与UDP path-validation示例通过。
 2. 从Swift编译并导入arm64 iOS静态库。
-3. 增加一个owned UDP socket，在同一本地端口上先运行STUN，再驱动QUIC。
+3. 增加一个owned UDP socket，在同一本地端口上先运行STUN，再驱动QUIC；loopback spike已完成。
 4. 证明iPhone与Host之间的认证stream echo。
 5. 增加有界Direct探测与即时Relay fallback。
 6. 在相同LAN、Wi-Fi、蜂窝、CGNAT、UDP禁用和网络切换矩阵下，与隔离Iroh参照比较成功率和延迟。

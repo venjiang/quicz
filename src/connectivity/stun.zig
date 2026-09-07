@@ -38,6 +38,26 @@ pub fn encodeBindingRequest(transaction_id: TransactionId) [header_length]u8 {
     return message;
 }
 
+pub fn encodeBindingSuccessIpv4(
+    transaction_id: TransactionId,
+    address: [4]u8,
+    port: u16,
+) [32]u8 {
+    var message = [_]u8{0} ** 32;
+    writeU16(message[0..2], binding_success);
+    writeU16(message[2..4], 12);
+    writeU32(message[4..8], magic_cookie);
+    @memcpy(message[8..20], &transaction_id);
+    writeU16(message[20..22], xor_mapped_address);
+    writeU16(message[22..24], 8);
+    message[25] = ipv4_family;
+    writeU16(message[26..28], port ^ @as(u16, @truncate(magic_cookie >> 16)));
+    for (message[28..32], address, cookie_bytes) |*encoded, plain, mask| {
+        encoded.* = plain ^ mask;
+    }
+    return message;
+}
+
 pub fn decodeBindingSuccess(message: []const u8, expected_transaction_id: TransactionId) !MappedAddress {
     if (message.len < header_length) return error.TruncatedHeader;
     if (message[0] & 0xc0 != 0) return error.NotStun;
@@ -134,16 +154,7 @@ test "encodes RFC 8489 binding request header" {
 
 test "decodes IPv4 XOR-MAPPED-ADDRESS from matching binding success" {
     const transaction_id = TransactionId{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-    const response = [_]u8{
-        0x01, 0x01, 0x00, 0x0c,
-        0x21, 0x12, 0xa4, 0x42,
-        1,    2,    3,    4,
-        5,    6,    7,    8,
-        9,    10,   11,   12,
-        0x00, 0x20, 0x00, 0x08,
-        0x00, 0x01, 0xa1, 0x47,
-        0xe1, 0x12, 0xa6, 0x43,
-    };
+    const response = encodeBindingSuccessIpv4(transaction_id, .{ 192, 0, 2, 1 }, 0x8055);
 
     const mapped = try decodeBindingSuccess(&response, transaction_id);
     try std.testing.expectEqual(MappedAddress{ .ipv4 = .{

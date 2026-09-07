@@ -220,15 +220,35 @@ pub const Client = struct {
         version: quic_packet.Version = .v1,
         /// Offer TLS_CHACHA20_POLY1305_SHA256 in the ClientHello.
         prefer_chacha20: bool = false,
+        /// Preserve the existing default for callers that do not need network
+        /// migration. Connectivity owners opt in after validating new paths.
+        active_migration_disabled: bool = true,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Client {
         var client_address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } };
         const socket = try client_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+        errdefer socket.close(io);
+        return initWithSocket(allocator, io, socket, config);
+    }
+
+    /// Create a client from an already-bound IPv4 UDP socket. On success the
+    /// client owns and closes the socket; on failure ownership stays with the
+    /// caller. This lets connectivity discovery and QUIC share one NAT mapping.
+    pub fn initWithSocket(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        socket: std.Io.net.Socket,
+        config: Config,
+    ) !Client {
+        const local_address = switch (socket.address) {
+            .ip4 => |address| address,
+            .ip6 => return error.UnsupportedClientSocketFamily,
+        };
         enlargeSocketReceiveBuffer(socket.handle);
         const server_address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = config.server_host, .port = config.server_port } };
         const client_path = endpoint.Udp4Tuple{
-            .local = endpoint.Udp4Address.init(socket.address.ip4.bytes, socket.address.ip4.port),
+            .local = endpoint.Udp4Address.init(local_address.bytes, local_address.port),
             .remote = endpoint.Udp4Address.init(config.server_host, config.server_port),
         };
         var original_dcid: [8]u8 = undefined;
@@ -252,7 +272,7 @@ pub const Client = struct {
             allocator,
             1,
             client_path,
-            .{ .active_migration_disabled = true },
+            .{ .active_migration_disabled = config.active_migration_disabled },
             .{
                 .initial_max_data = 10_485_760,
                 .initial_max_stream_data = 10_485_760,
@@ -267,6 +287,13 @@ pub const Client = struct {
             client_scid,
         );
         return .{ .allocator = allocator, .io = io, .socket = socket, .client = client, .server_address = server_address, .datagram_pool = DatagramPool.init(allocator) };
+    }
+
+    pub fn localPort(self: *const Client) u16 {
+        return switch (self.socket.address) {
+            .ip4 => |address| address.port,
+            .ip6 => |address| address.port,
+        };
     }
 
     pub fn deinit(self: *Client) void {

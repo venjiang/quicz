@@ -29,6 +29,10 @@ outside quicz.
   RTT hysteresis to avoid flapping.
 - `connectivity.stun` encodes RFC 8489 Binding requests and decodes matching
   IPv4/IPv6 XOR-MAPPED-ADDRESS success responses.
+- `runtime.Client.initWithSocket` takes ownership of a caller-bound IPv4 UDP
+  socket, preserving the NAT mapping created during discovery.
+- The shared-socket loopback proves STUN discovery and an authenticated QUIC
+  stream echo use the same client UDP port.
 
 Build the mobile boundary:
 
@@ -56,7 +60,7 @@ The capability mask must not advertise these unfinished features.
 1. Preserve the complete QUIC regression suite and UDP path-validation demo.
 2. Compile and import the arm64 iOS static library from Swift.
 3. Add an owned UDP socket that can run STUN and then drive QUIC on the same
-   local port.
+   local port. Completed in the loopback spike.
 4. Prove authenticated stream echo across iPhone and Host.
 5. Add bounded direct probing with immediate relay fallback.
 6. Compare connection success and latency against an isolated Iroh reference

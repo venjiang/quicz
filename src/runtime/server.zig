@@ -288,6 +288,13 @@ pub const Server = struct {
         self.started = true;
     }
 
+    pub fn localPort(self: *const Server) u16 {
+        return switch (self.socket.address) {
+            .ip4 => |address| address.port,
+            .ip6 => |address| address.port,
+        };
+    }
+
     /// Signal the drive task and all accept/receive loops to stop.
     pub fn stop(self: *Server) void {
         @atomicStore(bool, &self.stopping, true, .release);

@@ -71,6 +71,23 @@ pub fn build(b: *std.Build) void {
     mobile_abi_step.dependOn(&install_mobile_abi.step);
     mobile_abi_step.dependOn(&install_mobile_header.step);
 
+    const shared_socket_connectivity = b.addExecutable(.{
+        .name = "quicz-shared-socket-connectivity-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/shared_socket_connectivity_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    const run_shared_socket_connectivity = b.step(
+        "run-shared-socket-connectivity-loopback",
+        "Run STUN discovery and QUIC on one client UDP socket",
+    );
+    run_shared_socket_connectivity.dependOn(&b.addRunArtifact(shared_socket_connectivity).step);
+
     // Echo server executable
     const exe_server = b.addExecutable(.{
         .name = "quicz-echo-server",
