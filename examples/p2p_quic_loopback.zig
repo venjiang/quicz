@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const quicz = @import("quicz");
-const test_certs = @import("test_certs.zig");
 
 const Client = quicz.runtime.client.Client;
 const Server = quicz.runtime.server.Server;
@@ -93,28 +92,29 @@ pub fn main() !void {
     if (host_attempt.state != PunchState.validated) return error.HostPathNotValidated;
     const punch_finished = std.Io.Timestamp.now(io, .awake);
 
+    const now_seconds: u64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
+    var identity = try quicz.connectivity.ephemeral_identity.generate(allocator, io, now_seconds);
+    defer identity.deinit(allocator);
     const alpn = [_][]const u8{"quicz-p2p-spike"};
     var server = try Server.initWithSocket(allocator, io, host_socket, .{
         .port = host_port,
         .alpn = &alpn,
-        .cert_der = &test_certs.cert_der,
-        .private_key = &test_certs.private_key,
+        .cert_der = identity.certificate_der,
+        .private_key = &identity.private_key_seed,
+        .private_key_algorithm = .ed25519,
     });
     host_socket_transferred = true;
     defer server.deinit();
     try server.serve(&echoHandler);
 
-    const ca_pem = @embedFile("interop/testdata/quicz-echo-ca.pem");
-    var ca_der_buffer: [1024]u8 = undefined;
-    const ca_der = try quicz.tls_pem.decodeBlock(ca_pem, "CERTIFICATE", &ca_der_buffer);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
-    try ca_bundle.bytes.appendSlice(allocator, ca_der);
+    try ca_bundle.bytes.appendSlice(allocator, identity.certificate_der);
     try ca_bundle.parseCert(allocator, 0, std.Io.Clock.real.now(io).toSeconds());
 
     var client = try Client.initWithSocket(allocator, io, app_socket, .{
         .server_port = host_port,
-        .server_name = "localhost",
+        .server_name = quicz.connectivity.ephemeral_identity.server_name,
         .alpn = &alpn,
         .ca_bundle = &ca_bundle,
         .active_migration_disabled = false,

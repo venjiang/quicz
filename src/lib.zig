@@ -48,6 +48,7 @@ pub const metrics = @import("quic/metrics.zig");
 pub const fuzz_targets = @import("quic/fuzz_targets.zig");
 pub const migration = @import("quic/migration.zig");
 pub const connectivity = struct {
+    pub const ephemeral_identity = @import("connectivity/ephemeral_identity.zig");
     pub const path_selector = @import("connectivity/path_selector.zig");
     pub const stun = @import("connectivity/stun.zig");
     pub const stun_transaction = @import("connectivity/stun_transaction.zig");
@@ -62,6 +63,7 @@ pub const zero_rtt = @import("quic/zero_rtt.zig");
 pub const stress_test = @import("quic/stress_test.zig");
 pub const tls13_backend = @import("quic/tls13_backend.zig");
 comptime {
+    _ = connectivity.ephemeral_identity;
     // Keep tls13 reachable so its tests run under `zig build test`.
     _ = tls13;
     _ = pq_kex;

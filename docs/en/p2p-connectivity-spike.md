@@ -41,6 +41,11 @@ outside quicz.
   exponential retry schedule capped at five probes.
 - `connectivity.punch_driver` drives that state machine against one remote
   endpoint without taking socket ownership.
+- `connectivity.ephemeral_identity` creates a 15-minute self-signed Ed25519
+  identity entirely in memory, without an external certificate tool, and
+  clears its private seed on release. `runtime.Server` accepts an explicit
+  private-key algorithm, and the P2P loopback verifies the exact DER trust
+  anchor for this short-lived identity.
 - `connectivity.candidate` validates bounded host/reflexive/relay candidate
   sets, rejects wildcard and multicast endpoints, creates only same-family
   pairs, applies the RFC 8445 pair-priority formula, and caps pair growth.
@@ -50,9 +55,10 @@ outside quicz.
   stream echo use the same client UDP port.
 - The P2P loopback proves both peers send authenticated probes before receive,
   validate acknowledgements, transfer those sockets into the QUIC client and
-  server, verify the server certificate, and exchange a stream without port
-  changes. One macOS loopback sample measured 229 microseconds for the
-  bidirectional probe and 29.686 milliseconds for QUIC handshake plus echo;
+  server, verify the freshly generated short-lived server certificate exactly,
+  and exchange a stream without port changes. One macOS loopback sample
+  measured 229 microseconds for the bidirectional probe and 29.686 milliseconds
+  for QUIC handshake plus echo;
   these are regression evidence, not real-network performance claims.
 - A Swift benchmark running in iOS Simulator used the XCFramework C ABI to
   connect to a real Host listener, verify its certificate, and complete 100

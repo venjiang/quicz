@@ -27,10 +27,11 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 - `connectivity.punch_wire`使用短期rendezvous key认证幂等probe/ack，篡改packet在路径路由前被拒绝。
 - `connectivity.punch_attempt`要求双向认证流量，拒绝旧attempt和错误nonce，并使用最多五次probe的指数退避。
 - `connectivity.punch_driver`在不接管socket所有权的前提下驱动单个remote endpoint打洞状态机。
+- `connectivity.ephemeral_identity`在内存中生成15分钟Ed25519自签名身份；不依赖外部证书工具，释放时清除私钥seed。`runtime.Server`支持显式私钥算法，P2P loopback通过精确DER trust anchor验证该短期身份。
 - `connectivity.candidate`校验有界host/reflexive/relay候选集合，拒绝wildcard和multicast，只生成同地址族pair，使用RFC 8445 pair priority公式并限制pair膨胀。
 - `runtime.Client.initWithSocket`接管调用方已绑定的IPv4 UDP socket，保留发现阶段建立的NAT mapping。
 - shared-socket loopback证明STUN发现和QUIC stream echo使用同一个客户端UDP端口。
-- P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，验证server证书并在端口不变的情况下完成stream收发。一次macOS loopback样本为双向probe 229微秒、QUIC handshake加echo 29.686毫秒；这只作为回归证据，不代表真实网络性能。
+- P2P loopback证明双方先发送认证probe再接收，校验ack后把原socket移交QUIC client/server，精确验证每次运行生成的短期server证书，并在端口不变的情况下完成stream收发。一次macOS loopback样本为双向probe 229微秒、QUIC handshake加echo 29.686毫秒；这只作为回归证据，不代表真实网络性能。
 - iOS Simulator中的Swift基准已通过XCFramework C ABI连接真实Host listener，完成证书校验和单条双向stream上的100轮8字节串行回显；一次Debug样本为handshake 53.524毫秒、RTT p50/p95/p99分别为9.863/18.339/23.116毫秒。
 - 实体iPhone 14 Pro中的Swift基准已通过同一XCFramework C ABI：先在双方同一UDP socket上完成认证双向probe，再把socket直接用于verified QUIC，完成100轮8字节串行回显、关闭和Host连接状态回收。一次Debug Wi-Fi样本为probe 6.882毫秒、handshake 21.458毫秒、RTT p50/p95/p99分别为13.030/17.551/22.583毫秒。
 

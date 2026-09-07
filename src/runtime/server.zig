@@ -212,6 +212,7 @@ pub const Server = struct {
     alpn: []const []const u8,
     cert_der: []const u8,
     private_key: []const u8,
+    private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
     prefer_chacha20: bool = false,
 
     mutex: std.atomic.Mutex = .unlocked,
@@ -242,6 +243,7 @@ pub const Server = struct {
         alpn: []const []const u8,
         cert_der: []const u8,
         private_key: []const u8,
+        private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm = .ecdsa_p256_sha256,
         prefer_chacha20: bool = false,
         /// IPv4 address to bind. Defaults to loopback (127.0.0.1); set to
         /// `.{0,0,0,0}` to listen on all interfaces (cross-host benchmarks).
@@ -287,6 +289,7 @@ pub const Server = struct {
             .alpn = config.alpn,
             .cert_der = config.cert_der,
             .private_key = config.private_key,
+            .private_key_algorithm = config.private_key_algorithm,
             .prefer_chacha20 = config.prefer_chacha20,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
@@ -679,7 +682,7 @@ pub const Server = struct {
                         .alpn = self.alpn,
                         .cert_chain_der = &cert_chain,
                         .private_key_bytes = self.private_key,
-                        .private_key_algorithm = .ecdsa_p256_sha256,
+                        .private_key_algorithm = self.private_key_algorithm,
                         .prefer_chacha20 = self.prefer_chacha20,
                     }) catch |e| {
                         log.err("drive: Tls13ServerTransport.init: {}", .{e});
