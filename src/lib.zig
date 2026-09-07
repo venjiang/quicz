@@ -47,6 +47,11 @@ pub const connection_pool = @import("quic/connection_pool.zig");
 pub const metrics = @import("quic/metrics.zig");
 pub const fuzz_targets = @import("quic/fuzz_targets.zig");
 pub const migration = @import("quic/migration.zig");
+pub const mobile_abi = @import("mobile_abi.zig");
+pub const connectivity = struct {
+    pub const path_selector = @import("connectivity/path_selector.zig");
+    pub const stun = @import("connectivity/stun.zig");
+};
 const integration_tests = @import("quic/integration_tests.zig");
 pub const udp_event_loop = @import("quic/udp_event_loop.zig");
 pub const zero_rtt = @import("quic/zero_rtt.zig");
@@ -85,6 +90,9 @@ comptime {
     _ = metrics;
     _ = fuzz_targets;
     _ = migration;
+    _ = mobile_abi;
+    _ = connectivity.path_selector;
+    _ = connectivity.stun;
     _ = integration_tests;
     _ = udp_event_loop;
     _ = zero_rtt;

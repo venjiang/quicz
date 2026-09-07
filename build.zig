@@ -52,6 +52,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    const mobile_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/mobile_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mobile_abi_lib = b.addLibrary(.{
+        .name = "quicz_mobile",
+        .root_module = mobile_abi_mod,
+    });
+    const install_mobile_abi = b.addInstallArtifact(mobile_abi_lib, .{});
+    const install_mobile_header = b.addInstallFileWithDir(
+        b.path("include/quicz_mobile.h"),
+        .header,
+        "quicz_mobile.h",
+    );
+    const mobile_abi_step = b.step("mobile-static", "Build the mobile C ABI static library and header");
+    mobile_abi_step.dependOn(&install_mobile_abi.step);
+    mobile_abi_step.dependOn(&install_mobile_header.step);
+
     // Echo server executable
     const exe_server = b.addExecutable(.{
         .name = "quicz-echo-server",
