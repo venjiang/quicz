@@ -22,10 +22,11 @@ outside quicz.
 
 - `mobile-static` builds an arm64 iOS static library and installs
   `quicz_mobile.h`.
-- ABI v1 exposes version/capability negotiation and blocking verified TLS
-  client lifecycle: create, connect, discover, open stream, send, receive,
-  close, and destroy. Swift callers must run blocking operations off the main
-  thread.
+- ABI v1 exposes version/capability negotiation and a blocking verified TLS
+  client lifecycle: create, bounded connect, discover, open stream, send,
+  receive, close, and destroy. Swift callers must run blocking operations off
+  the main thread. P2P candidates must use `connect_timeout` so a silent UDP
+  path cannot retain a route-race task forever.
 - Swift can import the C header when compiling for iPhoneOS.
 - `connectivity.path_selector` selects the first validated path, migrates to a
   meaningfully faster path, falls back when the active path fails, and applies

@@ -36,6 +36,7 @@ pub const Result = enum(i32) {
     stream_failed = 5,
     discovery_failed = 6,
     punch_failed = 7,
+    connection_timed_out = 8,
 };
 
 pub const Ipv4Endpoint = extern struct {
@@ -220,6 +221,44 @@ pub export fn quicz_mobile_client_connect(handle: ?*anyopaque) callconv(.c) i32 
     const client = clientFromHandle(handle) orelse return code(.invalid_argument);
     client.client.connect() catch return code(.connection_failed);
     return code(.ok);
+}
+
+const ConnectOutcome = union(enum) {
+    connection: anyerror!void,
+    deadline: std.Io.Cancelable!void,
+};
+
+fn connectClient(client: *MobileClient) anyerror!void {
+    return client.client.connect();
+}
+
+fn waitConnectTimeout(io: std.Io, timeout_ms: u32) std.Io.Cancelable!void {
+    return std.Io.Timeout.sleep(.{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(timeout_ms),
+    } }, io);
+}
+
+pub export fn quicz_mobile_client_connect_timeout(
+    handle: ?*anyopaque,
+    timeout_ms: u32,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    if (timeout_ms == 0) return code(.invalid_argument);
+    const io = client.threaded.io();
+    const Selection = std.Io.Select(ConnectOutcome);
+    var selected_buffer: [2]ConnectOutcome = undefined;
+    var selection: Selection = .init(io, &selected_buffer);
+    defer selection.cancelDiscard();
+    selection.concurrent(.connection, connectClient, .{client}) catch
+        return code(.connection_failed);
+    selection.concurrent(.deadline, waitConnectTimeout, .{ io, timeout_ms }) catch
+        return code(.connection_failed);
+    const outcome = selection.await() catch return code(.connection_failed);
+    return switch (outcome) {
+        .connection => |result| if (result) code(.ok) else |_| code(.connection_failed),
+        .deadline => |deadline| if (deadline) code(.connection_timed_out) else |_| code(.connection_failed),
+    };
 }
 
 pub export fn quicz_mobile_client_bound_ipv4(
@@ -417,4 +456,31 @@ test "mobile client creation is safe on a 512 KiB caller stack" {
     );
     thread.join();
     try std.testing.expectEqual(code(.ok), context.result);
+}
+
+test "mobile client connect timeout bounds a silent UDP peer" {
+    var silent_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const silent_socket = try silent_address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer silent_socket.close(std.testing.io);
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-timeout-test";
+    var config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = silent_socket.address.ip4.port,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var client: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
+    defer quicz_mobile_client_destroy(client);
+    try std.testing.expectEqual(
+        code(.connection_timed_out),
+        quicz_mobile_client_connect_timeout(client, 10),
+    );
 }

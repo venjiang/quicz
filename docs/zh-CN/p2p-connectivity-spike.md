@@ -19,7 +19,7 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 ## 第一检查点已实现
 
 - `mobile-static`生成arm64 iOS静态库并安装`quicz_mobile.h`。
-- ABI v1提供版本/能力协商，以及阻塞式verified TLS Client生命周期：create、connect、discover、open stream、send、receive、close和destroy。Swift必须在主线程之外执行阻塞调用。
+- ABI v1提供版本/能力协商，以及阻塞式verified TLS Client生命周期：create、有界connect、discover、open stream、send、receive、close和destroy。Swift必须在主线程之外执行阻塞调用；P2P候选必须使用`connect_timeout`，不得让无回包UDP路径永久占用竞速任务。
 - Swift针对iPhoneOS编译时可以导入C header。
 - `connectivity.path_selector`选择首条已验证路径，在更快路径出现时迁移，活动路径失败时降级，并使用RTT迟滞避免抖动切换。
 - `connectivity.stun`编码RFC 8489 Binding request，解析transaction匹配的IPv4/IPv6 XOR-MAPPED-ADDRESS success response。

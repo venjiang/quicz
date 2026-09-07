@@ -29,6 +29,7 @@ enum quicz_mobile_result {
     QUICZ_MOBILE_STREAM_FAILED = 5,
     QUICZ_MOBILE_DISCOVERY_FAILED = 6,
     QUICZ_MOBILE_PUNCH_FAILED = 7,
+    QUICZ_MOBILE_CONNECTION_TIMED_OUT = 8,
 };
 
 typedef struct quicz_mobile_client quicz_mobile_client;
@@ -78,6 +79,10 @@ int32_t quicz_mobile_client_create(
     quicz_mobile_client **client_out
 );
 int32_t quicz_mobile_client_connect(quicz_mobile_client *client);
+int32_t quicz_mobile_client_connect_timeout(
+    quicz_mobile_client *client,
+    uint32_t timeout_ms
+);
 int32_t quicz_mobile_client_bound_ipv4(
     quicz_mobile_client *client,
     quicz_mobile_ipv4_endpoint *endpoint_out

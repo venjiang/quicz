@@ -112,7 +112,7 @@ pub fn main() !void {
     host_socket_transferred = true;
     defer server.deinit();
     try server.serve(&echoHandler);
-    if (mobile.quicz_mobile_client_connect(handle) != 0) return error.ConnectFailed;
+    if (mobile.quicz_mobile_client_connect_timeout(handle, 5_000) != 0) return error.ConnectFailed;
 
     var stream_id: u64 = 0;
     if (mobile.quicz_mobile_client_open_bidi(handle, &stream_id) != 0) return error.OpenStreamFailed;
