@@ -59,10 +59,11 @@ outside quicz.
   serial 8-byte echoes on one bidirectional stream. One Debug sample measured
   53.524 ms for the handshake and 9.863/18.339/23.116 ms for p50/p95/p99 RTT.
 - A Swift benchmark on a physical iPhone 14 Pro used the same XCFramework C
-  ABI to connect to the Host listener, verify its certificate, complete 100
+  ABI to complete authenticated bidirectional probes on both peers' UDP
+  sockets, transfer those sockets directly into verified QUIC, complete 100
   serial 8-byte echoes, close, and release the Host connection state. One
-  Debug Wi-Fi sample measured 3030.383 ms for the handshake and
-  11.810/15.769/19.374 ms for p50/p95/p99 RTT.
+  Debug Wi-Fi sample measured 6.882 ms for the probe, 21.458 ms for the
+  handshake, and 13.030/17.551/22.583 ms for p50/p95/p99 RTT.
 
 The original iPhoneOS Debug binary copied the roughly 190 KiB `Client` value
 through a roughly 512 KiB Swift concurrency worker stack during
@@ -90,6 +91,14 @@ scripts/build_mobile_xcframework.sh zig-out/QuiczMobile.xcframework
 The generated XCFramework contains separate `ios-arm64` and
 `ios-arm64-simulator` slices with the same public header.
 
+For the physical-device benchmark, the Host waits for a probe authenticated by
+the short-lived key and attempt ID, learns the Device endpoint only from that
+valid packet, sends the reverse probe, and starts QUIC on the same socket:
+
+```bash
+zig build run-mobile-latency-server -- 4433 passive-punch
+```
+
 The bound-endpoint ABI can return `0.0.0.0` for a wildcard socket. Platform
 candidate gathering must combine the bound port with reachable interface
 addresses; it must never advertise the wildcard address to a peer.
@@ -99,7 +108,6 @@ addresses; it must never advertise the wildcard address to a peer.
 - Real STUN service and cellular-network validation.
 - Relay-mediated candidate exchange and real-NAT hole-punch validation.
 - Rendezvous and relay datagram protocols.
-- An iOS API for transferring a discovery-owned socket into QUIC.
 - Physical-iPhone lifecycle and real cellular-network validation.
 - Seamless migration of an established application stream between relay and
   direct paths.
@@ -112,8 +120,9 @@ The capability mask must not advertise these unfinished features.
 2. Compile and import the arm64 iOS static library from Swift.
 3. Add an owned UDP socket that can run STUN and then drive QUIC on the same
    local port. Completed in the loopback spike.
-4. Prove authenticated stream echo across iPhone and Host.
-5. Add bounded direct probing with immediate relay fallback.
+4. Prove authenticated stream echo across iPhone and Host. Completed.
+5. Add bounded direct probing with immediate relay fallback. Same-socket direct
+   probing is complete; parallel Relay fallback remains open.
 6. Compare connection success and latency against the Mons WSS Relay baseline
    under the same LAN, Wi-Fi, cellular, CGNAT, UDP-blocked, and network-change
    matrix.
