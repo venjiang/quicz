@@ -951,6 +951,10 @@ pub const Client = struct {
     /// it returns, deliver stream data, and drain the responses (ACKs).
     fn processDatagram(self: *Client, data: []const u8) void {
         const result = self.client.receiveWithRoutePath(self.nowNanos(), &self.scratch, data) catch |err| {
+            if (err == error.ConnectionClosed and self.close_initiated) {
+                self.checkConnectionClose();
+                return;
+            }
             log.err("client: receive ({d} bytes): {}", .{ data.len, err });
             if (data.len > 0) {
                 const head = data[0..@min(data.len, 48)];
