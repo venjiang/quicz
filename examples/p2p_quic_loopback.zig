@@ -21,6 +21,7 @@ fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
         const received = stream.receive(&buffer) catch return;
         if (received == 0) {
             stream.send(&.{}, true) catch {};
+            stream.flush() catch {};
             return;
         }
         stream.send(buffer[0..received], false) catch return;

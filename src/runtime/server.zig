@@ -194,6 +194,7 @@ const ConnState = struct {
     /// Set while this connection has queued send data the drive task has
     /// not flushed yet; used to coalesce drive wakeups in sendStreamData.
     send_pending: bool = false,
+    send_flush_id: std.atomic.Value(u32) = .init(0),
 
     fn deinit(self: *ConnState, alloc: std.mem.Allocator) void {
         for (self.recv_streams.items) |*s| s.queue.deinit(alloc);
@@ -556,7 +557,11 @@ pub const Server = struct {
                 st.uni_open_requested = false;
                 st.uni_open_sem.post(self.io);
             }
-            if (!flow_blocked) st.send_pending = false;
+            if (!flow_blocked and st.send_pending) {
+                st.send_pending = false;
+                _ = st.send_flush_id.rmw(.Add, 1, .release);
+                self.io.futexWake(u32, &st.send_flush_id.raw, 1);
+            }
             st.mutex.unlock();
         }
         for (closed_handles[0..closed_count]) |h| {
@@ -1239,6 +1244,25 @@ pub const Server = struct {
         if (notify) self.notifyDrive(self.io);
     }
 
+    /// Wait until the drive task has consumed all currently queued stream
+    /// bytes and FIN markers for this connection.
+    pub fn flushStreamData(self: *Server, conn_id: u64) !void {
+        while (true) {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            const cs = self.conns.get(conn_id) orelse {
+                self.mutex.unlock();
+                return error.NoConnection;
+            };
+            const snapshot = cs.send_flush_id.load(.acquire);
+            while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+            const pending = cs.send_pending;
+            cs.mutex.unlock();
+            self.mutex.unlock();
+            if (!pending) return;
+            self.io.futexWait(u32, &cs.send_flush_id.raw, snapshot) catch return error.Canceled;
+        }
+    }
+
     /// Queue a STOP_SENDING (RFC 9000 §3.5) for one stream; the drive task
     /// sends it to the peer. Blocks the handler until the drive task drains it.
     pub fn stopSendingRequest(self: *Server, conn_id: u64, stream_id: u64, code: u64) !void {
@@ -1322,6 +1346,9 @@ pub const Stream = struct {
     }
     pub fn send(self: *Stream, data: []const u8, fin: bool) !void {
         return self.server.sendStreamData(self.conn_id, self.id, data, fin);
+    }
+    pub fn flush(self: *Stream) !void {
+        return self.server.flushStreamData(self.conn_id);
     }
     /// Ask the peer to STOP_SENDING this stream with `code` (RFC 9000 §3.5).
     pub fn stopSending(self: *Stream, code: u64) !void {
