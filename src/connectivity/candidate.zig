@@ -41,7 +41,9 @@ pub const Candidate = struct {
     priority: u32,
 
     pub fn init(id: u64, source: Source, endpoint: Endpoint, priority: u32) !Candidate {
-        if (id == 0 or priority == 0 or !isPublishable(endpoint)) return error.InvalidCandidate;
+        // RFC 8445 candidate priorities must fit in 31 bits; pair arithmetic
+        // relies on this bound to remain representable in u64.
+        if (id == 0 or priority == 0 or priority > 0x7fffffff or !isPublishable(endpoint)) return error.InvalidCandidate;
         return .{ .id = id, .source = source, .endpoint = endpoint, .priority = priority };
     }
 };
@@ -237,4 +239,18 @@ test "pair state transitions are explicit" {
     const pair = scheduler.next().?;
     try scheduler.recordFailed(pair.id);
     try std.testing.expect(scheduler.next() == null);
+}
+
+test "candidate priority range protects pair arithmetic" {
+    const endpoint = Endpoint{ .ipv4 = .{ .address = .{ 192, 0, 2, 1 }, .port = 443 } };
+    for ([_]u32{ 0, 0x80000000, 0xffffffff }) |priority| {
+        try std.testing.expectError(error.InvalidCandidate, Candidate.init(1, .host, endpoint, priority));
+    }
+    var local = CandidateSet{};
+    var remote = CandidateSet{};
+    try local.add(try Candidate.init(1, .host, endpoint, 0x7fffffff));
+    try remote.add(try Candidate.init(2, .host, endpoint, 0x7fffffff));
+    const scheduler = try PairScheduler.prepare(&local, &remote, true, 1);
+    try std.testing.expectEqual(@as(u64, 0x7ffffffffffffffe), scheduler.pairs[0].priority);
+    _ = try Candidate.init(3, .host, endpoint, 1);
 }

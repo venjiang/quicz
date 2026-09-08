@@ -73,6 +73,8 @@ pub const PunchAttempt = struct {
         var result = ReceiveResult{};
         switch (message.kind) {
             .probe => {
+                // A reflected local probe proves no participation by the peer.
+                if (std.mem.eql(u8, &message.nonce, &self.local_nonce)) return error.NonceMismatch;
                 self.peer_probe_received = true;
                 result.acknowledgement = try wire.acknowledgement(self.key, message);
             },
@@ -172,4 +174,13 @@ test "probe retransmission remains idempotent" {
     const first_ack = (try host.receive(&first)).acknowledgement.?;
     const second_ack = (try host.receive(&second)).acknowledgement.?;
     try std.testing.expectEqualSlices(u8, &first_ack, &second_ack);
+}
+
+test "reflected local probe cannot authenticate a peer" {
+    var attempt = try PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{});
+    const probe = attempt.nextProbe(0).?;
+    try std.testing.expectError(error.NonceMismatch, attempt.receive(&probe));
+    try std.testing.expect(!attempt.peer_probe_received);
+    try std.testing.expect(!attempt.local_probe_acknowledged);
+    try std.testing.expectEqual(State.probing, attempt.state);
 }

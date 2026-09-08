@@ -27,7 +27,8 @@ pub fn discover(
     var attempt: u8 = 0;
     while (attempt < config.max_attempts) : (attempt += 1) {
         try socket.send(io, &stun_server, &request);
-        var ignored: u8 = 0;
+        // The terminal value is 256 when the configured budget is 255.
+        var ignored: u16 = 0;
         while (ignored <= config.max_ignored_datagrams_per_attempt) : (ignored += 1) {
             const received = socket.receiveTimeout(io, &receive_buffer, .{ .duration = .{
                 .clock = .awake,
@@ -65,4 +66,23 @@ test "rejects unbounded transaction configuration" {
         error.InvalidTransactionConfig,
         discover(io, &socket, bind_address, .{ .max_attempts = 6 }),
     );
+}
+
+test "maximum ignored datagram budget terminates without overflow" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var client = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer client.close(io);
+    const server = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer server.close(io);
+    const receive_size: u32 = 1024 * 1024;
+    try std.posix.setsockopt(client.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&receive_size));
+    for (0..256) |_| try server.send(io, &client.address, "invalid");
+    try std.testing.expectError(error.StunUnavailable, discover(io, &client, server.address, .{
+        .timeout_ms = 100,
+        .max_attempts = 1,
+        .max_ignored_datagrams_per_attempt = 255,
+    }));
 }
