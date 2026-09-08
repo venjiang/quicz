@@ -323,12 +323,24 @@ pub export fn quicz_mobile_client_punch_ipv4(
         .bytes = valid_config.remote.address,
         .port = valid_config.remote.port,
     } };
-    quicz.connectivity.punch_driver.run(
+    quicz.connectivity.punch_driver.runUntilValidated(
         client.client.io,
         client.client.socket,
         remote,
         &attempt,
     ) catch return code(.punch_failed);
+    const responder_lifetime_ms = std.math.mul(u32, valid_config.maximum_retry_ms, 2) catch
+        return code(.invalid_argument);
+    var responder = quicz.connectivity.punch_responder.PunchResponder.init(
+        valid_config.key,
+        valid_config.attempt_id,
+        valid_config.nonce,
+        remote,
+        @intCast(std.Io.Timestamp.now(client.client.io, .awake).nanoseconds),
+        responder_lifetime_ms,
+    ) catch return code(.punch_failed);
+    defer responder.deinit();
+    client.client.retainPunchResponder(responder) catch return code(.punch_failed);
     return code(.ok);
 }
 

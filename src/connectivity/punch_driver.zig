@@ -13,6 +13,27 @@ pub fn run(
     remote: std.Io.net.IpAddress,
     attempt: *punch_attempt.PunchAttempt,
 ) !void {
+    return runInternal(io, socket, remote, attempt, true);
+}
+
+/// Return immediately after local validation. The caller must transfer a
+/// `PunchResponder` into the QUIC runtime that takes ownership of this socket.
+pub fn runUntilValidated(
+    io: std.Io,
+    socket: std.Io.net.Socket,
+    remote: std.Io.net.IpAddress,
+    attempt: *punch_attempt.PunchAttempt,
+) !void {
+    return runInternal(io, socket, remote, attempt, false);
+}
+
+fn runInternal(
+    io: std.Io,
+    socket: std.Io.net.Socket,
+    remote: std.Io.net.IpAddress,
+    attempt: *punch_attempt.PunchAttempt,
+    service_after_validation: bool,
+) !void {
     const started = std.Io.Timestamp.now(io, .awake);
     var receive_buffer: [256]u8 = undefined;
     var destination = remote;
@@ -21,6 +42,7 @@ pub fn run(
     while (attempt.state != .failed) {
         const now_ms = elapsedMilliseconds(started, std.Io.Timestamp.now(io, .awake));
         if (attempt.state == .validated) {
+            if (!service_after_validation) break;
             // Our ACK may have been lost even though our own probe succeeded.
             // Keep answering retries without reopening the validated state.
             if (finishing_deadline_ms == null) {
@@ -94,6 +116,38 @@ const TestRun = struct {
         self.finished.store(true, .release);
     }
 };
+
+fn runFast(context: *TestRun) std.Io.Cancelable!void {
+    runUntilValidated(context.io, context.socket, context.remote, context.attempt) catch |err| {
+        context.failure = err;
+    };
+    context.finished.store(true, .release);
+}
+
+test "runtime handoff returns promptly after mutual validation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const first_socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer first_socket.close(io);
+    const second_socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer second_socket.close(io);
+    var first_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{});
+    var second_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xb2} ** 16, .{});
+    var first = TestRun{ .io = io, .socket = first_socket, .remote = second_socket.address, .attempt = &first_attempt };
+    var second = TestRun{ .io = io, .socket = second_socket, .remote = first_socket.address, .attempt = &second_attempt };
+    const started = std.Io.Timestamp.now(io, .awake);
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+    try tasks.concurrent(io, runFast, .{&first});
+    try tasks.concurrent(io, runFast, .{&second});
+    try tasks.await(io);
+
+    try std.testing.expectEqual(@as(?anyerror, null), first.failure);
+    try std.testing.expectEqual(@as(?anyerror, null), second.failure);
+    try std.testing.expect(elapsedMilliseconds(started, std.Io.Timestamp.now(io, .awake)) < 500);
+}
 
 test "validated driver acknowledges a retransmit after its first ACK is lost" {
     const wire = @import("punch_wire.zig");

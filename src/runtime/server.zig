@@ -15,6 +15,56 @@ const runtime_h3 = @import("h3_server.zig");
 
 const log = std.log.scoped(.quicz_runtime);
 
+test "server runtime answers an authenticated probe after socket handoff" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
+    const responder = try quicz.connectivity.punch_responder.PunchResponder.init(
+        key,
+        attempt_id,
+        .{0xb2} ** 16,
+        peer.address,
+        @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
+        500,
+    );
+    var server = try Server.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+        .punch_responder = responder,
+    });
+    defer server.deinit();
+    const probe = quicz.connectivity.punch_wire.encode(key, .{
+        .kind = .probe,
+        .attempt_id = attempt_id,
+        .nonce = .{0xa1} ** 16,
+    });
+    const delayed_ack = quicz.connectivity.punch_wire.encode(key, .{
+        .kind = .acknowledgement,
+        .attempt_id = attempt_id,
+        .nonce = .{0xb2} ** 16,
+    });
+    try server.start();
+    try peer.send(io, &server.socket.address, &delayed_ack);
+    try peer.send(io, &server.socket.address, &probe);
+    var buffer: [128]u8 = undefined;
+    const received = try peer.receiveTimeout(io, &buffer, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(500),
+    } });
+    try std.testing.expectEqual(
+        quicz.connectivity.punch_wire.Kind.acknowledgement,
+        (try quicz.connectivity.punch_wire.decode(key, received.data)).kind,
+    );
+}
+
 const Connection = quicz.Connection;
 const Tls13ServerTransport = quicz.Tls13ServerTransport;
 const endpoint = quicz.endpoint;
@@ -305,6 +355,7 @@ pub const Server = struct {
     private_key: []const u8,
     private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
     prefer_chacha20: bool = false,
+    punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
 
     mutex: std.atomic.Mutex = .unlocked,
     conns: std.AutoHashMap(u64, *ConnState),
@@ -343,6 +394,9 @@ pub const Server = struct {
         /// endpoint pre-allocates routing and scratch state for this many
         /// connections, so set it to your expected peak + headroom.
         max_connections: usize = 4096,
+        /// Optional authenticated probe handler retained after this runtime
+        /// takes ownership of a connectivity-validated UDP socket.
+        punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Server {
@@ -387,6 +441,7 @@ pub const Server = struct {
             .private_key = config.private_key,
             .private_key_algorithm = config.private_key_algorithm,
             .prefer_chacha20 = config.prefer_chacha20,
+            .punch_responder = config.punch_responder,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
             .datagram_pool = DatagramPool.init(allocator),
@@ -560,6 +615,8 @@ pub const Server = struct {
         }
         self.datagram_queue.deinit(self.allocator);
         self.datagram_pool.deinit(self.allocator);
+        if (self.punch_responder) |*responder| responder.deinit();
+        self.punch_responder = null;
         self.server_ep.deinit();
         self.socket.close(self.io);
     }
@@ -742,6 +799,17 @@ pub const Server = struct {
     /// Route one datagram through the endpoint (accept or routed step) and
     /// deliver stream data to per-connection queues.
     fn processDatagram(self: *Server, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
+        if (self.punch_responder) |responder| {
+            switch (responder.handle(from, self.nowNanos(), data)) {
+                .not_punch => {},
+                .consumed => return,
+                .acknowledgement => |acknowledgement| {
+                    var destination = from;
+                    self.socket.send(io, &destination, &acknowledgement) catch {};
+                    return;
+                },
+            }
+        }
         const from_addr = endpoint.Udp4Address.init(from.ip4.bytes, from.ip4.port);
         const local_addr = endpoint.Udp4Address.init(self.socket.address.ip4.bytes, self.socket.address.ip4.port);
         const path = endpoint.Udp4Tuple{ .local = local_addr, .remote = from_addr };

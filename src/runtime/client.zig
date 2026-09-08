@@ -17,6 +17,53 @@ const quic_packet = quicz.packet;
 
 const log = std.log.scoped(.quicz_runtime);
 
+test "client runtime answers an authenticated probe after socket handoff" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    var client = try Client.init(std.testing.allocator, io, .{
+        .server_port = peer.address.ip4.port,
+        .alpn = &.{},
+        .insecure_skip_verify = true,
+    });
+    defer client.deinit();
+    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
+    try client.retainPunchResponder(try .init(
+        key,
+        attempt_id,
+        .{0xa1} ** 16,
+        peer.address,
+        @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
+        500,
+    ));
+    const probe = quicz.connectivity.punch_wire.encode(key, .{
+        .kind = .probe,
+        .attempt_id = attempt_id,
+        .nonce = .{0xb2} ** 16,
+    });
+    const delayed_ack = quicz.connectivity.punch_wire.encode(key, .{
+        .kind = .acknowledgement,
+        .attempt_id = attempt_id,
+        .nonce = .{0xa1} ** 16,
+    });
+    try client.startTasks();
+    try peer.send(io, &client.socket.address, &delayed_ack);
+    try peer.send(io, &client.socket.address, &probe);
+    var buffer: [128]u8 = undefined;
+    const received = try peer.receiveTimeout(io, &buffer, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(500),
+    } });
+    try std.testing.expectEqual(
+        quicz.connectivity.punch_wire.Kind.acknowledgement,
+        (try quicz.connectivity.punch_wire.decode(key, received.data)).kind,
+    );
+}
+
 /// Receive-buffer / datagram-pool size (UDP payload allowance).
 const max_datagram_size: usize = 8192;
 /// Outbound QUIC packet size cap (standard MTU). Sending jumbo datagrams
@@ -80,6 +127,7 @@ const DatagramPool = struct {
 
 /// Datagram received by the recv task, waiting for the drive task.
 const QueuedDatagram = struct {
+    from: std.Io.net.IpAddress,
     /// Owned copy; the drive task frees it after processing.
     data: []u8,
     /// True when `data` is a pooled buffer (returned to the pool, not freed).
@@ -133,6 +181,7 @@ pub const Client = struct {
     socket: std.Io.net.Socket,
     client: Tls13ClientEndpoint,
     server_address: std.Io.net.IpAddress,
+    punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
     scratch: [8192]u8 = undefined,
 
     drive_group: std.Io.Group = .init,
@@ -296,6 +345,17 @@ pub const Client = struct {
         };
     }
 
+    /// Retain authenticated probe handling in the QUIC receive loop after
+    /// connectivity validation hands this socket to the runtime.
+    pub fn retainPunchResponder(
+        self: *Client,
+        responder: quicz.connectivity.punch_responder.PunchResponder,
+    ) !void {
+        if (self.started) return error.ClientAlreadyStarted;
+        if (self.punch_responder) |*existing| existing.deinit();
+        self.punch_responder = responder;
+    }
+
     /// Run STUN before the QUIC tasks start, reusing the exact UDP socket and
     /// local port that will carry the later connection.
     pub fn discoverReflexiveAddress(
@@ -328,6 +388,8 @@ pub const Client = struct {
         for (self.recv_streams.items) |*s| s.queue.deinit(self.allocator);
         self.recv_streams.deinit(self.allocator);
         self.open_streams.deinit(self.allocator);
+        if (self.punch_responder) |*responder| responder.deinit();
+        self.punch_responder = null;
         self.client.deinit();
         self.socket.close(self.io);
     }
@@ -661,7 +723,11 @@ pub const Client = struct {
                 break :blk pb[0..received.data.len];
             } else allocator.dupe(u8, received.data) catch continue;
             while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
-            self.datagram_queue.append(allocator, .{ .data = copy, .pooled = pooled_buf != null }) catch {
+            self.datagram_queue.append(allocator, .{
+                .from = received.from,
+                .data = copy,
+                .pooled = pooled_buf != null,
+            }) catch {
                 self.queue_mutex.unlock();
                 if (pooled_buf != null) self.datagram_pool.release(copy) else allocator.free(copy);
                 continue;
@@ -942,14 +1008,25 @@ pub const Client = struct {
             const qd = self.datagram_queue.items[self.datagram_read_offset];
             self.datagram_read_offset += 1;
             self.queue_mutex.unlock();
-            self.processDatagram(qd.data);
+            self.processDatagram(qd.from, qd.data);
             if (qd.pooled) self.datagram_pool.release(qd.data) else self.allocator.free(qd.data);
         }
     }
 
     /// Route one datagram through the client endpoint, send the TLS outbound
     /// it returns, deliver stream data, and drain the responses (ACKs).
-    fn processDatagram(self: *Client, data: []const u8) void {
+    fn processDatagram(self: *Client, from: std.Io.net.IpAddress, data: []const u8) void {
+        if (self.punch_responder) |responder| {
+            switch (responder.handle(from, self.nowNanos(), data)) {
+                .not_punch => {},
+                .consumed => return,
+                .acknowledgement => |acknowledgement| {
+                    var destination = from;
+                    self.socket.send(self.io, &destination, &acknowledgement) catch {};
+                    return;
+                },
+            }
+        }
         const result = self.client.receiveWithRoutePath(self.nowNanos(), &self.scratch, data) catch |err| {
             if (err == error.ConnectionClosed and self.close_initiated) {
                 self.checkConnectionClose();
