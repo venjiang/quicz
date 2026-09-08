@@ -484,3 +484,60 @@ test "mobile client connect timeout bounds a silent UDP peer" {
         quicz_mobile_client_connect_timeout(client, 10),
     );
 }
+
+fn respondToMobileStun(socket: *std.Io.net.Socket) std.Io.Cancelable!void {
+    const stun = quicz.connectivity.stun;
+    var buffer: [64]u8 = undefined;
+    const request = socket.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(1_000),
+    } }) catch return;
+    const transaction_id = stun.decodeBindingRequest(request.data) catch return;
+    const observed = switch (request.from) {
+        .ip4 => |address| address,
+        .ip6 => return,
+    };
+    const response = stun.encodeBindingSuccessIpv4(transaction_id, observed.bytes, observed.port);
+    var destination = request.from;
+    socket.send(std.testing.io, &destination, &response) catch return;
+}
+
+test "mobile ABI discovers the mapping of its existing UDP socket" {
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-stun-test";
+    var config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = 4433,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var client: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
+    defer quicz_mobile_client_destroy(client);
+    var bound = Ipv4Endpoint{ .address = @splat(0), .port = 0 };
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_bound_ipv4(client, &bound));
+
+    var stun_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var stun_socket = try stun_address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer stun_socket.close(std.testing.io);
+    var responder = try std.testing.io.concurrent(respondToMobileStun, .{&stun_socket});
+    defer responder.cancel(std.testing.io) catch {};
+    const stun_server = Ipv4Endpoint{
+        .address = stun_socket.address.ip4.bytes,
+        .port = stun_socket.address.ip4.port,
+    };
+    var mapped = Ipv4Endpoint{ .address = @splat(0), .port = 0 };
+    try std.testing.expectEqual(
+        code(.ok),
+        quicz_mobile_client_discover_ipv4(client, &stun_server, 1_000, 1, &mapped),
+    );
+    try responder.await(std.testing.io);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, mapped.address);
+    try std.testing.expectEqual(bound.port, mapped.port);
+}
