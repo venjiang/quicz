@@ -166,6 +166,7 @@ pub const EcnValidationState = packet_context.EcnValidationState;
 pub const AckElicitingSendAdmission = connection_rules.AckElicitingSendAdmission;
 
 test {
+    _ = runtime.server;
     _ = protection;
     _ = address_validation_token;
     _ = endpoint;

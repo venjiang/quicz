@@ -206,6 +206,93 @@ const ConnState = struct {
     }
 };
 
+test "connection drain releases every concurrent stream flush" {
+    const FlushWaiters = struct {
+        var waiting: std.atomic.Value(u32) = .init(0);
+        var completed: std.atomic.Value(u32) = .init(0);
+        var underlying_wait: @FieldType(std.Io.VTable, "futexWait") = undefined;
+
+        fn wait(context: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            _ = waiting.fetchAdd(1, .release);
+            return underlying_wait(context, ptr, expected, timeout);
+        }
+
+        fn flush(stream: Stream) std.Io.Cancelable!void {
+            var mutable_stream = stream;
+            mutable_stream.flush() catch return;
+            _ = completed.fetchAdd(1, .release);
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var vtable = io.vtable.*;
+    FlushWaiters.waiting.store(0, .monotonic);
+    FlushWaiters.completed.store(0, .monotonic);
+    FlushWaiters.underlying_wait = vtable.futexWait;
+    vtable.futexWait = FlushWaiters.wait;
+    var server = try Server.init(std.testing.allocator, .{ .userdata = io.userdata, .vtable = &vtable }, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+    });
+    defer server.deinit();
+    const record = try std.testing.allocator.create(ServerRecord);
+    {
+        errdefer std.testing.allocator.destroy(record);
+        record.* = .{ .handle = 1, .transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{}) };
+        errdefer record.deinit();
+        try server.server_ep.records.adopt(1, record);
+    }
+    const connection = try std.testing.allocator.create(ConnState);
+    connection.* = .{ .handle = 1, .conn = record.connectionRef(), .peer = server.socket.address, .send_pending = true };
+    {
+        errdefer std.testing.allocator.destroy(connection);
+        try server.conns.put(1, connection);
+    }
+    const stream_ids = [_]u64{ try connection.conn.openStream(), try connection.conn.openStream() };
+    connection.conn.peer_max_data = 0;
+    for (stream_ids) |stream_id| try server.sendStreamData(1, stream_id, "flush", true);
+
+    var pending: std.Io.Group = .init;
+    defer pending.cancel(io);
+    for (stream_ids) |stream_id| {
+        try pending.concurrent(io, FlushWaiters.flush, .{Stream{ .server = &server, .conn_id = 1, .id = stream_id }});
+    }
+    const started = std.Io.Timestamp.now(io, .awake);
+    while (FlushWaiters.waiting.load(.acquire) < 2 and
+        started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 500)
+    {
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 2), FlushWaiters.waiting.load(.acquire));
+    // Let both registered calls park before emitting the sole drain event.
+    try io.sleep(.fromMilliseconds(20), .awake);
+    server.drainOutgoing(server.io, std.testing.allocator);
+    try std.testing.expect(connection.send_pending);
+    try std.testing.expectEqual(@as(u32, 0), connection.send_flush_id.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), FlushWaiters.completed.load(.acquire));
+    // Restored connection credit lets the next drain consume both queues.
+    connection.conn.peer_max_data = 1024;
+    server.drainOutgoing(server.io, std.testing.allocator);
+    const drained = std.Io.Timestamp.now(io, .awake);
+    while (FlushWaiters.completed.load(.acquire) < 2 and
+        drained.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 300)
+    {
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 2), FlushWaiters.completed.load(.acquire));
+    try pending.await(io);
+    try std.testing.expect(!connection.send_pending);
+    for (connection.send_streams.items) |stream| {
+        try std.testing.expectEqual(@as(usize, 0), stream.queue.items.len);
+        try std.testing.expect(!stream.fin);
+    }
+    try server.flushStreamData(1);
+}
+
 /// Async streaming QUIC server (multi-connection, std.http model).
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -560,7 +647,8 @@ pub const Server = struct {
             if (!flow_blocked and st.send_pending) {
                 st.send_pending = false;
                 _ = st.send_flush_id.rmw(.Add, 1, .release);
-                self.io.futexWake(u32, &st.send_flush_id.raw, 1);
+                // Every stream flush waits on this connection-wide drain.
+                self.io.futexWake(u32, &st.send_flush_id.raw, std.math.maxInt(u32));
             }
             st.mutex.unlock();
         }
