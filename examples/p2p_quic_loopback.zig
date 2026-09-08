@@ -22,6 +22,7 @@ fn echoHandler(connection: ServerConnection) std.Io.Cancelable!void {
         if (received == 0) {
             stream.send(&.{}, true) catch {};
             stream.flush() catch {};
+            mutable_connection.waitClosed() catch {};
             return;
         }
         stream.send(buffer[0..received], false) catch return;
@@ -142,6 +143,7 @@ pub fn main() !void {
             1_000,
         ));
     }
+    client.close();
     if (client.localPort() != app_port or server.localPort() != host_port) return error.PortChanged;
     std.mem.sort(u64, &roundtrip_microseconds, {}, std.sort.asc(u64));
 

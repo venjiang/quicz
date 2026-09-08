@@ -1216,6 +1216,26 @@ pub const Server = struct {
         }
     }
 
+    /// Wait until the peer closes this connection or the transport reaches a
+    /// terminal state. Handlers use this to keep the UDP socket alive after
+    /// their final stream FIN has been flushed.
+    pub fn waitConnectionClosed(self: *Server, conn_id: u64) !void {
+        while (true) {
+            if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            const cs = self.conns.get(conn_id) orelse {
+                self.mutex.unlock();
+                return;
+            };
+            while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+            const closed = @atomicLoad(bool, &cs.closing_or_closed, .acquire);
+            cs.mutex.unlock();
+            self.mutex.unlock();
+            if (closed) return;
+            cs.data_sem.wait(self.io) catch return error.Canceled;
+        }
+    }
+
     /// Queue stream data to send (drive task drains and sends).
     pub fn sendStreamData(self: *Server, conn_id: u64, stream_id: u64, data: []const u8, fin: bool) !void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -1319,6 +1339,10 @@ pub const ServerConnection = struct {
     pub fn openUniStream(self: *ServerConnection) !Stream {
         const sid = try self.server.openUniStreamRequest(self.id);
         return .{ .server = self.server, .conn_id = self.id, .id = sid };
+    }
+
+    pub fn waitClosed(self: *ServerConnection) !void {
+        return self.server.waitConnectionClosed(self.id);
     }
 };
 
