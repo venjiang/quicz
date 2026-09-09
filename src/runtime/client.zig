@@ -181,6 +181,9 @@ pub const Client = struct {
     socket: std.Io.net.Socket,
     client: Tls13ClientEndpoint,
     server_address: std.Io.net.IpAddress,
+    keepalive_interval_nanos: i64,
+    /// Drive-task only. Null until handshake confirmation.
+    next_keepalive_nanos: ?i64 = null,
     punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
     scratch: [8192]u8 = undefined,
 
@@ -272,6 +275,9 @@ pub const Client = struct {
         /// Preserve the existing default for callers that do not need network
         /// migration. Connectivity owners opt in after validating new paths.
         active_migration_disabled: bool = true,
+        /// Send an ack-eliciting PING at this interval after handshake.
+        /// Zero disables keepalive.
+        keepalive_interval_ms: u32 = 0,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Client {
@@ -335,7 +341,15 @@ pub const Client = struct {
             original_dcid,
             client_scid,
         );
-        return .{ .allocator = allocator, .io = io, .socket = socket, .client = client, .server_address = server_address, .datagram_pool = DatagramPool.init(allocator) };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .socket = socket,
+            .client = client,
+            .server_address = server_address,
+            .keepalive_interval_nanos = @as(i64, config.keepalive_interval_ms) * std.time.ns_per_ms,
+            .datagram_pool = DatagramPool.init(allocator),
+        };
     }
 
     pub fn localPort(self: *const Client) u16 {
@@ -480,6 +494,14 @@ pub const Client = struct {
     /// handshake failed" after a failed connect().
     pub fn datagramsReceived(self: *const Client) usize {
         return self.udp_datagrams_received;
+    }
+
+    /// Configure application-space PING keepalive before the runtime starts.
+    /// Zero disables keepalive. The drive task remains the sole endpoint owner.
+    pub fn setKeepaliveInterval(self: *Client, interval_ms: u32) !void {
+        if (self.started) return error.ClientAlreadyStarted;
+        self.keepalive_interval_nanos = @as(i64, interval_ms) * std.time.ns_per_ms;
+        self.next_keepalive_nanos = null;
     }
 
     /// Send `data` on a new bidirectional stream; returns the stream id.
@@ -754,6 +776,7 @@ pub const Client = struct {
             self.processSendOnStreamRequest();
             self.processOpenStreamRequest();
             self.processKeyUpdateRequest();
+            self.serviceKeepalive();
             self.drainOutgoing();
             self.drainQueuedDatagrams();
             self.checkHandshakeProgress();
@@ -764,10 +787,7 @@ pub const Client = struct {
             // after draining, pairing with notifyDrive's bump: a notifier that
             // already ran changed wake_id, so the wait returns immediately.
             const snapshot = self.wake_id.load(.acquire);
-            const timeout: std.Io.Timeout = if (self.client.nextDeadline()) |d|
-                .{ .deadline = .{ .raw = .{ .nanoseconds = d.deadline() }, .clock = .awake } }
-            else
-                .none;
+            const timeout = self.nextDriveTimeout();
             // Re-check stopping after the snapshot: a deinit/stop that ran
             // before the snapshot already bumped wake_id (and its futexWake
             // may have had no waiter yet), and one that runs after the
@@ -811,6 +831,49 @@ pub const Client = struct {
             self.socket.send(self.io, &self.server_address, o.datagram) catch {};
             self.allocator.free(o.datagram);
         }
+    }
+
+    /// Queue one application-space PING when the configured keepalive
+    /// deadline expires. The drive task remains the sole endpoint owner.
+    fn serviceKeepalive(self: *Client) void {
+        if (self.keepalive_interval_nanos == 0 or
+            self.handshake_state.load(.acquire) != handshake_confirmed or
+            self.client.transport.connection.isClosingOrClosed())
+        {
+            self.next_keepalive_nanos = null;
+            return;
+        }
+        const now = self.nowNanos();
+        const deadline = self.next_keepalive_nanos orelse {
+            self.next_keepalive_nanos = keepaliveDeadlineAfter(now, self.keepalive_interval_nanos);
+            return;
+        };
+        if (now < deadline) return;
+        self.client.transport.connection.sendPing() catch {
+            self.next_keepalive_nanos = null;
+            return;
+        };
+        self.next_keepalive_nanos = keepaliveDeadlineAfter(now, self.keepalive_interval_nanos);
+    }
+
+    fn nextDriveTimeout(self: *const Client) std.Io.Timeout {
+        var deadline_nanos: ?i64 = if (self.client.nextDeadline()) |deadline|
+            deadline.deadline()
+        else
+            null;
+        if (self.next_keepalive_nanos) |keepalive_deadline| {
+            if (deadline_nanos == null or keepalive_deadline < deadline_nanos.?) {
+                deadline_nanos = keepalive_deadline;
+            }
+        }
+        return if (deadline_nanos) |deadline|
+            .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } }
+        else
+            .none;
+    }
+
+    fn keepaliveDeadlineAfter(now_nanos: i64, interval_nanos: i64) i64 {
+        return std.math.add(i64, now_nanos, interval_nanos) catch std.math.maxInt(i64);
     }
 
     /// Run the parked send request: open a stream and queue the data.
@@ -1149,6 +1212,9 @@ pub const Client = struct {
         if (!self.handshake_started) return;
         if (self.client.handshakeConfirmed()) {
             self.handshake_state.store(handshake_confirmed, .release);
+            if (self.keepalive_interval_nanos != 0) {
+                self.next_keepalive_nanos = keepaliveDeadlineAfter(self.nowNanos(), self.keepalive_interval_nanos);
+            }
             self.handshake_sem.post(self.io);
             return;
         }

@@ -355,6 +355,7 @@ pub const Server = struct {
     private_key: []const u8,
     private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
     prefer_chacha20: bool = false,
+    max_idle_timeout_ms: u64 = 30_000,
     punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
 
     mutex: std.atomic.Mutex = .unlocked,
@@ -387,6 +388,9 @@ pub const Server = struct {
         private_key: []const u8,
         private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm = .ecdsa_p256_sha256,
         prefer_chacha20: bool = false,
+        /// Maximum connection idle time advertised to peers. Production
+        /// defaults to 30 seconds; focused runtime tests may lower it.
+        max_idle_timeout_ms: u64 = 30_000,
         /// IPv4 address to bind. Defaults to loopback (127.0.0.1); set to
         /// `.{0,0,0,0}` to listen on all interfaces (cross-host benchmarks).
         bind_addr: ?[4]u8 = null,
@@ -441,6 +445,7 @@ pub const Server = struct {
             .private_key = config.private_key,
             .private_key_algorithm = config.private_key_algorithm,
             .prefer_chacha20 = config.prefer_chacha20,
+            .max_idle_timeout_ms = config.max_idle_timeout_ms,
             .punch_responder = config.punch_responder,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
@@ -846,7 +851,7 @@ pub const Server = struct {
                         .initial_max_streams_bidi = 128,
                         .initial_max_streams_uni = 128,
                         .max_datagram_size = send_mtu,
-                        .max_idle_timeout_ms = 30000,
+                        .max_idle_timeout_ms = self.max_idle_timeout_ms,
                     }, .{
                         .alpn = self.alpn,
                         .cert_chain_der = &cert_chain,

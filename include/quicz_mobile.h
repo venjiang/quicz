@@ -102,6 +102,11 @@ int32_t quicz_mobile_client_open_bidi(
     quicz_mobile_client *client,
     uint64_t *stream_id_out
 );
+/* Configure application-space PING keepalive before connect. Zero disables it. */
+int32_t quicz_mobile_client_set_keepalive_interval(
+    quicz_mobile_client *client,
+    uint32_t interval_ms
+);
 int32_t quicz_mobile_client_send(
     quicz_mobile_client *client,
     uint64_t stream_id,

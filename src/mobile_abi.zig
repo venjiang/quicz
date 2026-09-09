@@ -354,6 +354,15 @@ pub export fn quicz_mobile_client_open_bidi(
     return code(.ok);
 }
 
+pub export fn quicz_mobile_client_set_keepalive_interval(
+    handle: ?*anyopaque,
+    interval_ms: u32,
+) callconv(.c) i32 {
+    const client = clientFromHandle(handle) orelse return code(.invalid_argument);
+    client.client.setKeepaliveInterval(interval_ms) catch return code(.invalid_argument);
+    return code(.ok);
+}
+
 pub export fn quicz_mobile_client_send(
     handle: ?*anyopaque,
     stream_id: u64,
@@ -433,6 +442,35 @@ test "mobile client ABI rejects incomplete configuration" {
     };
     try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_create_unverified(&config, &client));
     try std.testing.expect(client == null);
+}
+
+test "mobile client ABI configures keepalive without changing ABI version" {
+    try std.testing.expectEqual(
+        code(.invalid_argument),
+        quicz_mobile_client_set_keepalive_interval(null, 10_000),
+    );
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-keepalive-test";
+    var config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = 4433,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var client: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
+    defer quicz_mobile_client_destroy(client);
+    try std.testing.expectEqual(
+        code(.ok),
+        quicz_mobile_client_set_keepalive_interval(client, 10_000),
+    );
+    try std.testing.expectEqual(@as(u32, 1), quicz_mobile_abi_version());
 }
 
 const SmallStackCreateContext = struct {

@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
 
     // Shared loopback identity (DER cert + P-256 key) used by examples and
     // downstream tools such as the CLI package.
-    _ = b.addModule("quicz-test-cert", .{
+    const quicz_test_cert_mod = b.addModule("quicz-test-cert", .{
         .root_source_file = b.path("examples/test_certs.zig"),
         .target = target,
         .optimize = optimize,
@@ -2095,6 +2095,19 @@ pub fn build(b: *std.Build) void {
         .root_module = mobile_abi_mod,
     });
     const run_mobile_abi_tests = b.addRunArtifact(mobile_abi_tests);
+    const runtime_keepalive_tests = b.addTest(.{
+        .name = "quicz-runtime-keepalive-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/runtime_keepalive_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz-test-cert", .module = quicz_test_cert_mod },
+            },
+        }),
+    });
+    const run_runtime_keepalive_tests = b.addRunArtifact(runtime_keepalive_tests);
 
     // zig build run-tls13-backend-loopback
     const run_tls13_backend_loopback = b.step("run-tls13-backend-loopback", "Run pure-Zig TLS 1.3 in-memory loopback");
@@ -2170,4 +2183,5 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_mobile_abi_tests.step);
+    test_step.dependOn(&run_runtime_keepalive_tests.step);
 }
