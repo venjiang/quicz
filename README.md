@@ -245,6 +245,7 @@ token forgery), each with code and test references.
 
 ## Documentation
 
+- [P2P Connectivity Spike](docs/en/p2p-connectivity-spike.md) — experimental iOS ABI, STUN codec, and adaptive path selection; not yet production NAT traversal.
 - [Getting Started](docs/en/getting-started.md) — build H3 servers/clients, custom stream protocols, and advanced patterns.
 - [API Layers](docs/en/api-layers.md) — high/low API map + comparison to s2n-quic / quic-go / quinn / quiche / msquic / quic-zig.
 - [API Reference](docs/en/api-reference.md) — full signature reference for `runtime.*`, H3, and `Connection`.

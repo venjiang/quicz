@@ -6,6 +6,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "include",
+        "scripts",
         "examples",
         "docs",
         "README.md",

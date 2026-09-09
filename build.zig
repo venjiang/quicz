@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
 
     // Shared loopback identity (DER cert + P-256 key) used by examples and
     // downstream tools such as the CLI package.
-    _ = b.addModule("quicz-test-cert", .{
+    const quicz_test_cert_mod = b.addModule("quicz-test-cert", .{
         .root_source_file = b.path("examples/test_certs.zig"),
         .target = target,
         .optimize = optimize,
@@ -51,6 +51,100 @@ pub fn build(b: *std.Build) void {
         .root_module = quicz_mod,
     });
     b.installArtifact(lib);
+
+    const mobile_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/mobile_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quicz", .module = quicz_mod },
+        },
+    });
+    const mobile_abi_lib = b.addLibrary(.{
+        .name = "quicz_mobile",
+        .root_module = mobile_abi_mod,
+    });
+    const install_mobile_abi = b.addInstallArtifact(mobile_abi_lib, .{});
+    const install_mobile_header = b.addInstallFileWithDir(
+        b.path("include/quicz_mobile.h"),
+        .header,
+        "quicz_mobile.h",
+    );
+    const mobile_abi_step = b.step("mobile-static", "Build the mobile C ABI static library and header");
+    mobile_abi_step.dependOn(&install_mobile_abi.step);
+    mobile_abi_step.dependOn(&install_mobile_header.step);
+
+    const shared_socket_connectivity = b.addExecutable(.{
+        .name = "quicz-shared-socket-connectivity-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/shared_socket_connectivity_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    const run_shared_socket_connectivity = b.step(
+        "run-shared-socket-connectivity-loopback",
+        "Run STUN discovery and QUIC on one client UDP socket",
+    );
+    run_shared_socket_connectivity.dependOn(&b.addRunArtifact(shared_socket_connectivity).step);
+
+    const mobile_abi_loopback = b.addExecutable(.{
+        .name = "quicz-mobile-abi-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mobile_abi_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz_mobile", .module = mobile_abi_mod },
+            },
+        }),
+    });
+    const run_mobile_abi_loopback = b.step(
+        "run-mobile-abi-loopback",
+        "Run the blocking mobile C ABI against the native QUIC server",
+    );
+    run_mobile_abi_loopback.dependOn(&b.addRunArtifact(mobile_abi_loopback).step);
+
+    const p2p_quic_loopback = b.addExecutable(.{
+        .name = "quicz-p2p-quic-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/p2p_quic_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    const run_p2p_quic_loopback = b.step(
+        "run-p2p-quic-loopback",
+        "Run authenticated UDP probing and verified QUIC on the same sockets",
+    );
+    run_p2p_quic_loopback.dependOn(&b.addRunArtifact(p2p_quic_loopback).step);
+
+    const mobile_latency_server = b.addExecutable(.{
+        .name = "quicz-mobile-latency-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mobile_latency_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    const run_mobile_latency_server = b.step(
+        "run-mobile-latency-server",
+        "Run the QUIC echo server for iOS latency measurements",
+    );
+    const run_mobile_latency_server_command = b.addRunArtifact(mobile_latency_server);
+    if (b.args) |args| run_mobile_latency_server_command.addArgs(args);
+    run_mobile_latency_server.dependOn(&run_mobile_latency_server_command.step);
 
     // Echo server executable
     const exe_server = b.addExecutable(.{
@@ -1996,6 +2090,24 @@ pub fn build(b: *std.Build) void {
         .root_module = quicz_mod,
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
+    const mobile_abi_tests = b.addTest(.{
+        .name = "quicz-mobile-abi-tests",
+        .root_module = mobile_abi_mod,
+    });
+    const run_mobile_abi_tests = b.addRunArtifact(mobile_abi_tests);
+    const runtime_keepalive_tests = b.addTest(.{
+        .name = "quicz-runtime-keepalive-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/runtime_keepalive_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz-test-cert", .module = quicz_test_cert_mod },
+            },
+        }),
+    });
+    const run_runtime_keepalive_tests = b.addRunArtifact(runtime_keepalive_tests);
 
     // zig build run-tls13-backend-loopback
     const run_tls13_backend_loopback = b.step("run-tls13-backend-loopback", "Run pure-Zig TLS 1.3 in-memory loopback");
@@ -2070,4 +2182,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_mobile_abi_tests.step);
+    test_step.dependOn(&run_runtime_keepalive_tests.step);
 }
