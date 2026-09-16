@@ -123,6 +123,7 @@ pub fn stopSending(self: Stream, code: u64) !void
 ```zig
 pub fn init(allocator, io: std.Io, config: Config) !Client
 pub fn connect(self: *Client) !void        // 启动 recv/drive tasks，阻塞直到握手确认
+pub fn connectWithTimeout(self: *Client, timeout_ms: u32) !void // 同一握手的有界等待；0无效
 pub fn send(self: *Client, data: []const u8, fin: bool) !u64     // 新 bidi 流；返回 id
 pub fn sendOnStream(self: *Client, sid: u64, data, fin) !void    // 在已有流上发送
 pub fn openStream(self: *Client) !u64      // 打开 bidi 流，无数据

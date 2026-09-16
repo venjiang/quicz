@@ -129,6 +129,7 @@ pub fn stopSending(self: Stream, code: u64) !void
 ```zig
 pub fn init(allocator, io: std.Io, config: Config) !Client
 pub fn connect(self: *Client) !void        // start recv/drive tasks, block until handshake confirmed
+pub fn connectWithTimeout(self: *Client, timeout_ms: u32) !void // same handshake, bounded wait; zero is invalid
 pub fn send(self: *Client, data: []const u8, fin: bool) !u64     // new bidi stream; returns id
 pub fn sendOnStream(self: *Client, sid: u64, data, fin) !void    // send on existing stream
 pub fn openStream(self: *Client) !u64      // open bidi stream, no data
@@ -143,6 +144,10 @@ pub fn close(self: *Client) void           // request APPLICATION_CLOSE
 pub fn deinit(self: *Client) void          // stop tasks, free resources
 pub fn runEchoSession(self: *Client, payload: []const u8) !bool  // test helper
 ```
+
+`connectWithTimeout` returns as soon as the handshake completes, including when the client is already connected.
+Expiration returns `error.ConnectionTimedOut` without destroying the client or starting another handshake;
+the existing driver remains owned by the client until `deinit`.
 
 ## `runtime.h3_server.H3Server` / `runtime.h3_client.H3Client`
 

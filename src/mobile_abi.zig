@@ -223,42 +223,17 @@ pub export fn quicz_mobile_client_connect(handle: ?*anyopaque) callconv(.c) i32 
     return code(.ok);
 }
 
-const ConnectOutcome = union(enum) {
-    connection: anyerror!void,
-    deadline: std.Io.Cancelable!void,
-};
-
-fn connectClient(client: *MobileClient) anyerror!void {
-    return client.client.connect();
-}
-
-fn waitConnectTimeout(io: std.Io, timeout_ms: u32) std.Io.Cancelable!void {
-    return std.Io.Timeout.sleep(.{ .duration = .{
-        .clock = .awake,
-        .raw = .fromMilliseconds(timeout_ms),
-    } }, io);
-}
-
 pub export fn quicz_mobile_client_connect_timeout(
     handle: ?*anyopaque,
     timeout_ms: u32,
 ) callconv(.c) i32 {
     const client = clientFromHandle(handle) orelse return code(.invalid_argument);
     if (timeout_ms == 0) return code(.invalid_argument);
-    const io = client.threaded.io();
-    const Selection = std.Io.Select(ConnectOutcome);
-    var selected_buffer: [2]ConnectOutcome = undefined;
-    var selection: Selection = .init(io, &selected_buffer);
-    defer selection.cancelDiscard();
-    selection.concurrent(.connection, connectClient, .{client}) catch
-        return code(.connection_failed);
-    selection.concurrent(.deadline, waitConnectTimeout, .{ io, timeout_ms }) catch
-        return code(.connection_failed);
-    const outcome = selection.await() catch return code(.connection_failed);
-    return switch (outcome) {
-        .connection => |result| if (result) code(.ok) else |_| code(.connection_failed),
-        .deadline => |deadline| if (deadline) code(.connection_timed_out) else |_| code(.connection_failed),
+    client.client.connectWithTimeout(timeout_ms) catch |err| return switch (err) {
+        error.ConnectionTimedOut => code(.connection_timed_out),
+        else => code(.connection_failed),
     };
+    return code(.ok);
 }
 
 pub export fn quicz_mobile_client_bound_ipv4(

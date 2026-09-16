@@ -109,6 +109,20 @@ pub fn build(b: *std.Build) void {
         "Run the blocking mobile C ABI against the native QUIC server",
     );
     run_mobile_abi_loopback.dependOn(&b.addRunArtifact(mobile_abi_loopback).step);
+    const mobile_deadline_regression = b.addExecutable(.{
+        .name = "quicz-mobile-deadline-regression",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mobile_deadline_regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz_mobile", .module = mobile_abi_mod },
+            },
+        }),
+    });
+    b.step("run-mobile-deadline-regression", "Check hosted C ABI deadline and cleanup latency")
+        .dependOn(&b.addRunArtifact(mobile_deadline_regression).step);
 
     const p2p_quic_loopback = b.addExecutable(.{
         .name = "quicz-p2p-quic-loopback",

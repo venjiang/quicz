@@ -203,9 +203,9 @@ pub const Client = struct {
     datagram_pool: DatagramPool,
 
     /// Handshake coordination: the drive task runs the handshake; callers
-    /// wait on handshake_sem for the terminal state.
+    /// wait on handshake_complete for the terminal state.
     handshake_state: std.atomic.Value(u8) = .init(0),
-    handshake_sem: std.Io.Semaphore = .{ .permits = 0 },
+    handshake_complete: std.Io.Event = .unset,
     connect_requested: bool = false,
     close_requested: bool = false,
     /// Drive-task only.
@@ -390,6 +390,23 @@ pub const Client = struct {
         if (self.started) {
             @atomicStore(bool, &self.stopping, true, .release);
             self.notifyDrive(self.io);
+            // Hosted callers can mask SIGIO. Wake the blocking UDP receiver
+            // locally instead of relying on a signal to interrupt recvmsg.
+            // Keep the descriptor alive until every worker has exited.
+            var wake_address = self.socket.address;
+            switch (wake_address) {
+                .ip4 => |*address| {
+                    if (std.mem.allEqual(u8, &address.bytes, 0)) address.bytes = .{ 127, 0, 0, 1 };
+                },
+                .ip6 => |*address| {
+                    if (std.mem.allEqual(u8, &address.bytes, 0)) address.bytes = .{0} ** 15 ++ .{1};
+                },
+            }
+            {
+                const previous_protection = self.io.swapCancelProtection(.blocked);
+                defer _ = self.io.swapCancelProtection(previous_protection);
+                self.socket.send(self.io, &wake_address, &.{}) catch {};
+            }
             self.drive_group.cancel(self.io);
             self.drive_group.await(self.io) catch {};
             self.started = false;
@@ -479,11 +496,36 @@ pub const Client = struct {
     /// Drive the TLS 1.3 handshake to completion. Blocks until the drive
     /// task confirms the handshake or the connection closes first.
     pub fn connect(self: *Client) !void {
+        return self.connectUntil(null);
+    }
+
+    /// Wait on this client's handshake event, without a separate timer task.
+    /// Expiration leaves the original driver owned by this client; callers may
+    /// wait again or destroy the client. No work retains the caller's stack.
+    pub fn connectWithTimeout(self: *Client, timeout_ms: u32) !void {
+        if (timeout_ms == 0) return error.InvalidTimeout;
+        const deadline = std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(timeout_ms));
+        return self.connectUntil(deadline);
+    }
+
+    fn connectUntil(self: *Client, deadline: ?std.Io.Timestamp) !void {
         try self.startTasks();
         if (self.handshake_state.load(.acquire) == handshake_confirmed) return;
         @atomicStore(bool, &self.connect_requested, true, .release);
         self.notifyDrive(self.io);
-        self.handshake_sem.wait(self.io) catch return error.HandshakeFailed;
+        if (deadline) |end| {
+            while (!self.handshake_complete.isSet()) {
+                self.handshake_complete.waitTimeout(self.io, .{ .deadline = .{ .clock = .awake, .raw = end } }) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (!self.handshake_complete.isSet() and std.Io.Timestamp.now(self.io, .awake).nanoseconds >= end.nanoseconds)
+                            return error.ConnectionTimedOut;
+                    },
+                    error.Canceled => return error.HandshakeFailed,
+                };
+            }
+        } else {
+            self.handshake_complete.wait(self.io) catch return error.HandshakeFailed;
+        }
         if (self.handshake_state.load(.acquire) != handshake_confirmed) {
             return self.handshake_error orelse error.HandshakeFailed;
         }
@@ -738,6 +780,7 @@ pub const Client = struct {
                     continue;
                 },
             };
+            if (@atomicLoad(bool, &self.stopping, .acquire)) return;
             self.udp_datagrams_received += 1;
             const pooled_buf = self.datagram_pool.take();
             const copy = if (pooled_buf) |pb| blk: {
@@ -814,7 +857,7 @@ pub const Client = struct {
         const begin = self.client.beginWithRoutePath(self.nowNanos(), &self.scratch) catch |err| {
             log.err("client: begin handshake: {}", .{err});
             self.handshake_state.store(handshake_failed, .release);
-            self.handshake_sem.post(self.io);
+            self.handshake_complete.set(self.io);
             return;
         };
         self.socket.send(self.io, &self.server_address, begin.datagram) catch {};
@@ -1123,7 +1166,7 @@ pub const Client = struct {
         if (!self.handshake_started) return;
         self.handshake_error = err;
         self.handshake_state.store(handshake_failed, .release);
-        self.handshake_sem.post(self.io);
+        self.handshake_complete.set(self.io);
     }
 
     /// Push received bytes of every open stream into its queue and surface
@@ -1215,14 +1258,14 @@ pub const Client = struct {
             if (self.keepalive_interval_nanos != 0) {
                 self.next_keepalive_nanos = keepaliveDeadlineAfter(self.nowNanos(), self.keepalive_interval_nanos);
             }
-            self.handshake_sem.post(self.io);
+            self.handshake_complete.set(self.io);
             return;
         }
         // A connection closing before confirmation can never complete the
         // handshake (server rejection, close frame, expired timers).
         if (self.client.transport.connection.isClosingOrClosed()) {
             self.handshake_state.store(handshake_failed, .release);
-            self.handshake_sem.post(self.io);
+            self.handshake_complete.set(self.io);
         }
     }
 
