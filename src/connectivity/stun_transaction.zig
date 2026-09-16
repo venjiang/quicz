@@ -33,7 +33,10 @@ pub fn discover(
             const received = socket.receiveTimeout(io, &receive_buffer, .{ .duration = .{
                 .clock = .awake,
                 .raw = std.Io.Duration.fromMilliseconds(config.timeout_ms),
-            } }) catch break;
+            } }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => break,
+            };
             if (!sameAddress(received.from, stun_server)) continue;
             const mapped = stun.decodeBindingSuccess(received.data, transaction_id) catch continue;
             return mapped;
@@ -66,6 +69,26 @@ test "rejects unbounded transaction configuration" {
         error.InvalidTransactionConfig,
         discover(io, &socket, bind_address, .{ .max_attempts = 6 }),
     );
+}
+
+test "cancelling a pending STUN receive does not retry or close the caller socket" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var client = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer client.close(io);
+    const server = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer server.close(io);
+    var transaction = try io.concurrent(discover, .{ io, &client, server.address, Config{ .timeout_ms = 200, .max_attempts = 3 } });
+    defer _ = transaction.cancel(io) catch {};
+    var buffer: [64]u8 = undefined;
+    _ = try server.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+    try std.testing.expectError(error.Canceled, transaction.cancel(io));
+    try std.testing.expectError(error.Timeout, server.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(20) } }));
+    try server.send(io, &client.address, "alive");
+    const received = try client.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+    try std.testing.expectEqualStrings("alive", received.data);
 }
 
 test "maximum ignored datagram budget terminates without overflow" {
