@@ -2196,6 +2196,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run quicz unit tests");
+    const peer_punch_tests = b.addTest(.{ .root_module = quicz_mod, .filters = &.{"peer learning"} });
+    b.step("test-peer-punch", "Verify authenticated IPv4 peer learning on loopback")
+        .dependOn(&b.addRunArtifact(peer_punch_tests).step);
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_mobile_abi_tests.step);
     test_step.dependOn(&run_runtime_keepalive_tests.step);

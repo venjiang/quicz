@@ -55,6 +55,7 @@ pub const connectivity = struct {
     pub const punch_wire = @import("connectivity/punch_wire.zig");
     pub const punch_attempt = @import("connectivity/punch_attempt.zig");
     pub const punch_driver = @import("connectivity/punch_driver.zig");
+    pub const peer_punch = @import("connectivity/peer_punch.zig");
     pub const punch_responder = @import("connectivity/punch_responder.zig");
     pub const candidate = @import("connectivity/candidate.zig");
 };
@@ -103,6 +104,7 @@ comptime {
     _ = connectivity.punch_wire;
     _ = connectivity.punch_attempt;
     _ = connectivity.punch_driver;
+    _ = connectivity.peer_punch;
     _ = connectivity.punch_responder;
     _ = connectivity.candidate;
     _ = integration_tests;
