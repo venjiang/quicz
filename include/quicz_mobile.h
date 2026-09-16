@@ -63,6 +63,34 @@ typedef struct quicz_mobile_punch_config {
     uint8_t reserved[3];
 } quicz_mobile_punch_config;
 
+enum quicz_mobile_punch_outcome {
+    QUICZ_MOBILE_PUNCH_NOT_STARTED = 0,
+    QUICZ_MOBILE_PUNCH_VALIDATED = 1,
+    QUICZ_MOBILE_PUNCH_RETRY_EXHAUSTED = 2,
+    QUICZ_MOBILE_PUNCH_CANCELED = 3,
+    QUICZ_MOBILE_PUNCH_IO_FAILED = 4,
+};
+
+/* Fixed per-call diagnostics; no addresses, identities, or packet contents.
+ * Counts saturate at UINT32_MAX. Outcome describes UDP proof, not QUIC. */
+typedef struct quicz_mobile_punch_diagnostics {
+    uint64_t duration_ms;
+    uint32_t outcome;
+    uint32_t probes_sent;
+    uint32_t acks_sent;
+    uint32_t datagrams_received;
+    uint32_t source_rejected;
+    uint32_t oversized_received;
+    uint32_t packets_checked;
+    uint32_t malformed_rejected;
+    uint32_t authentication_rejected;
+    uint32_t attempt_rejected;
+    uint32_t nonce_rejected;
+    uint8_t peer_probe;
+    uint8_t local_ack;
+    uint8_t reserved[2];
+} quicz_mobile_punch_diagnostics;
+
 uint32_t quicz_mobile_abi_version(void);
 uint64_t quicz_mobile_capabilities(void);
 
@@ -97,6 +125,13 @@ int32_t quicz_mobile_client_discover_ipv4(
 int32_t quicz_mobile_client_punch_ipv4(
     quicz_mobile_client *client,
     const quicz_mobile_punch_config *config
+);
+/* Clears diagnostics_out on entry and fills it on failure as well as success.
+ * The output pointer is required. Lifecycle/serialization rules are unchanged. */
+int32_t quicz_mobile_client_punch_ipv4_with_diagnostics(
+    quicz_mobile_client *client,
+    const quicz_mobile_punch_config *config,
+    quicz_mobile_punch_diagnostics *diagnostics_out
 );
 int32_t quicz_mobile_client_open_bidi(
     quicz_mobile_client *client,

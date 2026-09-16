@@ -55,6 +55,33 @@ pub const PunchConfig = extern struct {
     reserved: [3]u8,
 };
 
+pub const PunchOutcome = enum(u32) {
+    not_started = 0,
+    validated = 1,
+    retry_exhausted = 2,
+    canceled = 3,
+    io_failed = 4,
+};
+
+/// Per-call, address-free proof diagnostics. No identity or packet contents.
+pub const PunchDiagnostics = extern struct {
+    duration_ms: u64 = 0,
+    outcome: u32 = @intFromEnum(PunchOutcome.not_started),
+    probes_sent: u32 = 0,
+    acks_sent: u32 = 0,
+    datagrams_received: u32 = 0,
+    source_rejected: u32 = 0,
+    oversized_received: u32 = 0,
+    packets_checked: u32 = 0,
+    malformed_rejected: u32 = 0,
+    authentication_rejected: u32 = 0,
+    attempt_rejected: u32 = 0,
+    nonce_rejected: u32 = 0,
+    peer_probe: u8 = 0,
+    local_ack: u8 = 0,
+    reserved: [2]u8 = @splat(0),
+};
+
 pub const ClientConfig = extern struct {
     server_ipv4: [4]u8,
     server_port: u16,
@@ -279,6 +306,21 @@ pub export fn quicz_mobile_client_punch_ipv4(
     handle: ?*anyopaque,
     config: ?*const PunchConfig,
 ) callconv(.c) i32 {
+    return punchIpv4(handle, config, null);
+}
+
+/// The snapshot describes UDP proof, not the subsequent QUIC handshake.
+pub export fn quicz_mobile_client_punch_ipv4_with_diagnostics(
+    handle: ?*anyopaque,
+    config: ?*const PunchConfig,
+    diagnostics_out: ?*PunchDiagnostics,
+) callconv(.c) i32 {
+    const output = diagnostics_out orelse return code(.invalid_argument);
+    output.* = .{};
+    return punchIpv4(handle, config, output);
+}
+
+fn punchIpv4(handle: ?*anyopaque, config: ?*const PunchConfig, diagnostics_out: ?*PunchDiagnostics) i32 {
     const client = clientFromHandle(handle) orelse return code(.invalid_argument);
     const valid_config = config orelse return code(.invalid_argument);
     if (!std.mem.allEqual(u8, &valid_config.reserved, 0) or
@@ -298,12 +340,42 @@ pub export fn quicz_mobile_client_punch_ipv4(
         .bytes = valid_config.remote.address,
         .port = valid_config.remote.port,
     } };
+    const started = std.Io.Timestamp.now(client.client.io, .awake);
+    var outcome: PunchOutcome = .not_started;
+    defer if (diagnostics_out) |output| {
+        const counters = attempt.diagnostics;
+        const elapsed = started.durationTo(std.Io.Timestamp.now(client.client.io, .awake)).toMilliseconds();
+        output.* = .{
+            .duration_ms = @intCast(@max(0, elapsed)),
+            .outcome = @intFromEnum(outcome),
+            .probes_sent = counters.probe_sends,
+            .acks_sent = counters.acknowledgement_sends,
+            .datagrams_received = counters.datagrams_received,
+            .source_rejected = counters.source_rejected,
+            .oversized_received = counters.oversized_received,
+            .packets_checked = counters.packets_checked,
+            .malformed_rejected = counters.malformed_rejected,
+            .authentication_rejected = counters.authentication_rejected,
+            .attempt_rejected = counters.attempt_rejected,
+            .nonce_rejected = counters.nonce_rejected,
+            .peer_probe = @intFromBool(attempt.peer_probe_received),
+            .local_ack = @intFromBool(attempt.local_probe_acknowledged),
+        };
+    };
     quicz.connectivity.punch_driver.runUntilValidated(
         client.client.io,
         client.client.socket,
         remote,
         &attempt,
-    ) catch return code(.punch_failed);
+    ) catch |err| {
+        outcome = switch (err) {
+            error.PunchFailed => .retry_exhausted,
+            error.Canceled => .canceled,
+            else => .io_failed,
+        };
+        return code(.punch_failed);
+    };
+    outcome = .validated;
     const responder_lifetime_ms = std.math.mul(u32, valid_config.maximum_retry_ms, 2) catch
         return code(.invalid_argument);
     var responder = quicz.connectivity.punch_responder.PunchResponder.init(
@@ -508,6 +580,128 @@ test "mobile client connect timeout bounds a silent UDP peer" {
         code(.connection_timed_out),
         quicz_mobile_client_connect_timeout(client, 10),
     );
+}
+
+test "mobile punch diagnostics retain silent peer counters on failure" {
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const silent = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer silent.close(std.testing.io);
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-punch-test";
+    const config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = silent.address.ip4.port,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var client: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
+    defer quicz_mobile_client_destroy(client);
+    const punch = PunchConfig{
+        .remote = .{ .address = .{ 127, 0, 0, 1 }, .port = silent.address.ip4.port },
+        .key = @splat(0x42),
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x21),
+        .initial_retry_ms = 10,
+        .maximum_retry_ms = 10,
+        .max_attempts = 1,
+        .reserved = @splat(0),
+    };
+    var diagnostics: PunchDiagnostics = undefined;
+    try std.testing.expectEqual(code(.punch_failed), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.probes_sent);
+    try std.testing.expectEqual(@as(u32, 0), diagnostics.datagrams_received);
+    try std.testing.expectEqual(@intFromEnum(PunchOutcome.retry_exhausted), diagnostics.outcome);
+    try std.testing.expectEqual(@as(u8, 0), diagnostics.peer_probe);
+    try std.testing.expectEqual(@as(u8, 0), diagnostics.local_ack);
+    try std.testing.expect(diagnostics.duration_ms >= 10);
+
+    var bound: Ipv4Endpoint = undefined;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_bound_ipv4(client, &bound));
+    const destination = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = bound.port } };
+    const invalid_proof = quicz.connectivity.punch_wire.encode(@splat(0x99), .{
+        .kind = .probe,
+        .attempt_id = punch.attempt_id,
+        .nonce = @splat(0x33),
+    });
+    try silent.send(std.testing.io, &destination, &invalid_proof);
+    try std.testing.expectEqual(code(.punch_failed), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, &diagnostics));
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.probes_sent);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.packets_checked);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics.authentication_rejected);
+    try std.testing.expectEqual(@as(u32, 0), diagnostics.source_rejected);
+    try std.testing.expectEqual(@as(u8, 0), diagnostics.peer_probe);
+
+    // An invalid subsequent call must not expose the previous attempt's counts.
+    try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_punch_ipv4_with_diagnostics(null, &punch, &diagnostics));
+    try std.testing.expectEqualDeep(PunchDiagnostics{}, diagnostics);
+    try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, null));
+    try std.testing.expectEqual(code(.punch_failed), quicz_mobile_client_punch_ipv4(client, &punch));
+}
+
+test "mobile punch diagnostics report verified bidirectional proof" {
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const peer = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(std.testing.io);
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-punch-test";
+    const config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = peer.address.ip4.port,
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var client: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
+    defer quicz_mobile_client_destroy(client);
+    var bound: Ipv4Endpoint = undefined;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_bound_ipv4(client, &bound));
+    var peer_attempt = try quicz.connectivity.punch_attempt.PunchAttempt.init(
+        @splat(0x42),
+        @splat(0x11),
+        @splat(0x33),
+        .{ .initial_retry_ms = 10, .maximum_retry_ms = 20, .max_attempts = 5 },
+    );
+    const destination = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = bound.port } };
+    var serving = try std.testing.io.concurrent(quicz.connectivity.punch_driver.run, .{
+        std.testing.io, peer, destination, &peer_attempt,
+    });
+    defer serving.cancel(std.testing.io) catch {};
+    const punch = PunchConfig{
+        .remote = .{ .address = .{ 127, 0, 0, 1 }, .port = peer.address.ip4.port },
+        .key = @splat(0x42),
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x21),
+        .initial_retry_ms = 10,
+        .maximum_retry_ms = 20,
+        .max_attempts = 5,
+        .reserved = @splat(0),
+    };
+    var diagnostics: PunchDiagnostics = undefined;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, &diagnostics));
+    try serving.await(std.testing.io);
+    try std.testing.expectEqual(@intFromEnum(PunchOutcome.validated), diagnostics.outcome);
+    try std.testing.expect(diagnostics.probes_sent >= 1);
+    try std.testing.expect(diagnostics.acks_sent >= 1);
+    try std.testing.expect(diagnostics.datagrams_received >= 2);
+    try std.testing.expectEqual(@as(u32, 0), diagnostics.authentication_rejected);
+    try std.testing.expectEqual(@as(u8, 1), diagnostics.peer_probe);
+    try std.testing.expectEqual(@as(u8, 1), diagnostics.local_ack);
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(PunchDiagnostics));
+    try std.testing.expectEqual(@as(u32, 1), quicz_mobile_abi_version());
 }
 
 fn respondToMobileStun(socket: *std.Io.net.Socket) std.Io.Cancelable!void {

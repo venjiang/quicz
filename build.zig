@@ -2109,6 +2109,7 @@ pub fn build(b: *std.Build) void {
         .root_module = mobile_abi_mod,
     });
     const run_mobile_abi_tests = b.addRunArtifact(mobile_abi_tests);
+    b.step("test-mobile-abi", "Run the public mobile C ABI tests").dependOn(&run_mobile_abi_tests.step);
     const runtime_keepalive_tests = b.addTest(.{
         .name = "quicz-runtime-keepalive-tests",
         .root_module = b.createModule(.{
