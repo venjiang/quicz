@@ -50,7 +50,10 @@ fn runInternal(
             }
             if (now_ms >= finishing_deadline_ms.?) break;
         } else {
-            if (attempt.nextProbe(now_ms)) |probe| try socket.send(io, &destination, &probe);
+            if (attempt.nextProbe(now_ms)) |probe| {
+                try socket.send(io, &destination, &probe);
+                attempt.diagnostics.probe_sends +|= 1;
+            }
             if (attempt.state == .failed) break;
         }
 
@@ -62,13 +65,22 @@ fn runInternal(
             .clock = .awake,
         };
         const received = socket.receiveTimeout(io, &receive_buffer, .{ .deadline = deadline }) catch |err| switch (err) {
-            error.Timeout, error.MessageOversize => continue,
+            error.Timeout => continue,
+            error.MessageOversize => {
+                attempt.diagnostics.oversized_received +|= 1;
+                continue;
+            },
             else => return err,
         };
-        if (!sameAddress(received.from, remote)) continue;
+        attempt.diagnostics.datagrams_received +|= 1;
+        if (!sameAddress(received.from, remote)) {
+            attempt.diagnostics.source_rejected +|= 1;
+            continue;
+        }
         const result = attempt.receive(received.data) catch continue;
         if (result.acknowledgement) |acknowledgement| {
             try socket.send(io, &destination, &acknowledgement);
+            attempt.diagnostics.acknowledgement_sends +|= 1;
         }
     }
 
@@ -146,7 +158,48 @@ test "runtime handoff returns promptly after mutual validation" {
 
     try std.testing.expectEqual(@as(?anyerror, null), first.failure);
     try std.testing.expectEqual(@as(?anyerror, null), second.failure);
+    try std.testing.expect(first_attempt.diagnostics.probe_sends > 0);
+    try std.testing.expect(first_attempt.diagnostics.acknowledgement_sends > 0);
+    try std.testing.expect(first_attempt.diagnostics.datagrams_received >= 2);
+    try std.testing.expectEqual(@as(u32, 0), first_attempt.diagnostics.source_rejected);
     try std.testing.expect(elapsedMilliseconds(started, std.Io.Timestamp.now(io, .awake)) < 500);
+}
+
+test "punch diagnostics distinguish silent peer from wrong source" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const local = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer local.close(io);
+    const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    const stranger = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer stranger.close(io);
+    for ([_]bool{ false, true }) |wrong_source| {
+        var attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{
+            .initial_retry_ms = 200,
+            .maximum_retry_ms = 200,
+            .max_attempts = 1,
+        });
+        var context = TestRun{ .io = io, .socket = local, .remote = peer.address, .attempt = &attempt };
+        var tasks: std.Io.Group = .init;
+        defer tasks.cancel(io);
+        try tasks.concurrent(io, runFast, .{&context});
+        var buffer: [256]u8 = undefined;
+        _ = try peer.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+        if (wrong_source) {
+            var other = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xb2), .{});
+            try stranger.send(io, &local.address, &other.nextProbe(0).?);
+        }
+        try tasks.await(io);
+        try std.testing.expectEqual(@as(?anyerror, error.PunchFailed), context.failure);
+        try std.testing.expectEqual(@as(u32, 1), attempt.diagnostics.probe_sends);
+        try std.testing.expectEqual(@as(u32, @intFromBool(wrong_source)), attempt.diagnostics.datagrams_received);
+        try std.testing.expectEqual(@as(u32, @intFromBool(wrong_source)), attempt.diagnostics.source_rejected);
+        try std.testing.expectEqual(@as(u32, 0), attempt.diagnostics.packets_checked);
+        try std.testing.expect(!attempt.peer_probe_received and !attempt.local_probe_acknowledged);
+    }
 }
 
 test "validated driver acknowledges a retransmit after its first ACK is lost" {

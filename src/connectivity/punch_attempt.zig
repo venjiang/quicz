@@ -20,6 +20,22 @@ pub const ReceiveResult = struct {
     became_validated: bool = false,
 };
 
+/// Bounded observations for one attempt. Counters never affect validation or
+/// retry decisions and retain no endpoints, packet bodies, nonces or keys.
+/// Socket-level fields are populated by punch_driver; receive() records checks.
+pub const Diagnostics = struct {
+    probe_sends: u32 = 0,
+    acknowledgement_sends: u32 = 0,
+    datagrams_received: u32 = 0,
+    source_rejected: u32 = 0,
+    oversized_received: u32 = 0,
+    packets_checked: u32 = 0,
+    malformed_rejected: u32 = 0,
+    authentication_rejected: u32 = 0,
+    attempt_rejected: u32 = 0,
+    nonce_rejected: u32 = 0,
+};
+
 pub const PunchAttempt = struct {
     key: wire.Key,
     attempt_id: wire.AttemptId,
@@ -30,6 +46,7 @@ pub const PunchAttempt = struct {
     next_probe_ms: u64 = 0,
     peer_probe_received: bool = false,
     local_probe_acknowledged: bool = false,
+    diagnostics: Diagnostics = .{},
 
     pub fn init(
         key: wire.Key,
@@ -67,19 +84,34 @@ pub const PunchAttempt = struct {
 
     pub fn receive(self: *PunchAttempt, packet: []const u8) !ReceiveResult {
         if (self.state == .failed) return error.PunchAttemptFailed;
-        const message = try wire.decode(self.key, packet);
-        if (!std.mem.eql(u8, &message.attempt_id, &self.attempt_id)) return error.AttemptMismatch;
+        self.diagnostics.packets_checked +|= 1;
+        const message = wire.decode(self.key, packet) catch |err| {
+            if (err == error.AuthenticationFailed) {
+                self.diagnostics.authentication_rejected +|= 1;
+            } else {
+                self.diagnostics.malformed_rejected +|= 1;
+            }
+            return err;
+        };
+        if (!std.mem.eql(u8, &message.attempt_id, &self.attempt_id)) {
+            self.diagnostics.attempt_rejected +|= 1;
+            return error.AttemptMismatch;
+        }
 
         var result = ReceiveResult{};
         switch (message.kind) {
             .probe => {
                 // A reflected local probe proves no participation by the peer.
-                if (std.mem.eql(u8, &message.nonce, &self.local_nonce)) return error.NonceMismatch;
+                if (std.mem.eql(u8, &message.nonce, &self.local_nonce)) {
+                    self.diagnostics.nonce_rejected +|= 1;
+                    return error.NonceMismatch;
+                }
                 self.peer_probe_received = true;
                 result.acknowledgement = try wire.acknowledgement(self.key, message);
             },
             .acknowledgement => {
                 if (self.probes_sent == 0 or !std.mem.eql(u8, &message.nonce, &self.local_nonce)) {
+                    self.diagnostics.nonce_rejected +|= 1;
                     return error.NonceMismatch;
                 }
                 self.local_probe_acknowledged = true;
@@ -105,6 +137,34 @@ pub const PunchAttempt = struct {
         return @min(scaled, self.config.maximum_retry_ms);
     }
 };
+
+test "punch diagnostics separate rejected proofs without changing validation" {
+    const key: wire.Key = @splat(0x42);
+    const id: wire.AttemptId = @splat(0x11);
+    const local_nonce: wire.Nonce = @splat(0xa1);
+    const peer_nonce: wire.Nonce = @splat(0xb2);
+    var attempt = try PunchAttempt.init(key, id, local_nonce, .{});
+    _ = attempt.nextProbe(0);
+    const wrong_mac = wire.encode(@splat(0x43), .{ .kind = .probe, .attempt_id = id, .nonce = peer_nonce });
+    const wrong_attempt = wire.encode(key, .{ .kind = .probe, .attempt_id = @splat(0x12), .nonce = peer_nonce });
+    const wrong_nonce = wire.encode(key, .{ .kind = .acknowledgement, .attempt_id = id, .nonce = peer_nonce });
+    try std.testing.expectError(error.AuthenticationFailed, attempt.receive(&wrong_mac));
+    try std.testing.expectError(error.AttemptMismatch, attempt.receive(&wrong_attempt));
+    try std.testing.expectError(error.NonceMismatch, attempt.receive(&wrong_nonce));
+    try std.testing.expectError(error.InvalidPacketLength, attempt.receive("invalid"));
+    try std.testing.expectEqual(State.probing, attempt.state);
+    try std.testing.expect(!attempt.peer_probe_received and !attempt.local_probe_acknowledged);
+    try std.testing.expectEqual(@as(u32, 4), attempt.diagnostics.packets_checked);
+    try std.testing.expectEqual(@as(u32, 1), attempt.diagnostics.authentication_rejected);
+    try std.testing.expectEqual(@as(u32, 1), attempt.diagnostics.attempt_rejected);
+    try std.testing.expectEqual(@as(u32, 1), attempt.diagnostics.nonce_rejected);
+    try std.testing.expectEqual(@as(u32, 1), attempt.diagnostics.malformed_rejected);
+    const peer_probe = wire.encode(key, .{ .kind = .probe, .attempt_id = id, .nonce = peer_nonce });
+    try std.testing.expect((try attempt.receive(&peer_probe)).acknowledgement != null);
+    const acknowledgement = wire.encode(key, .{ .kind = .acknowledgement, .attempt_id = id, .nonce = local_nonce });
+    try std.testing.expect((try attempt.receive(&acknowledgement)).became_validated);
+    try std.testing.expectEqual(@as(u32, 6), attempt.diagnostics.packets_checked);
+}
 
 test "both authenticated directions are required before validation" {
     const key: wire.Key = .{0x42} ** 32;
