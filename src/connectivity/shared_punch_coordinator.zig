@@ -47,6 +47,7 @@ pub const Event = union(enum) {
 pub const SharedPunchCoordinator = struct {
     allocator: std.mem.Allocator,
     maximum: usize,
+    mutex: std.atomic.Mutex = .unlocked,
     attempts: std.AutoHashMap(wire.AttemptId, RegisteredAttempt),
 
     pub fn init(allocator: std.mem.Allocator, maximum: usize) Error!SharedPunchCoordinator {
@@ -66,6 +67,8 @@ pub const SharedPunchCoordinator = struct {
         started_ms: u64,
     ) !void {
         var punch = punch_value;
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         if (remote.getPort() == 0) {
             clearPunch(&punch);
             return error.InvalidEndpoint;
@@ -87,6 +90,8 @@ pub const SharedPunchCoordinator = struct {
     /// Produces one due probe or one failure notification. Call repeatedly at
     /// the same timestamp until idle before sleeping until the next deadline.
     pub fn next(coordinator: *SharedPunchCoordinator, now_ms: u64) Event {
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         var iterator = coordinator.attempts.valueIterator();
         while (iterator.next()) |attempt| {
             const elapsed = now_ms -| attempt.started_ms;
@@ -107,7 +112,9 @@ pub const SharedPunchCoordinator = struct {
     }
 
     /// Absolute awake-clock deadline for the next probe or failure transition.
-    pub fn nextDeadlineMs(coordinator: *const SharedPunchCoordinator) ?u64 {
+    pub fn nextDeadlineMs(coordinator: *SharedPunchCoordinator) ?u64 {
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         var iterator = coordinator.attempts.valueIterator();
         var earliest: ?u64 = null;
         while (iterator.next()) |attempt| {
@@ -126,6 +133,8 @@ pub const SharedPunchCoordinator = struct {
         now_ms: u64,
         packet: []const u8,
     ) Event {
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         const attempt_id = wire.routingAttemptId(packet) catch return .idle;
         const attempt = coordinator.attempts.getPtr(attempt_id) orelse return .idle;
         if (!sameAddress(from, attempt.remote)) {
@@ -149,12 +158,16 @@ pub const SharedPunchCoordinator = struct {
 
     /// Transfers a verified attempt to a QUIC runtime or a late responder.
     pub fn takeValidated(coordinator: *SharedPunchCoordinator, attempt_id: wire.AttemptId) Error!RegisteredAttempt {
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         const entry = coordinator.attempts.getPtr(attempt_id) orelse return error.AttemptNotValidated;
         if (entry.punch.state != .validated) return error.AttemptNotValidated;
         return coordinator.attempts.fetchRemove(attempt_id).?.value;
     }
 
     pub fn remove(coordinator: *SharedPunchCoordinator, attempt_id: wire.AttemptId) bool {
+        coordinator.lock();
+        defer coordinator.mutex.unlock();
         if (coordinator.attempts.fetchRemove(attempt_id)) |entry| {
             var attempt = entry.value;
             attempt.deinit();
@@ -164,10 +177,16 @@ pub const SharedPunchCoordinator = struct {
     }
 
     pub fn deinit(coordinator: *SharedPunchCoordinator) void {
+        coordinator.lock();
         var iterator = coordinator.attempts.valueIterator();
         while (iterator.next()) |attempt| attempt.deinit();
         coordinator.attempts.deinit();
+        coordinator.mutex.unlock();
         coordinator.* = undefined;
+    }
+
+    fn lock(coordinator: *SharedPunchCoordinator) void {
+        while (!coordinator.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 };
 
