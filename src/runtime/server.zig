@@ -12,8 +12,93 @@ const builtin = @import("builtin");
 const quicz = @import("../lib.zig");
 const h3_proto = @import("../h3/server.zig");
 const runtime_h3 = @import("h3_server.zig");
+const StunBinding = @import("stun_binding.zig").Binding;
 
 const log = std.log.scoped(.quicz_runtime);
+
+test "running server refreshes STUN through its single UDP receiver" {
+    const io = std.testing.io;
+    const local = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var stun_socket = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer stun_socket.close(io);
+    var server = try Server.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+    });
+    defer server.deinit();
+    try server.start();
+    const bound_port = server.localPort();
+    const Responder = struct {
+        fn run(socket: *std.Io.net.Socket, expected_port: u16) !void {
+            var old_response: ?[32]u8 = null;
+            for ([_]u16{ 41001, 41002 }) |mapped_port| {
+                var bytes: [64]u8 = undefined;
+                const received = try socket.receiveTimeout(std.testing.io, &bytes, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+                try std.testing.expectEqual(expected_port, received.from.getPort());
+                const id = try quicz.connectivity.stun.decodeBindingRequest(received.data);
+                var target = received.from;
+                if (old_response) |old| try socket.send(std.testing.io, &target, &old);
+                const response = quicz.connectivity.stun.encodeBindingSuccessIpv4(id, .{ 192, 0, 2, 1 }, mapped_port);
+                try socket.send(std.testing.io, &target, &response);
+                old_response = response;
+            }
+        }
+    };
+    var responder = try io.concurrent(Responder.run, .{ &stun_socket, bound_port });
+    defer responder.cancel(io) catch {};
+    for ([_]u16{ 41001, 41002 }) |expected_port| {
+        const mapped = try server.discoverReflexiveAddress(stun_socket.address, .{ .timeout_ms = 100, .max_attempts = 1 });
+        try std.testing.expectEqual(expected_port, mapped.ipv4.port);
+        try std.testing.expectEqual(bound_port, server.localPort());
+    }
+    try responder.await(io);
+}
+
+test "running server STUN cancellation preserves socket and rejects foreign responses" {
+    const io = std.testing.io;
+    const local = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var stun_socket = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer stun_socket.close(io);
+    const foreign = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer foreign.close(io);
+    var server = try Server.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+    });
+    defer server.deinit();
+    try server.start();
+    const port = server.localPort();
+    var first = try io.concurrent(Server.discoverReflexiveAddress, .{ &server, stun_socket.address, quicz.connectivity.stun_transaction.Config{ .timeout_ms = 500, .max_attempts = 1 } });
+    defer _ = first.cancel(io) catch {};
+    var bytes: [64]u8 = undefined;
+    const received = try stun_socket.receiveTimeout(io, &bytes, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+    const old_id = try quicz.connectivity.stun.decodeBindingRequest(received.data);
+    try std.testing.expectError(error.Canceled, first.cancel(io));
+    var second = try io.concurrent(Server.discoverReflexiveAddress, .{ &server, stun_socket.address, quicz.connectivity.stun_transaction.Config{ .timeout_ms = 100, .max_attempts = 1 } });
+    defer _ = second.cancel(io) catch {};
+    const next = try stun_socket.receiveTimeout(io, &bytes, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+    const id = try quicz.connectivity.stun.decodeBindingRequest(next.data);
+    var target = next.from;
+    try std.testing.expectEqual(port, target.getPort());
+    const wrong = quicz.connectivity.stun.encodeBindingSuccessIpv4(old_id, .{ 192, 0, 2, 1 }, 41001);
+    try stun_socket.send(io, &target, &wrong);
+    const forged = quicz.connectivity.stun.encodeBindingSuccessIpv4(id, .{ 192, 0, 2, 1 }, 41002);
+    try foreign.send(io, &target, &forged);
+    try std.testing.expectError(error.StunUnavailable, second.await(io));
+    var third = try io.concurrent(Server.discoverReflexiveAddress, .{ &server, stun_socket.address, quicz.connectivity.stun_transaction.Config{ .timeout_ms = 100, .max_attempts = 1 } });
+    defer _ = third.cancel(io) catch {};
+    const last = try stun_socket.receiveTimeout(io, &bytes, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+    const last_id = try quicz.connectivity.stun.decodeBindingRequest(last.data);
+    const response = quicz.connectivity.stun.encodeBindingSuccessIpv4(last_id, .{ 192, 0, 2, 1 }, 41003);
+    try stun_socket.send(io, &target, &response);
+    try std.testing.expectEqual(@as(u16, 41003), (try third.await(io)).ipv4.port);
+}
 
 test "server runtime answers an authenticated probe after socket handoff" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -412,6 +497,7 @@ pub const Server = struct {
     /// Borrowed active-punch coordinator for this shared socket.
     shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
     shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
+    stun_binding: StunBinding = .{},
 
     mutex: std.atomic.Mutex = .unlocked,
     conns: std.AutoHashMap(u64, *ConnState),
@@ -535,6 +621,13 @@ pub const Server = struct {
         };
     }
 
+    /// Refresh this socket's mapping while the normal runtime remains its
+    /// only receiver. STUN cancellation does not interrupt active QUIC streams.
+    pub fn discoverReflexiveAddress(self: *Server, server: std.Io.net.IpAddress, config: quicz.connectivity.stun_transaction.Config) !quicz.connectivity.stun.MappedAddress {
+        if (!self.started) return error.ServerNotStarted;
+        return self.stun_binding.discover(self.io, &self.socket, server, config);
+    }
+
     /// Wake the drive loop after an externally-owned shared punch coordinator
     /// registers or removes an attempt.
     pub fn wake(self: *Server) void {
@@ -543,6 +636,7 @@ pub const Server = struct {
 
     /// Signal the drive task and all accept/receive loops to stop.
     pub fn stop(self: *Server) void {
+        self.stun_binding.stop(self.io);
         @atomicStore(bool, &self.stopping, true, .release);
         // Wake a blocked accept loop so it observes `stopping`.
         self.accept_sem.post(self.io);
@@ -907,6 +1001,7 @@ pub const Server = struct {
     /// Route one datagram through the endpoint (accept or routed step) and
     /// deliver stream data to per-connection queues.
     fn processDatagram(self: *Server, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
+        if (self.stun_binding.receive(io, from, data)) return;
         if (self.shared_punch_coordinator) |coordinator| {
             const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
             switch (coordinator.receive(from, now_ms, data)) {
