@@ -170,6 +170,8 @@ exe.root_module.addImport("quicz", quicz_dep.module("quicz"));
 | `examples/` | 可运行示例和互通探针 |
 | `docs/en/` / `docs/zh-CN/` | 设计文档和任务矩阵 |
 
+移动端/P2P实验记录见[P2P Connectivity Spike](docs/zh-CN/p2p-connectivity-spike.md)。当前只完成iOS ABI、STUN codec和自适应路径选择基础，尚不声明生产级NAT穿透。
+
 ## 许可证
 
 MIT。见 [LICENSE](LICENSE)。
