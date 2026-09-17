@@ -882,8 +882,26 @@ pub const Server = struct {
                 if (self.shared_punch_failure_handler) |handler| handler(failure);
                 _ = coordinator.remove(failure.attempt_id);
             },
+            .validated => |attempt_id| self.retainSharedResponder(attempt_id),
             else => return,
         };
+    }
+
+    fn retainSharedResponder(self: *Server, attempt_id: quicz.connectivity.punch_wire.AttemptId) void {
+        const coordinator = self.shared_punch_coordinator orelse return;
+        var attempt = coordinator.takeValidated(attempt_id) catch return;
+        defer attempt.deinit();
+        if (self.punch_responder_registry) |responders| {
+            const lifetime_ms = std.math.mul(u32, attempt.punch.config.maximum_retry_ms, 2) catch return;
+            responders.register(quicz.connectivity.punch_responder.PunchResponder.init(
+                attempt.punch.key,
+                attempt.punch.attempt_id,
+                attempt.punch.local_nonce,
+                attempt.remote,
+                self.nowNanos(),
+                lifetime_ms,
+            ) catch return) catch {};
+        }
     }
 
     /// Route one datagram through the endpoint (accept or routed step) and
@@ -899,19 +917,7 @@ pub const Server = struct {
                     return;
                 },
                 .validated => |attempt_id| {
-                    if (self.punch_responder_registry) |responders| {
-                        var attempt = coordinator.takeValidated(attempt_id) catch return;
-                        defer attempt.deinit();
-                        const lifetime_ms = std.math.mul(u32, attempt.punch.config.maximum_retry_ms, 2) catch return;
-                        responders.register(quicz.connectivity.punch_responder.PunchResponder.init(
-                            attempt.punch.key,
-                            attempt.punch.attempt_id,
-                            attempt.punch.local_nonce,
-                            attempt.remote,
-                            self.nowNanos(),
-                            lifetime_ms,
-                        ) catch return) catch {};
-                    }
+                    self.retainSharedResponder(attempt_id);
                     return;
                 },
                 .probe, .failed => return,

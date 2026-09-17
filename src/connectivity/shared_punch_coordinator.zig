@@ -102,6 +102,10 @@ pub const SharedPunchCoordinator = struct {
         defer coordinator.mutex.unlock();
         var iterator = coordinator.attempts.valueIterator();
         while (iterator.next()) |attempt| {
+            // A final peer probe needs both an ACK and a completion event.
+            // receive returns the ACK first; retain completion until handoff.
+            if (attempt.punch.state == .validated)
+                return .{ .validated = attempt.punch.attempt_id };
             const elapsed = now_ms -| attempt.started_ms;
             if (attempt.punch.nextProbe(elapsed)) |packet| {
                 attempt.punch.diagnostics.probe_sends +|= 1;
@@ -132,6 +136,7 @@ pub const SharedPunchCoordinator = struct {
         var iterator = coordinator.attempts.valueIterator();
         var earliest: ?u64 = null;
         while (iterator.next()) |attempt| {
+            if (attempt.punch.state == .validated) return attempt.started_ms;
             if (attempt.punch.state != .probing) continue;
             const deadline = std.math.add(u64, attempt.started_ms, attempt.punch.next_probe_ms) catch std.math.maxInt(u64);
             if (earliest == null or deadline < earliest.?) earliest = deadline;
@@ -151,11 +156,11 @@ pub const SharedPunchCoordinator = struct {
         defer coordinator.mutex.unlock();
         const attempt_id = wire.routingAttemptId(packet) catch return .idle;
         const attempt = coordinator.attempts.getPtr(attempt_id) orelse return .idle;
+        attempt.punch.diagnostics.datagrams_received +|= 1;
         if (!sameAddress(from, attempt.remote)) {
             attempt.punch.diagnostics.source_rejected +|= 1;
             return .idle;
         }
-        attempt.punch.diagnostics.datagrams_received +|= 1;
         const result = attempt.punch.receive(packet) catch return .idle;
         if (result.acknowledgement) |acknowledgement| {
             attempt.punch.diagnostics.acknowledgement_sends +|= 1;
@@ -303,4 +308,49 @@ test "shared coordinator exposes absolute probe deadlines" {
     try std.testing.expectEqual(@as(u64, 300), failure.duration_ms);
     try std.testing.expect(!failure.peer_probe_received);
     try std.testing.expect(!failure.local_probe_acknowledged);
+}
+
+test "shared coordinator reports validation after replying to the final peer probe" {
+    var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 1);
+    defer coordinator.deinit();
+    const remote = std.Io.net.IpAddress{ .ip4 = .loopback(4001) };
+    const key: wire.Key = @splat(0x41);
+    const local_nonce: wire.Nonce = @splat(0xa1);
+    for (1..7) |sequence| {
+        const id: wire.AttemptId = @splat(@as(u8, @intCast(sequence)));
+        try coordinator.register(remote, try .init(key, id, local_nonce, .{}), 1000);
+        try std.testing.expect(coordinator.next(1000) == .probe);
+        const ack = wire.encode(key, .{ .kind = .acknowledgement, .attempt_id = id, .nonce = local_nonce });
+        try std.testing.expectEqual(Event.idle, coordinator.receive(remote, 1001, &ack));
+        const probe = wire.encode(key, .{ .kind = .probe, .attempt_id = id, .nonce = @splat(0xb1) });
+        try std.testing.expect(coordinator.receive(remote, 1002, &probe) == .acknowledgement);
+        try std.testing.expectEqual(Event{ .validated = id }, coordinator.next(1002));
+        var validated = try coordinator.takeValidated(id);
+        validated.deinit();
+        try std.testing.expectEqual(Event.idle, coordinator.next(1002));
+    }
+}
+
+test "shared coordinator reports rejected source as a received datagram" {
+    var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 1);
+    defer coordinator.deinit();
+    const remote = std.Io.net.IpAddress{ .ip4 = .loopback(4001) };
+    const other = std.Io.net.IpAddress{ .ip4 = .loopback(4002) };
+    const key: wire.Key = @splat(0x41);
+    const id: wire.AttemptId = @splat(0x11);
+    try coordinator.register(remote, try .init(key, id, @splat(0xa1), .{
+        .initial_retry_ms = 100,
+        .maximum_retry_ms = 100,
+        .max_attempts = 1,
+    }), 1000);
+    _ = coordinator.next(1000);
+    const probe = wire.encode(key, .{ .kind = .probe, .attempt_id = id, .nonce = @splat(0xb1) });
+    try std.testing.expectEqual(Event.idle, coordinator.receive(other, 1001, &probe));
+    const failure = switch (coordinator.next(1100)) {
+        .failed => |value| value,
+        else => return error.ExpectedFailure,
+    };
+    try std.testing.expectEqual(@as(u32, 1), failure.diagnostics.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 1), failure.diagnostics.source_rejected);
+    try std.testing.expectEqual(@as(u32, 0), failure.diagnostics.packets_checked);
 }
