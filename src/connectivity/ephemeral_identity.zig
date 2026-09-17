@@ -24,13 +24,25 @@ pub fn generate(
     io: std.Io,
     now_seconds: u64,
 ) !Identity {
+    return generateWithLifetime(allocator, io, now_seconds, default_lifetime_seconds);
+}
+
+/// Generates a memory-only identity with a caller-owned lifetime policy.
+/// Long-running endpoints may use a process-scoped lifetime while retaining
+/// exact certificate pinning and rotating the key on process restart.
+pub fn generateWithLifetime(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    now_seconds: u64,
+    lifetime_seconds: u64,
+) !Identity {
     var serial: [16]u8 = undefined;
     io.random(&serial);
     serial[0] &= 0x7f;
     if (serial[0] == 0) serial[0] = 1;
     var key_pair = Ed25519.KeyPair.generate(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair.secret_key));
-    return generateFromKeyPair(allocator, &key_pair, serial, now_seconds, default_lifetime_seconds);
+    return generateFromKeyPair(allocator, &key_pair, serial, now_seconds, lifetime_seconds);
 }
 
 fn generateFromKeyPair(
@@ -215,4 +227,17 @@ test "ephemeral identity is a valid self-signed Host certificate" {
         error.CertificateExpired,
         bundle.verify(parsed, @intCast(identity.expires_at_seconds + 1)),
     );
+}
+
+test "caller-selected identity lifetime preserves exact certificate expiry" {
+    const now_seconds: u64 = 1_800_000_000;
+    const lifetime_seconds: u64 = 365 * 24 * 60 * 60;
+    var identity = try generateWithLifetime(
+        std.testing.allocator,
+        std.testing.io,
+        now_seconds,
+        lifetime_seconds,
+    );
+    defer identity.deinit(std.testing.allocator);
+    try std.testing.expectEqual(now_seconds + lifetime_seconds, identity.expires_at_seconds);
 }
