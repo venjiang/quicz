@@ -64,6 +64,18 @@ pub fn decode(key: Key, packet: []const u8) !Message {
     return .{ .kind = kind, .attempt_id = attempt_id, .nonce = nonce };
 }
 
+/// Returns only an untrusted routing hint. Callers must still authenticate the
+/// full packet with the matching attempt key before treating it as belonging to
+/// that attempt.
+pub fn routingAttemptId(packet: []const u8) !AttemptId {
+    if (packet.len != packet_length) return error.InvalidPacketLength;
+    if (!std.mem.eql(u8, packet[0..magic.len], magic)) return error.InvalidMagic;
+    if (!std.mem.allEqual(u8, packet[9..12], 0)) return error.InvalidReservedBits;
+    var attempt_id: AttemptId = undefined;
+    @memcpy(&attempt_id, packet[12..28]);
+    return attempt_id;
+}
+
 pub fn acknowledgement(key: Key, probe: Message) ![packet_length]u8 {
     if (probe.kind != .probe) return error.NotProbe;
     return encode(key, .{
