@@ -65,6 +65,55 @@ test "server runtime answers an authenticated probe after socket handoff" {
     );
 }
 
+test "server runtime isolates authenticated probes for concurrent attempts" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var first_peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer first_peer.close(io);
+    var second_peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer second_peer.close(io);
+    var responders = try quicz.connectivity.punch_responder.PunchResponderRegistry.init(std.testing.allocator, 2);
+    defer responders.deinit();
+    const now: i64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+    try responders.register(try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, first_peer.address, now, 5_000));
+    try responders.register(try .init(.{0x42} ** 32, .{0x22} ** 16, .{0xa2} ** 16, second_peer.address, now, 5_000));
+    var server = try Server.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 2,
+        .punch_responder_registry = &responders,
+    });
+    defer server.deinit();
+    try server.start();
+    const first_probe = quicz.connectivity.punch_wire.encode(.{0x41} ** 32, .{
+        .kind = .probe,
+        .attempt_id = .{0x11} ** 16,
+        .nonce = .{0xb1} ** 16,
+    });
+    const second_probe = quicz.connectivity.punch_wire.encode(.{0x42} ** 32, .{
+        .kind = .probe,
+        .attempt_id = .{0x22} ** 16,
+        .nonce = .{0xb2} ** 16,
+    });
+    try first_peer.send(io, &server.socket.address, &first_probe);
+    try second_peer.send(io, &server.socket.address, &second_probe);
+    var first_buffer: [128]u8 = undefined;
+    var second_buffer: [128]u8 = undefined;
+    const first_ack = try first_peer.receiveTimeout(io, &first_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(500) } });
+    const second_ack = try second_peer.receiveTimeout(io, &second_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(500) } });
+    const first_message = try quicz.connectivity.punch_wire.decode(.{0x41} ** 32, first_ack.data);
+    const second_message = try quicz.connectivity.punch_wire.decode(.{0x42} ** 32, second_ack.data);
+    try std.testing.expectEqual(@as([16]u8, @splat(0x11)), first_message.attempt_id);
+    try std.testing.expectEqual(@as([16]u8, @splat(0x22)), second_message.attempt_id);
+    try std.testing.expect(responders.remove(.{0x11} ** 16));
+    try first_peer.send(io, &server.socket.address, &first_probe);
+    try std.testing.expectError(error.Timeout, first_peer.receiveTimeout(io, &first_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }));
+}
+
 const Connection = quicz.Connection;
 const Tls13ServerTransport = quicz.Tls13ServerTransport;
 const endpoint = quicz.endpoint;
@@ -357,6 +406,9 @@ pub const Server = struct {
     prefer_chacha20: bool = false,
     max_idle_timeout_ms: u64 = 30_000,
     punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
+    /// Optional externally-owned dynamic responders for attempts sharing this
+    /// UDP socket. The caller must keep the registry alive until deinit.
+    punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
 
     mutex: std.atomic.Mutex = .unlocked,
     conns: std.AutoHashMap(u64, *ConnState),
@@ -401,6 +453,9 @@ pub const Server = struct {
         /// Optional authenticated probe handler retained after this runtime
         /// takes ownership of a connectivity-validated UDP socket.
         punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
+        /// Dynamic attempt responders for a Host-level shared endpoint. This
+        /// registry is borrowed, never cleared or deinitialized by Server.
+        punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Server {
@@ -447,6 +502,7 @@ pub const Server = struct {
             .prefer_chacha20 = config.prefer_chacha20,
             .max_idle_timeout_ms = config.max_idle_timeout_ms,
             .punch_responder = config.punch_responder,
+            .punch_responder_registry = config.punch_responder_registry,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
             .datagram_pool = DatagramPool.init(allocator),
@@ -804,7 +860,17 @@ pub const Server = struct {
     /// Route one datagram through the endpoint (accept or routed step) and
     /// deliver stream data to per-connection queues.
     fn processDatagram(self: *Server, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
-        if (self.punch_responder) |responder| {
+        if (self.punch_responder_registry) |responders| {
+            switch (responders.handle(from, self.nowNanos(), data)) {
+                .not_punch => {},
+                .consumed => return,
+                .acknowledgement => |acknowledgement| {
+                    var destination = from;
+                    self.socket.send(io, &destination, &acknowledgement) catch {};
+                    return;
+                },
+            }
+        } else if (self.punch_responder) |responder| {
             switch (responder.handle(from, self.nowNanos(), data)) {
                 .not_punch => {},
                 .consumed => return,
