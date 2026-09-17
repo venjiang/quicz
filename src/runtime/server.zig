@@ -532,6 +532,12 @@ pub const Server = struct {
         };
     }
 
+    /// Wake the drive loop after an externally-owned shared punch coordinator
+    /// registers or removes an attempt.
+    pub fn wake(self: *Server) void {
+        self.notifyDrive(self.io);
+    }
+
     /// Signal the drive task and all accept/receive loops to stop.
     pub fn stop(self: *Server) void {
         @atomicStore(bool, &self.stopping, true, .release);
