@@ -1232,6 +1232,10 @@ pub const Server = struct {
     /// the drive task. Checked after the park snapshot to close the window
     /// between draining and the snapshot (see drive()).
     fn hasPendingWork(self: *Server) bool {
+        if (self.shared_punch_coordinator) |coordinator| {
+            const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+            if (coordinator.nextDeadlineMs()) |deadline| if (deadline <= now_ms) return true;
+        }
         while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
         const datagrams_queued = self.datagram_read_offset < self.datagram_queue.items.len;
         self.queue_mutex.unlock();
@@ -1280,9 +1284,14 @@ pub const Server = struct {
             // returns immediately.
             if (self.hasPendingWork()) continue;
             const timeout: std.Io.Timeout = timeout: {
-                const deadline = self.server_ep.nextDeadlineWithScratch() catch break :timeout .none;
-                const d = deadline orelse break :timeout .none;
-                break :timeout .{ .deadline = .{ .raw = .{ .nanoseconds = d.deadline_nanos }, .clock = .awake } };
+                var deadline_nanos: ?i64 = null;
+                if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
+                if (self.shared_punch_coordinator) |coordinator| if (coordinator.nextDeadlineMs()) |deadline_ms| {
+                    const nanos = std.math.mul(u64, deadline_ms, 1_000_000) catch std.math.maxInt(u64);
+                    const punch_nanos: i64 = @intCast(@min(nanos, std.math.maxInt(i64)));
+                    if (deadline_nanos == null or punch_nanos < deadline_nanos.?) deadline_nanos = punch_nanos;
+                };
+                break :timeout if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
             };
             io.futexWaitTimeout(u32, &self.wake_id.raw, snapshot, timeout) catch return;
         }
