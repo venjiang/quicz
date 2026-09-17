@@ -36,12 +36,20 @@ pub const Outbound = struct {
     packet: [wire.packet_length]u8,
 };
 
+pub const Failure = struct {
+    attempt_id: wire.AttemptId,
+    diagnostics: punch_attempt.Diagnostics,
+    duration_ms: u64,
+    peer_probe_received: bool,
+    local_probe_acknowledged: bool,
+};
+
 pub const Event = union(enum) {
     idle,
     probe: Outbound,
     acknowledgement: Outbound,
     validated: wire.AttemptId,
-    failed: wire.AttemptId,
+    failed: Failure,
 };
 
 pub const SharedPunchCoordinator = struct {
@@ -105,7 +113,13 @@ pub const SharedPunchCoordinator = struct {
             }
             if (attempt.punch.state == .failed and !attempt.failure_reported) {
                 attempt.failure_reported = true;
-                return .{ .failed = attempt.punch.attempt_id };
+                return .{ .failed = .{
+                    .attempt_id = attempt.punch.attempt_id,
+                    .diagnostics = attempt.punch.diagnostics,
+                    .duration_ms = elapsed,
+                    .peer_probe_received = attempt.punch.peer_probe_received,
+                    .local_probe_acknowledged = attempt.punch.local_probe_acknowledged,
+                } };
             }
         }
         return .idle;
@@ -280,5 +294,13 @@ test "shared coordinator exposes absolute probe deadlines" {
     try std.testing.expectEqual(@as(?u64, 1_100), coordinator.nextDeadlineMs());
     try std.testing.expect(coordinator.next(1_100) == .probe);
     try std.testing.expectEqual(@as(?u64, 1_300), coordinator.nextDeadlineMs());
-    try std.testing.expect(coordinator.next(1_300) == .failed);
+    const failure = switch (coordinator.next(1_300)) {
+        .failed => |value| value,
+        else => return error.ExpectedFailure,
+    };
+    try std.testing.expectEqual(@as([16]u8, @splat(0x11)), failure.attempt_id);
+    try std.testing.expectEqual(@as(u32, 2), failure.diagnostics.probe_sends);
+    try std.testing.expectEqual(@as(u64, 300), failure.duration_ms);
+    try std.testing.expect(!failure.peer_probe_received);
+    try std.testing.expect(!failure.local_probe_acknowledged);
 }

@@ -411,6 +411,7 @@ pub const Server = struct {
     punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
     /// Borrowed active-punch coordinator for this shared socket.
     shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
+    shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
 
     mutex: std.atomic.Mutex = .unlocked,
     conns: std.AutoHashMap(u64, *ConnState),
@@ -459,6 +460,7 @@ pub const Server = struct {
         /// registry is borrowed, never cleared or deinitialized by Server.
         punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
         shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
+        shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Server {
@@ -507,6 +509,7 @@ pub const Server = struct {
             .punch_responder = config.punch_responder,
             .punch_responder_registry = config.punch_responder_registry,
             .shared_punch_coordinator = config.shared_punch_coordinator,
+            .shared_punch_failure_handler = config.shared_punch_failure_handler,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
             .datagram_pool = DatagramPool.init(allocator),
@@ -875,7 +878,10 @@ pub const Server = struct {
                 var destination = outbound.destination;
                 self.socket.send(io, &destination, &outbound.packet) catch {};
             },
-            .failed => |attempt_id| _ = coordinator.remove(attempt_id),
+            .failed => |failure| {
+                if (self.shared_punch_failure_handler) |handler| handler(failure);
+                _ = coordinator.remove(failure.attempt_id);
+            },
             else => return,
         };
     }
