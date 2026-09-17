@@ -409,6 +409,8 @@ pub const Server = struct {
     /// Optional externally-owned dynamic responders for attempts sharing this
     /// UDP socket. The caller must keep the registry alive until deinit.
     punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
+    /// Borrowed active-punch coordinator for this shared socket.
+    shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
 
     mutex: std.atomic.Mutex = .unlocked,
     conns: std.AutoHashMap(u64, *ConnState),
@@ -456,6 +458,7 @@ pub const Server = struct {
         /// Dynamic attempt responders for a Host-level shared endpoint. This
         /// registry is borrowed, never cleared or deinitialized by Server.
         punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
+        shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Server {
@@ -503,6 +506,7 @@ pub const Server = struct {
             .max_idle_timeout_ms = config.max_idle_timeout_ms,
             .punch_responder = config.punch_responder,
             .punch_responder_registry = config.punch_responder_registry,
+            .shared_punch_coordinator = config.shared_punch_coordinator,
             .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
             .datagram_queue = .empty,
             .datagram_pool = DatagramPool.init(allocator),
@@ -857,9 +861,50 @@ pub const Server = struct {
         }
     }
 
+    fn drainSharedPunches(self: *Server, io: std.Io) void {
+        const coordinator = self.shared_punch_coordinator orelse return;
+        const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+        while (true) switch (coordinator.next(now_ms)) {
+            .probe => |outbound| {
+                var destination = outbound.destination;
+                self.socket.send(io, &destination, &outbound.packet) catch {};
+            },
+            .failed => |attempt_id| _ = coordinator.remove(attempt_id),
+            else => return,
+        };
+    }
+
     /// Route one datagram through the endpoint (accept or routed step) and
     /// deliver stream data to per-connection queues.
     fn processDatagram(self: *Server, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
+        if (self.shared_punch_coordinator) |coordinator| {
+            const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+            switch (coordinator.receive(from, now_ms, data)) {
+                .idle => {},
+                .acknowledgement => |outbound| {
+                    var destination = outbound.destination;
+                    self.socket.send(io, &destination, &outbound.packet) catch {};
+                    return;
+                },
+                .validated => |attempt_id| {
+                    if (self.punch_responder_registry) |responders| {
+                        var attempt = coordinator.takeValidated(attempt_id) catch return;
+                        defer attempt.deinit();
+                        const lifetime_ms = std.math.mul(u32, attempt.punch.config.maximum_retry_ms, 2) catch return;
+                        responders.register(quicz.connectivity.punch_responder.PunchResponder.init(
+                            attempt.punch.key,
+                            attempt.punch.attempt_id,
+                            attempt.punch.local_nonce,
+                            attempt.remote,
+                            self.nowNanos(),
+                            lifetime_ms,
+                        ) catch return) catch {};
+                    }
+                    return;
+                },
+                .probe, .failed => return,
+            }
+        }
         if (self.punch_responder_registry) |responders| {
             switch (responders.handle(from, self.nowNanos(), data)) {
                 .not_punch => {},
@@ -1207,6 +1252,7 @@ pub const Server = struct {
         while (!@atomicLoad(bool, &self.stopping, .acquire)) {
             self.drainOutgoing(io, allocator);
             self.drainQueuedDatagrams(io, allocator);
+            self.drainSharedPunches(io);
             self.serviceDueDeadlines(io, allocator);
             // Park until a datagram arrives, a handler queues a send, stop()
             // runs, or the next lifecycle deadline comes due. The snapshot is

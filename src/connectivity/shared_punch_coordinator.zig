@@ -106,6 +106,18 @@ pub const SharedPunchCoordinator = struct {
         return .idle;
     }
 
+    /// Absolute awake-clock deadline for the next probe or failure transition.
+    pub fn nextDeadlineMs(coordinator: *const SharedPunchCoordinator) ?u64 {
+        var iterator = coordinator.attempts.valueIterator();
+        var earliest: ?u64 = null;
+        while (iterator.next()) |attempt| {
+            if (attempt.punch.state != .probing) continue;
+            const deadline = std.math.add(u64, attempt.started_ms, attempt.punch.next_probe_ms) catch std.math.maxInt(u64);
+            if (earliest == null or deadline < earliest.?) earliest = deadline;
+        }
+        return earliest;
+    }
+
     /// Consumes only packets for a registered, authenticated attempt from its
     /// nominated remote. Unrecognized traffic remains available to QUIC.
     pub fn receive(
@@ -233,4 +245,21 @@ test "shared coordinator rejects wrong source and cancellation does not cross at
     try std.testing.expect(coordinator.remove(.{0x11} ** 16));
     const second_probe = wire.encode(.{0x42} ** 32, .{ .kind = .probe, .attempt_id = .{0x22} ** 16, .nonce = .{0xb2} ** 16 });
     try std.testing.expect(coordinator.receive(other, 1, &second_probe) != .idle);
+}
+
+test "shared coordinator exposes absolute probe deadlines" {
+    const remote = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 4_001 } };
+    var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 1);
+    defer coordinator.deinit();
+    try coordinator.register(remote, try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{
+        .initial_retry_ms = 100,
+        .maximum_retry_ms = 200,
+        .max_attempts = 2,
+    }), 1_000);
+    try std.testing.expectEqual(@as(?u64, 1_000), coordinator.nextDeadlineMs());
+    try std.testing.expect(coordinator.next(1_000) == .probe);
+    try std.testing.expectEqual(@as(?u64, 1_100), coordinator.nextDeadlineMs());
+    try std.testing.expect(coordinator.next(1_100) == .probe);
+    try std.testing.expectEqual(@as(?u64, 1_300), coordinator.nextDeadlineMs());
+    try std.testing.expect(coordinator.next(1_300) == .failed);
 }
