@@ -1276,8 +1276,8 @@ pub const Client = struct {
         if (!self.client.transport.connection.isClosingOrClosed()) return;
         @atomicStore(bool, &self.conn_closing_or_closed, true, .release);
         const conn = self.client.transport.connection;
-        if (self.close_initiated and conn.peer_close == null) {
-            log.debug("client: connection closing after close request: {}", .{conn.connectionState()});
+        if (self.close_initiated or conn.peer_close != null) {
+            log.debug("client: connection closing: {} peer_close={}", .{ conn.connectionState(), conn.peer_close != null });
         } else {
             log.err("client: connection entered closing/closed state: {} peer_close={} pending_close={}", .{
                 conn.connectionState(),

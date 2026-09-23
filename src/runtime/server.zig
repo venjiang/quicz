@@ -370,6 +370,9 @@ const ConnState = struct {
     /// (single-owner reclamation; s2n-quic uses a handle refcount here,
     /// which only pays off when one connection has several handlers).
     handler_done: bool = false,
+    /// Set by a handler; the drive task alone changes the QUIC connection.
+    close_requested: bool = false,
+    close_error_code: u64 = 0,
     /// Cached `conn.isClosingOrClosed()`, refreshed by the drive task while
     /// the endpoint record is alive. The endpoint reclaims records of closed
     /// connections during deadline queries; after that the connection pointer
@@ -798,6 +801,20 @@ pub const Server = struct {
             cs.handler_done = true;
         }
         self.mutex.unlock();
+        self.notifyDrive(self.io);
+    }
+
+    /// Ask the drive task to close one connection without stopping the server.
+    /// Safe to call after a handler's stream bridge fails; repeated requests
+    /// and already-closed connections are ignored.
+    pub fn closeConnection(self: *Server, conn_id: u64, application_error_code: u64) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        if (self.conns.get(conn_id)) |cs| {
+            cs.close_requested = true;
+            cs.close_error_code = application_error_code;
+        }
+        self.mutex.unlock();
+        self.notifyDrive(self.io);
     }
 
     /// Raise SO_RCVBUF so client bursts do not overflow the kernel receive
@@ -825,6 +842,13 @@ pub const Server = struct {
             // record is alive. The cached close state keeps this ConnState
             // reclaimable after the record is gone.
             const record_alive = self.server_ep.records.get(st.handle) != null;
+            if (st.close_requested) {
+                st.close_requested = false;
+                if (record_alive and !st.conn.isClosingOrClosed()) {
+                    st.conn.closeApplication(st.close_error_code, "") catch |err|
+                        log.err("connection {d} close failed: {}", .{ st.handle, err });
+                }
+            }
             const closing_now = if (record_alive) st.conn.isClosingOrClosed() else true;
             const closing_prev = @atomicRmw(bool, &st.closing_or_closed, .Xchg, closing_now, .acq_rel);
             if (closing_now and !closing_prev) {
@@ -1348,16 +1372,18 @@ pub const Server = struct {
         self.queue_mutex.unlock();
         if (datagrams_queued) return true;
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        var send_pending = false;
+        var pending = false;
         var it = self.conns.valueIterator();
         while (it.next()) |csp| {
-            if (csp.*.send_pending) {
-                send_pending = true;
+            if (csp.*.send_pending or csp.*.close_requested or
+                (csp.*.handler_done and csp.*.closing_or_closed))
+            {
+                pending = true;
                 break;
             }
         }
         self.mutex.unlock();
-        return send_pending;
+        return pending;
     }
 
     /// The connection driving task body: drain sends, process queued
