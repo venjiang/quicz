@@ -247,6 +247,8 @@ const Connection = quicz.Connection;
 const Tls13ServerTransport = quicz.Tls13ServerTransport;
 const endpoint = quicz.endpoint;
 const quic_packet = quicz.packet;
+/// Aggregate capacity that multiple address-family listeners can borrow.
+pub const ConnectionAdmission = @import("connection_admission.zig").ConnectionAdmission;
 
 /// Receive-buffer / datagram-pool size (UDP payload allowance).
 const max_datagram_size: usize = 8192;
@@ -269,6 +271,7 @@ const ServerRecord = struct {
     handle: u64,
     transport: Tls13ServerTransport,
     retry_validated: bool = false,
+    admission: ?*ConnectionAdmission = null,
 
     fn connectionRef(self: *@This()) *Connection {
         return self.transport.connectionRef();
@@ -294,6 +297,7 @@ const ServerRecord = struct {
     }
     fn deinit(self: *@This()) void {
         self.transport.deinit();
+        if (self.admission) |admission| admission.release();
     }
 };
 
@@ -545,6 +549,8 @@ pub fn ServerForTuple(comptime Path: type) type {
         io: std.Io,
         socket: std.Io.net.Socket,
         server_ep: RuntimeEndpoint,
+        /// Borrowed until deinit completes. Each record holds one reservation.
+        connection_admission: ?*ConnectionAdmission = null,
         next_handle: u64 = 1,
         alpn: []const []const u8,
         cert_der: []const u8,
@@ -642,6 +648,14 @@ pub fn ServerForTuple(comptime Path: type) type {
                 .datagram_queue = .empty,
                 .datagram_pool = DatagramPool.init(allocator),
             };
+        }
+
+        /// Attach one shared pending/active limit before any records are admitted.
+        /// The caller owns the limit and must keep it alive through deinit.
+        pub fn attachConnectionAdmission(self: *ServerSelf, admission: *ConnectionAdmission) !void {
+            if (self.started or self.server_ep.records.count() != 0) return error.ServerAlreadyStarted;
+            if (self.connection_admission != null) return error.ConnectionAdmissionAlreadyAttached;
+            self.connection_admission = admission;
         }
 
         pub fn start(self: *ServerSelf) !void {
@@ -1122,6 +1136,11 @@ pub fn ServerForTuple(comptime Path: type) type {
 
             switch (action) {
                 .accept_initial => |initial_accept| {
+                    if (self.connection_admission) |admission| if (!admission.tryAcquire()) return;
+                    var runtime_owns_reservation = true;
+                    defer if (runtime_owns_reservation) {
+                        if (self.connection_admission) |admission| admission.release();
+                    };
                     const handle = self.next_handle;
                     self.next_handle += 1;
                     var server_scid: [8]u8 = undefined;
@@ -1133,6 +1152,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                     const cert_chain = [_][]const u8{self.cert_der};
                     record.* = .{
                         .handle = handle,
+                        .admission = self.connection_admission,
                         .transport = Tls13ServerTransport.init(allocator, .{
                             .initial_max_data = 10_485_760,
                             .initial_max_stream_data = 10_485_760,
@@ -1165,15 +1185,20 @@ pub fn ServerForTuple(comptime Path: type) type {
                         allocator.destroy(record);
                         return;
                     };
+                    runtime_owns_reservation = false;
                     record.transport.setOriginalDestinationConnectionId(initial_info.dcid) catch |e| {
                         log.err("drive: setOriginalDestinationConnectionId: {}", .{e});
                     };
-                    const accepted = self.server_ep.acceptInitialRecord(handle, record, now, initial_accept, &server_scid, data, .{ .active_migration_disabled = Path == endpoint.Udp6Tuple }, &scratch, &initial_out, &handshake_out) catch |e| {
-                        log.err("drive: acceptInitialRecord: {}", .{e});
-                        record.transport.deinit();
-                        allocator.destroy(record);
+                    const accepted = self.server_ep.acceptOwnedInitialRecord(handle, record, now, initial_accept, &server_scid, data, .{ .active_migration_disabled = Path == endpoint.Udp6Tuple }, &scratch, &initial_out, &handshake_out) catch |e| {
+                        log.err("drive: acceptOwnedInitialRecord: {}", .{e});
                         return;
                     };
+                    defer {
+                        for (initial_out[0..accepted.initial.drain.datagrams_written]) |outbound| allocator.free(outbound.datagram);
+                        if (accepted.handshake) |handshake| {
+                            for (handshake_out[0..handshake.drain.datagrams_written]) |outbound| allocator.free(outbound.datagram);
+                        }
+                    }
                     const cs = allocator.create(ConnState) catch |e| {
                         log.err("drive: allocate ConnState: {}", .{e});
                         return;
@@ -1187,12 +1212,10 @@ pub fn ServerForTuple(comptime Path: type) type {
                     log.info("drive: accepted conn {d}: initial_out={d} handshake={}", .{ handle, accepted.initial.drain.datagrams_written, accepted.handshake != null });
                     for (initial_out[0..accepted.initial.drain.datagrams_written]) |o| {
                         self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send initial response: {}", .{e});
-                        allocator.free(o.datagram);
                     }
                     if (accepted.handshake) |hs| {
                         for (handshake_out[0..hs.drain.datagrams_written]) |o| {
                             self.socket.send(io, &dest, o.datagram) catch {};
-                            allocator.free(o.datagram);
                         }
                     }
                 },

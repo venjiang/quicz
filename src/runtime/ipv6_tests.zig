@@ -8,6 +8,15 @@ const IPv6Client = runtime_client.IPv6Client;
 const IPv6Server = runtime_server.IPv6Server;
 const alpn = [_][]const u8{"quicz-native-ipv6-test"};
 const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(2) } };
+
+fn waitForAdmission(io: std.Io, admission: *const runtime_server.ConnectionAdmission, expected: usize) !void {
+    const started = std.Io.Timestamp.now(io, .awake);
+    while (admission.inUse() != expected) {
+        if (started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() >= 1_000)
+            return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+}
 // Existing localhost identity from the mutual-TLS loopback fixture.
 const private_key = [_]u8{
     0x5b, 0xbf, 0x4f, 0x5a, 0x48, 0x42, 0x9f, 0x00,
@@ -136,6 +145,139 @@ test "IPv6 runtime verifies localhost and echoes a stream after socket handoff" 
     try io.randomSecure(&payload);
     try exchangeWithDeadline(&client, try client.openStream(), &payload);
     client.close();
+}
+
+test "IPv4 and IPv6 listeners share pending and active connection capacity" {
+    for ([_]bool{ true, false }) |pending_handshake| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        var fixture = try Fixture.init(io, @embedFile("../quic/testdata/quicz-echo-ca.pem"));
+        defer fixture.deinit();
+        var admission = runtime_server.ConnectionAdmission.init(1);
+
+        var server4 = try runtime_server.Server.init(std.testing.allocator, io, .{
+            .port = 0,
+            .alpn = &alpn,
+            .cert_der = fixture.cert_der[0..fixture.cert_len],
+            .private_key = &private_key,
+            .max_connections = 2,
+        });
+        var server4_alive = true;
+        defer if (server4_alive) server4.deinit();
+        try server4.attachConnectionAdmission(&admission);
+        try server4.start();
+
+        var server6 = try initHandedOffServer(io, &fixture);
+        var server6_alive = true;
+        defer if (server6_alive) server6.deinit();
+        try server6.attachConnectionAdmission(&admission);
+        try server6.serve(&EchoForServer(IPv6Server).run);
+
+        var holder = try runtime_client.Client.init(std.testing.allocator, io, .{
+            .server_port = server4.localPort(),
+            .server_name = "localhost",
+            .alpn = &alpn,
+            .ca_bundle = &fixture.trust,
+        });
+        var holder_alive = true;
+        defer if (holder_alive) holder.deinit();
+        if (pending_handshake) {
+            // Send only a real ClientHello. No receiver can complete this TLS flight.
+            var scratch: [8192]u8 = undefined;
+            const initial = try holder.client.beginWithRoutePath(0, &scratch);
+            defer std.testing.allocator.free(initial.datagram);
+            try holder.socket.send(io, &server4.socket.address, initial.datagram);
+        } else {
+            try holder.connectWithTimeout(2_000);
+        }
+        try waitForAdmission(io, &admission, 1);
+
+        {
+            var blocked = try initHandedOffClient(io, server6.localPort(), &fixture);
+            defer blocked.deinit();
+            try std.testing.expectError(error.ConnectionTimedOut, blocked.connectWithTimeout(100));
+            try std.testing.expectEqual(@as(usize, 1), admission.inUse());
+        }
+
+        holder.deinit();
+        holder_alive = false;
+        server4.deinit();
+        server4_alive = false;
+        try std.testing.expectEqual(@as(usize, 0), admission.inUse());
+
+        {
+            var admitted = try initHandedOffClient(io, server6.localPort(), &fixture);
+            defer admitted.deinit();
+            try admitted.connectWithTimeout(2_000);
+            try std.testing.expectEqual(@as(usize, 1), admission.inUse());
+            var payload: [4096]u8 = undefined;
+            try io.randomSecure(&payload);
+            try exchangeWithDeadline(&admitted, try admitted.openStream(), &payload);
+            admitted.close();
+        }
+        server6.deinit();
+        server6_alive = false;
+        try std.testing.expectEqual(@as(usize, 0), admission.inUse());
+    }
+}
+
+fn expectIdleAdmissionRelease(comptime Server: type, comptime Client: type) !void {
+    const Handler = struct {
+        fn run(connection: Server.ServerConnection) std.Io.Cancelable!void {
+            var waiting = connection;
+            waiting.waitClosed() catch return;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var fixture = try Fixture.init(io, @embedFile("../quic/testdata/quicz-echo-ca.pem"));
+    defer fixture.deinit();
+    var admission = runtime_server.ConnectionAdmission.init(1);
+    var server = try Server.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &alpn,
+        .cert_der = fixture.cert_der[0..fixture.cert_len],
+        .private_key = &private_key,
+        .max_connections = 2,
+        .max_idle_timeout_ms = 100,
+    });
+    defer server.deinit();
+    try server.attachConnectionAdmission(&admission);
+    try server.serve(&Handler.run);
+    const config: Client.Config = if (Client == IPv6Client) .{
+        .server_port = server.localPort(),
+        .bind_addr = .loopback(0),
+        .server_name = "localhost",
+        .alpn = &alpn,
+        .ca_bundle = &fixture.trust,
+    } else .{
+        .server_port = server.localPort(),
+        .server_name = "localhost",
+        .alpn = &alpn,
+        .ca_bundle = &fixture.trust,
+    };
+    var client = try Client.init(std.testing.allocator, io, config);
+    var client_alive = true;
+    defer if (client_alive) client.deinit();
+    try client.connectWithTimeout(2_000);
+    try std.testing.expectEqual(@as(usize, 1), admission.inUse());
+    // Drop the peer without a QUIC close, then let the server's idle timer retire it.
+    client.deinit();
+    client_alive = false;
+    try waitForAdmission(io, &admission, 0);
+    try std.testing.expect(server.started);
+    var replacement = try Client.init(std.testing.allocator, io, config);
+    defer replacement.deinit();
+    try replacement.connectWithTimeout(2_000);
+    try std.testing.expectEqual(@as(usize, 1), admission.inUse());
+    replacement.close();
+}
+
+test "idle retirement releases shared admission without stopping either family listener" {
+    try expectIdleAdmissionRelease(runtime_server.Server, runtime_client.Client);
+    try expectIdleAdmissionRelease(IPv6Server, IPv6Client);
 }
 
 test "IPv4 runtime verifies localhost and echoes a stream through its legacy configuration" {

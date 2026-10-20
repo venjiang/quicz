@@ -18,6 +18,7 @@ enum quicz_mobile_capability {
     QUICZ_MOBILE_CAPABILITY_MULTIPATH = 1ull << 4,
     QUICZ_MOBILE_CAPABILITY_STUN = 1ull << 5,
     QUICZ_MOBILE_CAPABILITY_HOLE_PUNCH = 1ull << 6,
+    QUICZ_MOBILE_CAPABILITY_NATIVE_IPV6 = 1ull << 7,
 };
 
 enum quicz_mobile_result {
@@ -63,6 +64,40 @@ typedef struct quicz_mobile_punch_config {
     uint8_t reserved[3];
 } quicz_mobile_punch_config;
 
+/* Native integers are ABI fields, not a serialized endpoint format.
+ * This extension accepts scope-zero global unicast or loopback addresses. */
+typedef struct quicz_mobile_ipv6_endpoint {
+    uint8_t address[16];
+    uint16_t port;
+    uint16_t reserved;
+    uint32_t scope_id;
+} quicz_mobile_ipv6_endpoint;
+
+/* Local port zero requests an ephemeral port. Both endpoints are explicit;
+ * unspecified, mapped, scoped, and nonzero-reserved inputs are rejected.
+ * The initial IPv6 client uses a fixed peer path. */
+typedef struct quicz_mobile_client_ipv6_config {
+    quicz_mobile_ipv6_endpoint local;
+    quicz_mobile_ipv6_endpoint remote;
+    const uint8_t *server_name;
+    size_t server_name_length;
+    const uint8_t *alpn;
+    size_t alpn_length;
+    const uint8_t *ca_certificate_der;
+    size_t ca_certificate_der_length;
+} quicz_mobile_client_ipv6_config;
+
+typedef struct quicz_mobile_punch_ipv6_config {
+    quicz_mobile_ipv6_endpoint remote;
+    uint8_t key[32];
+    uint8_t attempt_id[16];
+    uint8_t nonce[16];
+    uint32_t initial_retry_ms;
+    uint32_t maximum_retry_ms;
+    uint8_t max_attempts;
+    uint8_t reserved[3];
+} quicz_mobile_punch_ipv6_config;
+
 enum quicz_mobile_punch_outcome {
     QUICZ_MOBILE_PUNCH_NOT_STARTED = 0,
     QUICZ_MOBILE_PUNCH_VALIDATED = 1,
@@ -106,6 +141,12 @@ int32_t quicz_mobile_client_create(
     const quicz_mobile_client_config *config,
     quicz_mobile_client **client_out
 );
+/* Returns the same opaque owner used by the existing stream operations.
+ * Constructor inputs are copied before this blocking call returns. */
+int32_t quicz_mobile_client_create_ipv6(
+    const quicz_mobile_client_ipv6_config *config,
+    quicz_mobile_client **client_out
+);
 int32_t quicz_mobile_client_connect(quicz_mobile_client *client);
 int32_t quicz_mobile_client_connect_timeout(
     quicz_mobile_client *client,
@@ -131,6 +172,28 @@ int32_t quicz_mobile_client_punch_ipv4(
 int32_t quicz_mobile_client_punch_ipv4_with_diagnostics(
     quicz_mobile_client *client,
     const quicz_mobile_punch_config *config,
+    quicz_mobile_punch_diagnostics *diagnostics_out
+);
+/* Address-specific operations reject a valid owner of the other family. */
+int32_t quicz_mobile_client_bound_ipv6(
+    quicz_mobile_client *client,
+    quicz_mobile_ipv6_endpoint *endpoint_out
+);
+int32_t quicz_mobile_client_discover_ipv6(
+    quicz_mobile_client *client,
+    const quicz_mobile_ipv6_endpoint *stun_server,
+    uint32_t timeout_ms,
+    uint8_t max_attempts,
+    quicz_mobile_ipv6_endpoint *mapped_endpoint_out
+);
+int32_t quicz_mobile_client_punch_ipv6(
+    quicz_mobile_client *client,
+    const quicz_mobile_punch_ipv6_config *config
+);
+/* Same reset-on-entry and failure-output contract as the IPv4 operation. */
+int32_t quicz_mobile_client_punch_ipv6_with_diagnostics(
+    quicz_mobile_client *client,
+    const quicz_mobile_punch_ipv6_config *config,
     quicz_mobile_punch_diagnostics *diagnostics_out
 );
 int32_t quicz_mobile_client_open_bidi(

@@ -89,3 +89,36 @@ The native endpoint, TLS, socket ownership, trust, and stream checks passed. The
 The final default build completed all 182 steps with unchanged example, header, and build sources. The mobile static-library step completed all four steps. Both existing native mobile ABI loopbacks passed, including authenticated punch, CA-verified QUIC, stream echo, repeated connect, a silent-peer deadline, and cleanup. Logs are under `/private/tmp/quicz-cellular-ipv6.nIR61g/` with the `compat-build-` prefix.
 
 These results validate the local IPv6 runtime slice and existing IPv4 consumers. They do not validate an IPv6 mobile ABI or a cellular Mons session. Those integration stages remain pending.
+
+## Mobile ABI integration design
+
+Keep ABI version 1, every existing C symbol, result value, IPv4 structure layout, and the 56-byte diagnostics layout. Add capability bit 7 for the complete native IPv6 path. Keep the same opaque client handle for stream operations. Both old constructors and the new constructor allocate one internal tagged owner. Its tag selects a stable heap allocation of the corresponding tuple-specialized mobile state. Never reinterpret an IPv6 state as the old IPv4 state.
+
+Add an IPv6 endpoint containing sixteen address bytes, a `uint16_t` port, a zero `uint16_t` reserved field, and a `uint32_t` scope ID. Add a separate IPv6 config containing explicit local and remote endpoints and the existing server-name, ALPN, and DER pointer/length inputs. Do not add a migration promise to this config. The initial ABI supports scope-zero global unicast and loopback endpoints. Local port zero is allowed, remote port zero is rejected, and unspecified or mapped addresses are rejected. Scoped connectivity remains outside this ABI slice because the existing punch and STUN source comparators do not compare zones.
+
+The new symbols are `quicz_mobile_client_create_ipv6`, `quicz_mobile_client_bound_ipv6`, `quicz_mobile_client_discover_ipv6`, `quicz_mobile_client_punch_ipv6`, and `quicz_mobile_client_punch_ipv6_with_diagnostics`. The IPv6 punch config keeps the original authentication and retry fields with an IPv6 remote endpoint. No unverified IPv6 constructor is added. Old address-specific operations reject an IPv6 owner, and new operations reject an IPv4 owner. Valid cross-family calls return `INVALID_ARGUMENT`. Diagnostics are cleared before validation. STUN returns a scope-zero mapped endpoint and rejects an IPv4 mapping on the IPv6 operation.
+
+Connect, timeout, open, keepalive, send, receive, close, and destroy dispatch through the owner tag. One generic implementation retains input copies, the CA bundle, the I/O runtime, and the bounded creation thread. Caller inputs may be released after create returns. Close does not destroy storage. The caller must wait for every native operation before destroy. Allocation failures unwind only resources already acquired by that state and owner.
+
+Validation must preserve old header layout, symbols, and native ABI loopbacks. Compare new C layouts with Zig `extern struct` through `b.addTranslateC`. Exercise valid wrong-family handles, reserved and scope rejection, output clearing, small-stack creation, and real IPv6 STUN, authenticated punch, verified TLS, stream transfer, deadline, close, and destroy. Correct and unrelated CA cases are required.
+
+## Shared admission and record ownership design
+
+Two family listeners must borrow one connection limit before allocating a new Initial's TLS state. The owner outlives both servers. An optional attachment method preserves the old runtime Config layouts. A reservation stays with the actual server record through pending and active states and is released exactly once when that record is destroyed. Default callers without an attached limit retain their existing behavior and per-server capacity.
+
+The current `acceptInitialRecord` has mixed failure ownership. Before adoption the caller retains the record. After adoption some timer or backend failures retire and destroy it. Existing tests depend on that actual behavior despite an inaccurate general comment. The runtime catch also destroys the record, so a post-adoption failure can cause a second destruction. Do not attach a reservation to that ambiguous catch.
+
+Preserve the old public entry point and its actual behavior. Add an explicitly owned admission entry point that consumes the supplied record on every outcome. Both entry points use one private implementation with an explicit failure-consumption mode. The new owned entry destroys a record rejected before adoption. Post-adoption retirement continues to own destruction. The runtime uses the owned entry and never dereferences or destroys the record after an error return. Check generated Initial and Handshake datagram ownership on every failure as part of the same state model.
+
+The new owned entry requires caller-owned record storage allocated by the registry allocator. It rejects overlapping nonempty Initial and Handshake output slices with `BufferTooSmall` and consumes that record. Empty slices do not overlap. The legacy entry keeps its original slice behavior. On success, the runtime frees all returned output datagrams through one deferred cleanup even if a later runtime allocation fails.
+
+| Admission state | Record owner | Reservation and failure behavior |
+| --- | --- | --- |
+| Before record allocation | Runtime | Return the reservation if allocation or transport initialization fails. |
+| Record initialized, before owned admission | Runtime record | Transfer into the owned call. Its failure consumes the record and reservation. |
+| Adopted, pending or active | Endpoint registry | Actual retirement or shutdown destroys the record and releases its reservation. |
+| Post-adoption backend or timer failure | Endpoint rollback | The runtime must not inspect the consumed pointer. |
+| Legacy caller, pre-adoption error | Legacy caller | Preserve the existing behavior. No new ownership promise is inferred. |
+| Legacy caller, post-adoption error | Existing endpoint rollback | Preserve the existing behavior and document the boundary accurately. |
+
+Use the existing rejecting Handshake backend to prove a real post-adoption failure. Observe destruction through an external counter so the red test does not inspect freed memory. Cover pre-adoption rejection, post-adoption rejection, success, expiry, and shutdown. Then use real IPv4 and IPv6 servers borrowing a single limit to prove aggregate pending and active capacity and release. These changes are prerequisites for the Mons dual-listener owner, not permission to copy per-family authorization or connection budgets.

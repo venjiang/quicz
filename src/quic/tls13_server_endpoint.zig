@@ -2687,12 +2687,7 @@ pub fn Tls13ServerEndpointForTuple(
             );
         }
 
-        /// Accept an Initial and transfer its record into endpoint ownership.
-        ///
-        /// Route installation, Initial-space TLS driving, bounded Initial
-        /// output, record admission, and the first Handshake-space TLS drive
-        /// succeed together. The caller retains `record` on failure; any route
-        /// or timer installed before that failure is retired.
+        /// Initial admission and its bounded Initial and Handshake output.
         pub const InitialRecordAdmissionResult = struct {
             /// Initial-space processing and bounded output drain.
             initial: PathTypes.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
@@ -2700,6 +2695,12 @@ pub fn Tls13ServerEndpointForTuple(
             handshake: ?endpoint_types.EndpointCryptoBackendDriveDatagramDrainResult = null,
         };
 
+        /// Admit an Initial with the existing ownership boundary.
+        ///
+        /// Before registry adoption, an error leaves `record` with the caller.
+        /// After adoption, an error retires and destroys the record. Generated
+        /// datagrams remain caller-owned, including output written before an
+        /// error. Use `acceptOwnedInitialRecord()` for unconditional transfer.
         pub fn acceptInitialRecord(
             self: *Self,
             connection_id: u64,
@@ -2713,6 +2714,63 @@ pub fn Tls13ServerEndpointForTuple(
             initial_out: []endpoint_types.EndpointPolledDatagramResult,
             handshake_out: []endpoint_types.EndpointPolledDatagramResult,
         ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            return self.acceptInitialRecordImpl(.retain_before_adoption, connection_id, record, now_nanos, initial_accept, server_source_connection_id, datagram, options, scratch, initial_out, handshake_out);
+        }
+
+        /// Consume a caller-owned record on success or error during admission.
+        ///
+        /// Allocate `record` with this endpoint's registry allocator. A record
+        /// already owned by a registry is not valid input. On success, the
+        /// registry owns the record and the caller owns the returned datagrams.
+        /// On error, this method destroys the record and frees generated output,
+        /// then clears those initialized datagram slots. Nonempty output slices
+        /// must not overlap; overlap returns `BufferTooSmall` and consumes the
+        /// record before adoption.
+        pub fn acceptOwnedInitialRecord(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            now_nanos: i64,
+            initial_accept: PathEndpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []endpoint_types.EndpointPolledDatagramResult,
+            handshake_out: []endpoint_types.EndpointPolledDatagramResult,
+        ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            return self.acceptInitialRecordImpl(.consume, connection_id, record, now_nanos, initial_accept, server_source_connection_id, datagram, options, scratch, initial_out, handshake_out);
+        }
+
+        const AdmissionFailureOwnership = enum { retain_before_adoption, consume };
+
+        fn acceptInitialRecordImpl(
+            self: *Self,
+            comptime failure_ownership: AdmissionFailureOwnership,
+            connection_id: u64,
+            record: *Record,
+            now_nanos: i64,
+            initial_accept: PathEndpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []endpoint_types.EndpointPolledDatagramResult,
+            handshake_out: []endpoint_types.EndpointPolledDatagramResult,
+        ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            // The registry can destroy the record before output rollback runs.
+            const datagram_allocator = connection_of(record).allocator;
+            var record_adopted = false;
+            errdefer if (failure_ownership == .consume and !record_adopted) {
+                deinit_record(record);
+                self.records.allocator.destroy(record);
+            };
+            if (failure_ownership == .consume and initial_out.len != 0 and handshake_out.len != 0 and
+                @intFromPtr(initial_out.ptr) < @intFromPtr(handshake_out.ptr + handshake_out.len) and
+                @intFromPtr(handshake_out.ptr) < @intFromPtr(initial_out.ptr + initial_out.len))
+            {
+                return error.BufferTooSmall;
+            }
             _ = try self.records.removeClosedRecords(&self.lifecycle);
             if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
             if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
@@ -2732,7 +2790,12 @@ pub fn Tls13ServerEndpointForTuple(
                 _ = self.lifecycle.retireConnection(connection_id);
                 return err;
             };
-            var record_adopted = false;
+            errdefer if (failure_ownership == .consume) {
+                for (initial_out[0..accepted.drain.datagrams_written]) |*output| {
+                    datagram_allocator.free(output.datagram);
+                    output.datagram = &.{};
+                }
+            };
             errdefer {
                 if (!record_adopted) _ = self.lifecycle.retireConnection(connection_id);
             }
@@ -2760,6 +2823,12 @@ pub fn Tls13ServerEndpointForTuple(
             ) catch |err| {
                 _ = self.records.retire(&self.lifecycle, connection_id) catch return error.Internal;
                 return err;
+            };
+            errdefer if (failure_ownership == .consume) {
+                for (handshake_out[0..handshake.drain.datagrams_written]) |*output| {
+                    datagram_allocator.free(output.datagram);
+                    output.datagram = &.{};
+                }
             };
             // Re-arm again: the Handshake flight is now in flight too.
             self.lifecycle.armRecoveryTimerFromConnection(connection_id, connection_of(record)) catch |err| {
