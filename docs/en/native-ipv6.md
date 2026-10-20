@@ -30,6 +30,10 @@ Close cancels an active punch without destroying its socket. A caller must wait 
 
 `ConnectionAdmission` limits pending and active QUIC records across several runtime servers. Attach one stable instance before either server starts. Keep that instance alive until every borrowing server finishes `deinit`. Existing runtime `Config` shapes remain unchanged.
 
+An owner that revokes shared punch attempts can attach one mutex with `attachPunchHandoffMutex` before each server starts. The runtime holds it across coordinator handoff and responder registration. The owner must hold the same mutex while it removes coordinator and responder entries. This prevents late handoff from recreating a removed entry.
+
+Release the mutex before joining or destroying a server. Keep it alive until all borrowing servers finish `deinit`. Unattached servers retain their previous behavior.
+
 `acceptOwnedInitialRecord` consumes its input record on success and failure. It also releases generated output bytes on failure. The old `acceptInitialRecord` entry point retains its existing ownership behavior. Runtime server admission uses the owned entry point so a failed TLS admission cannot free a record twice.
 
 ## Validation

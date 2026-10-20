@@ -16,6 +16,108 @@ const StunBinding = @import("stun_binding.zig").Binding;
 
 const log = std.log.scoped(.quicz_runtime);
 
+fn registerValidatedHandoff(coordinator: *quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator, remote: std.Io.net.IpAddress, attempt_id: quicz.connectivity.punch_wire.AttemptId) !void {
+    const wire = quicz.connectivity.punch_wire;
+    const key: wire.Key = @splat(0x42);
+    const local_nonce: wire.Nonce = @splat(0xa1);
+    try coordinator.register(remote, try .init(key, attempt_id, local_nonce, .{}), 0);
+    try std.testing.expect(std.meta.activeTag(coordinator.next(0)) == .probe);
+    const probe = wire.encode(key, .{ .kind = .probe, .attempt_id = attempt_id, .nonce = @splat(0xb1) });
+    try std.testing.expect(std.meta.activeTag(coordinator.receive(remote, 1, &probe)) == .acknowledgement);
+    const acknowledgement = wire.encode(key, .{ .kind = .acknowledgement, .attempt_id = attempt_id, .nonce = local_nonce });
+    try std.testing.expectEqual(quicz.connectivity.shared_punch_coordinator.Event{ .validated = attempt_id }, coordinator.receive(remote, 2, &acknowledgement));
+}
+
+fn checkPunchHandoffGate(comptime Runtime: type) !void {
+    const io = std.testing.io;
+    const remote: std.Io.net.IpAddress = if (Runtime == Server) .{ .ip4 = .loopback(4444) } else .{ .ip6 = .loopback(4444) };
+    var coordinator = try quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator.init(std.testing.allocator, 1);
+    defer coordinator.deinit();
+    var responders = try quicz.connectivity.punch_responder.PunchResponderRegistry.init(std.testing.allocator, 1);
+    defer responders.deinit();
+    var gate: std.atomic.Mutex = .unlocked;
+    var server = try Runtime.init(std.testing.allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+        .shared_punch_coordinator = &coordinator,
+        .punch_responder_registry = &responders,
+    });
+    defer server.deinit();
+    try server.attachPunchHandoffMutex(&gate);
+    try std.testing.expectError(error.PunchHandoffMutexAlreadyAttached, server.attachPunchHandoffMutex(&gate));
+    const first_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
+    try registerValidatedHandoff(&coordinator, remote, first_id);
+    const Worker = struct {
+        server: *Runtime,
+        entered: std.Io.Event = .unset,
+        finished: std.Io.Event = .unset,
+        fn run(self: *@This()) void {
+            self.entered.set(std.testing.io);
+            self.server.retainSharedResponder(@splat(0x11));
+            self.finished.set(std.testing.io);
+        }
+    };
+    var worker: Worker = .{ .server = &server };
+    while (!gate.tryLock()) std.atomic.spinLoopHint();
+    var gate_held = true;
+    defer if (gate_held) gate.unlock();
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer {
+        if (gate_held) {
+            gate.unlock();
+            gate_held = false;
+        }
+        if (!joined) thread.join();
+    }
+    try worker.entered.wait(io);
+    const crossed_gate = if (worker.finished.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }))
+        true
+    else |err| switch (err) {
+        error.Timeout => false,
+        else => return err,
+    };
+    const cleanup_removed_attempt = coordinator.remove(first_id);
+    const cleanup_removed_responder = responders.remove(first_id);
+    gate.unlock();
+    gate_held = false;
+    thread.join();
+    joined = true;
+    std.debug.print("handoff gate: ipv6={} crossed={} cleanup_attempt={} cleanup_responder={}\n", .{ Runtime == IPv6Server, crossed_gate, cleanup_removed_attempt, cleanup_removed_responder });
+    try std.testing.expect(!crossed_gate);
+    try std.testing.expect(cleanup_removed_attempt);
+    try std.testing.expect(!cleanup_removed_responder);
+    try std.testing.expectEqual(@as(u32, 0), responders.responders.count());
+
+    // The opposite ordering installs a responder before cleanup removes it.
+    // Repeating at capacity one proves that neither registry retains a slot.
+    for ([_]u8{ 0x22, 0x33 }) |tag| {
+        const attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(tag);
+        try registerValidatedHandoff(&coordinator, remote, attempt_id);
+        server.retainSharedResponder(attempt_id);
+        while (!gate.tryLock()) std.atomic.spinLoopHint();
+        const attempt_removed = coordinator.remove(attempt_id);
+        const responder_removed = responders.remove(attempt_id);
+        gate.unlock();
+        try std.testing.expect(!attempt_removed);
+        try std.testing.expect(responder_removed);
+        try std.testing.expectEqual(@as(u32, 0), responders.responders.count());
+    }
+    try server.start();
+    try std.testing.expectError(error.ServerAlreadyStarted, server.attachPunchHandoffMutex(&gate));
+}
+
+test "IPv4 responder handoff cannot cross owner cleanup gate" {
+    try checkPunchHandoffGate(Server);
+}
+
+test "IPv6 responder handoff cannot cross owner cleanup gate" {
+    try checkPunchHandoffGate(IPv6Server);
+}
+
 test "IPv6 runtime accepts a socket handoff while the legacy runtime retains its family guard" {
     const pem = @embedFile("../quic/testdata/quicz-echo-ca.pem");
     const begin_marker = "-----BEGIN CERTIFICATE-----";
@@ -565,6 +667,7 @@ pub fn ServerForTuple(comptime Path: type) type {
         /// Borrowed active-punch coordinator for this shared socket.
         shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
         shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
+        punch_handoff_mutex: ?*std.atomic.Mutex = null,
         stun_binding: StunBinding = .{},
 
         mutex: std.atomic.Mutex = .unlocked,
@@ -656,6 +759,15 @@ pub fn ServerForTuple(comptime Path: type) type {
             if (self.started or self.server_ep.records.count() != 0) return error.ServerAlreadyStarted;
             if (self.connection_admission != null) return error.ConnectionAdmissionAlreadyAttached;
             self.connection_admission = admission;
+        }
+
+        /// Serialize validated-punch handoff with the owner's attempt cleanup.
+        /// Attach before start and keep the mutex alive until deinit returns.
+        /// Do not hold this mutex while deinit waits for the runtime tasks.
+        pub fn attachPunchHandoffMutex(self: *ServerSelf, gate: *std.atomic.Mutex) !void {
+            if (self.started or self.server_ep.records.count() != 0) return error.ServerAlreadyStarted;
+            if (self.punch_handoff_mutex != null) return error.PunchHandoffMutexAlreadyAttached;
+            self.punch_handoff_mutex = gate;
         }
 
         pub fn start(self: *ServerSelf) !void {
@@ -1061,6 +1173,9 @@ pub fn ServerForTuple(comptime Path: type) type {
 
         fn retainSharedResponder(self: *ServerSelf, attempt_id: quicz.connectivity.punch_wire.AttemptId) void {
             const coordinator = self.shared_punch_coordinator orelse return;
+            const handoff_mutex = self.punch_handoff_mutex;
+            if (handoff_mutex) |gate| while (!gate.tryLock()) std.atomic.spinLoopHint();
+            defer if (handoff_mutex) |gate| gate.unlock();
             var attempt = coordinator.takeValidated(attempt_id) catch return;
             defer attempt.deinit();
             if (self.punch_responder_registry) |responders| {
