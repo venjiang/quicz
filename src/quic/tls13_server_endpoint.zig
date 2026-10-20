@@ -21,7 +21,6 @@ const tls13_client_endpoint = @import("tls13_client_endpoint.zig");
 const tls13_server_transport = @import("tls13_server_transport.zig");
 
 const Connection = connection_module.Connection;
-const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
 const Tls13ClientEndpoint = tls13_client_endpoint.Tls13ClientEndpoint;
 const Tls13ServerTransport = tls13_server_transport.Tls13ServerTransport;
 
@@ -39,7 +38,36 @@ pub fn Tls13ServerEndpoint(
     comptime mark_retry_validated: *const fn (*Record) void,
     comptime deinit_record: *const fn (*Record) void,
 ) type {
-    const Registry = endpoint_connection_registry.EndpointConnectionRegistry(
+    return Tls13ServerEndpointForTuple(
+        endpoint.Udp4Tuple,
+        Record,
+        connection_of,
+        crypto_backend_of,
+        destination_connection_id_of,
+        source_connection_id_of,
+        initial_destination_connection_id_of,
+        mark_retry_validated,
+        deinit_record,
+    );
+}
+
+/// Build a TLS server endpoint owner for one fixed UDP address family.
+pub fn Tls13ServerEndpointForTuple(
+    comptime Path: type,
+    comptime Record: type,
+    comptime connection_of: *const fn (*Record) *Connection,
+    comptime crypto_backend_of: *const fn (*Record) root.CryptoBackend,
+    comptime destination_connection_id_of: *const fn (*const Record) []const u8,
+    comptime source_connection_id_of: *const fn (*const Record) []const u8,
+    comptime initial_destination_connection_id_of: *const fn (*const Record) []const u8,
+    comptime mark_retry_validated: *const fn (*Record) void,
+    comptime deinit_record: *const fn (*Record) void,
+) type {
+    const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycleForTuple(Path);
+    const PathEndpoint = endpoint.ForTuple(Path);
+    const PathTypes = endpoint_types.ForTuple(Path);
+    const Registry = endpoint_connection_registry.EndpointConnectionRegistryForTuple(
+        Path,
         Record,
         connection_of,
         deinit_record,
@@ -51,7 +79,7 @@ pub fn Tls13ServerEndpoint(
         /// Endpoint-owned 1-RTT datagram paired with its committed UDP route.
         pub const OneRttDatagramPathResult = struct {
             datagram: []u8,
-            path: endpoint.Udp4Tuple,
+            path: Path,
         };
 
         /// Endpoint-owned protected datagram paired with its committed UDP route.
@@ -61,7 +89,7 @@ pub fn Tls13ServerEndpoint(
             /// Protected datagram emitted by the selected record.
             datagram: []u8,
             /// Current committed UDP tuple for this record's local route CID.
-            path: endpoint.Udp4Tuple,
+            path: Path,
         };
 
         /// Endpoint response datagram paired with the UDP tuple it answers.
@@ -69,13 +97,13 @@ pub fn Tls13ServerEndpoint(
             /// Response datagram written into caller-provided scratch storage.
             datagram: []const u8,
             /// UDP tuple that produced the response.
-            path: endpoint.Udp4Tuple,
+            path: Path,
         };
 
         /// Route classification with response datagrams paired to their path.
         pub const DatagramActionPathResult = union(enum) {
             routed: endpoint.RouteResult,
-            accept_initial: endpoint.InitialAcceptResult,
+            accept_initial: PathEndpoint.InitialAcceptResult,
             version_negotiation: DatagramResponsePathResult,
             stateless_reset: DatagramResponsePathResult,
             dropped,
@@ -84,7 +112,7 @@ pub fn Tls13ServerEndpoint(
         /// Installed-key receive result with any immediate output route.
         pub const InstalledKeyDatagramRoutePollResult = struct {
             /// Receive, path validation, and route-update result when feed succeeded.
-            feed: ?endpoint_types.EndpointFeedInstalledKeyPathUpdateResult = null,
+            feed: ?PathTypes.EndpointFeedInstalledKeyPathUpdateResult = null,
             /// Feed error returned after the endpoint had selected a record.
             feed_error: ?endpoint_types.EndpointProtectedDatagramError = null,
             /// Peer-issued CID sequence whose stateless reset token matched.
@@ -120,7 +148,7 @@ pub fn Tls13ServerEndpoint(
         /// Installed-key receive plus pending-work result with route-bound output drain.
         pub const FeedPendingWorkDatagramPathDrainResult = struct {
             /// Receive classification and processing result.
-            feed: endpoint_types.EndpointFeedInstalledKeyDatagramResult,
+            feed: PathTypes.EndpointFeedInstalledKeyDatagramResult,
             /// Pending-work actions applied after receive processing.
             pending_work: endpoint_types.EndpointPendingWorkSweepResult,
             /// Bounded output drain after pending recovery work, if any.
@@ -132,7 +160,7 @@ pub fn Tls13ServerEndpoint(
         /// Installed-key receive plus pending-work result with one route-bound output poll.
         pub const FeedPendingWorkDatagramPathPollResult = struct {
             /// Receive classification and processing result.
-            feed: endpoint_types.EndpointFeedInstalledKeyDatagramResult,
+            feed: PathTypes.EndpointFeedInstalledKeyDatagramResult,
             /// Pending-work actions applied after receive processing.
             pending_work: endpoint_types.EndpointPendingWorkSweepResult,
             /// Route preflight error before pending recovery work, if any.
@@ -167,20 +195,20 @@ pub fn Tls13ServerEndpoint(
 
         /// Accepted Initial output paired with the committed UDP route.
         pub const AcceptedInitialDatagramDrainPathResult = struct {
-            accepted: endpoint_types.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
-            path: endpoint.Udp4Tuple,
+            accepted: PathTypes.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
+            path: Path,
         };
 
         /// Backend-driven installed-key output paired with the committed route.
         pub const CryptoBackendDatagramDrainPathResult = struct {
             backend: endpoint_types.EndpointCryptoBackendDriveDatagramDrainResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
         };
 
         /// Backend-driven long-header output paired with the committed route.
         pub const ProtectedLongBackendDatagramDrainPathResult = struct {
             backend: endpoint_types.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
         };
 
         /// Accepted Initial record admission with route-bound output drains.
@@ -231,7 +259,7 @@ pub fn Tls13ServerEndpoint(
         /// Installed-key receive result with bounded route-bound output drain.
         pub const InstalledKeyDatagramRouteDrainResult = struct {
             /// Receive, path validation, and route-update result when feed succeeded.
-            feed: ?endpoint_types.EndpointFeedInstalledKeyPathUpdateResult = null,
+            feed: ?PathTypes.EndpointFeedInstalledKeyPathUpdateResult = null,
             /// Feed error returned after the endpoint had selected a record.
             feed_error: ?endpoint_types.EndpointProtectedDatagramError = null,
             /// Peer-issued CID sequence whose stateless reset token matched.
@@ -251,7 +279,7 @@ pub fn Tls13ServerEndpoint(
         /// Endpoint classification plus routed datagram processing result.
         pub const DatagramProcessPathResult = union(enum) {
             routed: RoutedDatagramProcessPathResult,
-            accept_initial: endpoint.InitialAcceptResult,
+            accept_initial: PathEndpoint.InitialAcceptResult,
             version_negotiation: DatagramResponsePathResult,
             stateless_reset: DatagramResponsePathResult,
             dropped,
@@ -260,7 +288,7 @@ pub fn Tls13ServerEndpoint(
         /// Endpoint classification plus routed datagram processing and bounded drain.
         pub const DatagramProcessDrainPathResult = union(enum) {
             routed: RoutedDatagramDrainPathResult,
-            accept_initial: endpoint.InitialAcceptResult,
+            accept_initial: PathEndpoint.InitialAcceptResult,
             version_negotiation: DatagramResponsePathResult,
             stateless_reset: DatagramResponsePathResult,
             dropped,
@@ -307,7 +335,7 @@ pub fn Tls13ServerEndpoint(
         /// Retry follow-up Initial validation with route-bound TLS output.
         pub const RetryInitialProcessPathResult = struct {
             /// Authenticated Retry follow-up metadata and token validation.
-            retry: endpoint_types.EndpointRetryProtectedInitialResult,
+            retry: PathTypes.EndpointRetryProtectedInitialResult,
             /// Initial-space TLS backend output after the Retry follow-up.
             initial: ProtectedLongBackendDatagramDrainPathResult,
             /// Handshake-space backend output after Initial installed keys.
@@ -362,7 +390,7 @@ pub fn Tls13ServerEndpoint(
             return false;
         }
 
-        fn currentRecordRoutePath(self: *const Self, record: *const Record) endpoint.RouteError!endpoint.Udp4Tuple {
+        fn currentRecordRoutePath(self: *const Self, record: *const Record) endpoint.RouteError!Path {
             return self.lifecycle.currentRoutePath(source_connection_id_of(record));
         }
 
@@ -454,11 +482,11 @@ pub fn Tls13ServerEndpoint(
         pub fn feedDatagram(
             self: *const Self,
             out: []u8,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
             supported_versions: []const quic_packet.Version,
-        ) endpoint.RouteError!endpoint.DatagramAction {
+        ) endpoint.RouteError!PathEndpoint.DatagramAction {
             return self.lifecycle.feedDatagram(
                 out,
                 path,
@@ -473,7 +501,7 @@ pub fn Tls13ServerEndpoint(
         pub fn feedDatagramWithResponsePath(
             self: *const Self,
             out: []u8,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
             supported_versions: []const quic_packet.Version,
@@ -502,7 +530,7 @@ pub fn Tls13ServerEndpoint(
         /// Resolve one routed datagram without decrypting it.
         pub fn routeDatagram(
             self: *const Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             datagram: []const u8,
         ) endpoint.RouteError!endpoint.RouteResult {
             return self.lifecycle.routeDatagram(path, datagram);
@@ -990,7 +1018,7 @@ pub fn Tls13ServerEndpoint(
             record: *const Record,
             connection: *Connection,
             now_nanos: i64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             out: []DatagramPathResult,
         ) endpoint_types.EndpointDatagramDrainResult {
             var result = endpoint_types.EndpointDatagramDrainResult{};
@@ -1080,7 +1108,7 @@ pub fn Tls13ServerEndpoint(
             connection: *Connection,
             now_nanos: i64,
             options: endpoint_types.EndpointPollInstalledKeyDatagramOptions,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             out: []DatagramPathResult,
         ) endpoint_types.EndpointDatagramDrainResult {
             var result = endpoint_types.EndpointDatagramDrainResult{};
@@ -1108,11 +1136,11 @@ pub fn Tls13ServerEndpoint(
         pub fn feedDatagramWithInstalledKeys(
             self: *Self,
             allocator: std.mem.Allocator,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathTypes.EndpointFeedInstalledKeyDatagramResult {
             _ = allocator;
             return self.feedDatagramWithInstalledKeysOwned(
                 path,
@@ -1124,11 +1152,11 @@ pub fn Tls13ServerEndpoint(
 
         fn feedDatagramWithInstalledKeysOwned(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathTypes.EndpointFeedInstalledKeyDatagramResult {
             const action = try self.lifecycle.feedDatagram(
                 options.out,
                 path,
@@ -1157,11 +1185,11 @@ pub fn Tls13ServerEndpoint(
         /// Route one installed-key datagram and select the next endpoint-owned deadline using scratch storage.
         pub fn feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathTypes.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
             _ = try self.records.nextDeadlineWithScratch(&self.lifecycle);
             return .{
                 .feed = try self.feedDatagramWithInstalledKeysOwned(
@@ -1177,11 +1205,11 @@ pub fn Tls13ServerEndpoint(
         /// Route one installed-key datagram, sweep pending work, and select the next deadline using scratch storage.
         pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedPendingWorkNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathTypes.EndpointFeedPendingWorkNextDeadlineResult {
             _ = self.records.receive_view_scratch orelse return error.BufferTooSmall;
             _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
             const feed = try self.feedDatagramWithInstalledKeysOwned(
@@ -1201,7 +1229,7 @@ pub fn Tls13ServerEndpoint(
         /// Route one installed-key datagram, sweep pending work, and drain route-bound output using scratch storage.
         pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithRoutePathWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1233,7 +1261,7 @@ pub fn Tls13ServerEndpoint(
         /// Route one installed-key datagram, sweep pending work, and poll one route-bound output using scratch storage.
         pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1285,11 +1313,11 @@ pub fn Tls13ServerEndpoint(
         /// scratch buffer and endpoint entropy through `options`.
         pub fn feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedPathUpdateDatagramPollResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathTypes.EndpointFeedPathUpdateDatagramPollResult {
             const action = try self.lifecycle.feedDatagram(
                 options.out,
                 path,
@@ -1330,7 +1358,7 @@ pub fn Tls13ServerEndpoint(
         /// function error set.
         pub fn feedInstalledKeyDatagramWithRoutePath(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1378,7 +1406,7 @@ pub fn Tls13ServerEndpoint(
         /// socket-loop callers that preallocate endpoint deadline views.
         pub fn feedInstalledKeyDatagramWithRoutePathWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1425,7 +1453,7 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             route: endpoint.RouteResult,
             record: *Record,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1503,7 +1531,7 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             route: endpoint.RouteResult,
             record: *Record,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1583,7 +1611,7 @@ pub fn Tls13ServerEndpoint(
         /// `feedInstalledKeyDatagramWithRoutePathWithScratch()`.
         pub fn feedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
             self: *Self,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1632,7 +1660,7 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             route: endpoint.RouteResult,
             record: *Record,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -1720,7 +1748,7 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             route: endpoint.RouteResult,
             record: *Record,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -2606,7 +2634,7 @@ pub fn Tls13ServerEndpoint(
             record: *Record,
             original_destination_connection_id: []const u8,
             retry_source_connection_id: []const u8,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             options: endpoint.RouteOptions,
         ) (endpoint.RouteError || root.Error || error{ConnectionLimitReached})!endpoint.RouteResult {
             _ = try self.records.removeClosedRecords(&self.lifecycle);
@@ -2637,14 +2665,14 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             connection: *Connection,
             now_nanos: i64,
-            initial_accept: endpoint.InitialAcceptResult,
+            initial_accept: PathEndpoint.InitialAcceptResult,
             server_source_connection_id: []const u8,
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
             backend: root.CryptoBackend,
             scratch: []u8,
             out: []endpoint_types.EndpointPolledDatagramResult,
-        ) endpoint_types.EndpointProtectedInitialError!endpoint_types.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+        ) endpoint_types.EndpointProtectedInitialError!PathTypes.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
             return self.lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
                 connection_id,
                 connection,
@@ -2659,25 +2687,26 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
-        /// Accept an Initial and transfer its record into endpoint ownership.
-        ///
-        /// Route installation, Initial-space TLS driving, bounded Initial
-        /// output, record admission, and the first Handshake-space TLS drive
-        /// succeed together. The caller retains `record` on failure; any route
-        /// or timer installed before that failure is retired.
+        /// Initial admission and its bounded Initial and Handshake output.
         pub const InitialRecordAdmissionResult = struct {
             /// Initial-space processing and bounded output drain.
-            initial: endpoint_types.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
+            initial: PathTypes.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
             /// Handshake-space output after Initial processing installed keys.
             handshake: ?endpoint_types.EndpointCryptoBackendDriveDatagramDrainResult = null,
         };
 
+        /// Admit an Initial with the existing ownership boundary.
+        ///
+        /// Before registry adoption, an error leaves `record` with the caller.
+        /// After adoption, an error retires and destroys the record. Generated
+        /// datagrams remain caller-owned, including output written before an
+        /// error. Use `acceptOwnedInitialRecord()` for unconditional transfer.
         pub fn acceptInitialRecord(
             self: *Self,
             connection_id: u64,
             record: *Record,
             now_nanos: i64,
-            initial_accept: endpoint.InitialAcceptResult,
+            initial_accept: PathEndpoint.InitialAcceptResult,
             server_source_connection_id: []const u8,
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
@@ -2685,6 +2714,63 @@ pub fn Tls13ServerEndpoint(
             initial_out: []endpoint_types.EndpointPolledDatagramResult,
             handshake_out: []endpoint_types.EndpointPolledDatagramResult,
         ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            return self.acceptInitialRecordImpl(.retain_before_adoption, connection_id, record, now_nanos, initial_accept, server_source_connection_id, datagram, options, scratch, initial_out, handshake_out);
+        }
+
+        /// Consume a caller-owned record on success or error during admission.
+        ///
+        /// Allocate `record` with this endpoint's registry allocator. A record
+        /// already owned by a registry is not valid input. On success, the
+        /// registry owns the record and the caller owns the returned datagrams.
+        /// On error, this method destroys the record and frees generated output,
+        /// then clears those initialized datagram slots. Nonempty output slices
+        /// must not overlap; overlap returns `BufferTooSmall` and consumes the
+        /// record before adoption.
+        pub fn acceptOwnedInitialRecord(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            now_nanos: i64,
+            initial_accept: PathEndpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []endpoint_types.EndpointPolledDatagramResult,
+            handshake_out: []endpoint_types.EndpointPolledDatagramResult,
+        ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            return self.acceptInitialRecordImpl(.consume, connection_id, record, now_nanos, initial_accept, server_source_connection_id, datagram, options, scratch, initial_out, handshake_out);
+        }
+
+        const AdmissionFailureOwnership = enum { retain_before_adoption, consume };
+
+        fn acceptInitialRecordImpl(
+            self: *Self,
+            comptime failure_ownership: AdmissionFailureOwnership,
+            connection_id: u64,
+            record: *Record,
+            now_nanos: i64,
+            initial_accept: PathEndpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []endpoint_types.EndpointPolledDatagramResult,
+            handshake_out: []endpoint_types.EndpointPolledDatagramResult,
+        ) (endpoint_types.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            // The registry can destroy the record before output rollback runs.
+            const datagram_allocator = connection_of(record).allocator;
+            var record_adopted = false;
+            errdefer if (failure_ownership == .consume and !record_adopted) {
+                deinit_record(record);
+                self.records.allocator.destroy(record);
+            };
+            if (failure_ownership == .consume and initial_out.len != 0 and handshake_out.len != 0 and
+                @intFromPtr(initial_out.ptr) < @intFromPtr(handshake_out.ptr + handshake_out.len) and
+                @intFromPtr(handshake_out.ptr) < @intFromPtr(initial_out.ptr + initial_out.len))
+            {
+                return error.BufferTooSmall;
+            }
             _ = try self.records.removeClosedRecords(&self.lifecycle);
             if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
             if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
@@ -2704,7 +2790,12 @@ pub fn Tls13ServerEndpoint(
                 _ = self.lifecycle.retireConnection(connection_id);
                 return err;
             };
-            var record_adopted = false;
+            errdefer if (failure_ownership == .consume) {
+                for (initial_out[0..accepted.drain.datagrams_written]) |*output| {
+                    datagram_allocator.free(output.datagram);
+                    output.datagram = &.{};
+                }
+            };
             errdefer {
                 if (!record_adopted) _ = self.lifecycle.retireConnection(connection_id);
             }
@@ -2733,6 +2824,12 @@ pub fn Tls13ServerEndpoint(
                 _ = self.records.retire(&self.lifecycle, connection_id) catch return error.Internal;
                 return err;
             };
+            errdefer if (failure_ownership == .consume) {
+                for (handshake_out[0..handshake.drain.datagrams_written]) |*output| {
+                    datagram_allocator.free(output.datagram);
+                    output.datagram = &.{};
+                }
+            };
             // Re-arm again: the Handshake flight is now in flight too.
             self.lifecycle.armRecoveryTimerFromConnection(connection_id, connection_of(record)) catch |err| {
                 _ = self.records.retire(&self.lifecycle, connection_id) catch return error.Internal;
@@ -2750,7 +2847,7 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             record: *Record,
             now_nanos: i64,
-            initial_accept: endpoint.InitialAcceptResult,
+            initial_accept: PathEndpoint.InitialAcceptResult,
             server_source_connection_id: []const u8,
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
@@ -2794,7 +2891,7 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             record: *Record,
             now_nanos: i64,
-            initial_accept: endpoint.InitialAcceptResult,
+            initial_accept: PathEndpoint.InitialAcceptResult,
             server_source_connection_id: []const u8,
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
@@ -2929,13 +3026,13 @@ pub fn Tls13ServerEndpoint(
         /// Authenticate and accept the Retry follow-up Initial for one route.
         pub fn validateRetryInitial(
             self: *Self,
-            policy: *endpoint.AddressValidationPolicy,
+            policy: *PathEndpoint.AddressValidationPolicy,
             connection_id: u64,
             now_nanos: i64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             datagram: []const u8,
             supported_versions: []const quic_packet.Version,
-        ) (endpoint_types.EndpointRetryProtectedInitialError || error{UnknownConnectionId})!endpoint_types.EndpointRetryProtectedInitialResult {
+        ) (endpoint_types.EndpointRetryProtectedInitialError || error{UnknownConnectionId})!PathTypes.EndpointRetryProtectedInitialResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const result = try self.lifecycle.processRetryValidatedProtectedInitialDatagram(
                 policy,
@@ -2958,10 +3055,10 @@ pub fn Tls13ServerEndpoint(
         /// on the endpoint-owned record and committed route.
         pub fn validateRetryInitialWithRoutePath(
             self: *Self,
-            policy: *endpoint.AddressValidationPolicy,
+            policy: *PathEndpoint.AddressValidationPolicy,
             connection_id: u64,
             now_nanos: i64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             datagram: []const u8,
             supported_versions: []const quic_packet.Version,
             scratch: []u8,
@@ -3015,7 +3112,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitialWithHandshakeKeys(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3040,7 +3137,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitialWithHandshakeKeysWithRoutePath(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3082,7 +3179,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitial(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3134,7 +3231,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitialWithRoutePath(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3173,7 +3270,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processHandshake(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3198,7 +3295,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processHandshakeWithRoutePath(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3231,7 +3328,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processLongPacketWithRoutePath(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3273,7 +3370,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processLongDatagramWithRoutePath(
             self: *Self,
             connection_id: u64,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             scratch: []u8,
@@ -3333,7 +3430,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processRoutedDatagramWithRoutePath(
             self: *Self,
             route: endpoint.RouteResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             installed_key_options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -3377,7 +3474,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processRoutedDatagramWithRoutePathWithScratch(
             self: *Self,
             route: endpoint.RouteResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             installed_key_options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -3417,7 +3514,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processRoutedDatagramAndDrainWithRoutePath(
             self: *Self,
             route: endpoint.RouteResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             installed_key_options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -3463,7 +3560,7 @@ pub fn Tls13ServerEndpoint(
         pub fn processRoutedDatagramAndDrainWithRoutePathWithScratch(
             self: *Self,
             route: endpoint.RouteResult,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             installed_key_options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
@@ -3508,7 +3605,7 @@ pub fn Tls13ServerEndpoint(
         /// short-header datagrams are dispatched through the endpoint owner.
         pub fn processDatagramWithRoutePath(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3548,7 +3645,7 @@ pub fn Tls13ServerEndpoint(
         /// Classify one UDP datagram and process routed packets using scratch-backed short-packet handling.
         pub fn processDatagramWithRoutePathWithScratch(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3588,7 +3685,7 @@ pub fn Tls13ServerEndpoint(
         /// Classify one UDP datagram, process routed packets, and drain bounded output.
         pub fn processDatagramAndDrainWithRoutePath(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3630,7 +3727,7 @@ pub fn Tls13ServerEndpoint(
         /// Classify one UDP datagram, process routed packets, and drain bounded output using scratch-backed short-packet handling.
         pub fn processDatagramAndDrainWithRoutePathWithScratch(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3673,7 +3770,7 @@ pub fn Tls13ServerEndpoint(
         pub fn receiveDatagramStepWithRoutePath(
             self: *Self,
             allocator: std.mem.Allocator,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3717,7 +3814,7 @@ pub fn Tls13ServerEndpoint(
         /// Run one bounded server receive step using registry scratch storage.
         pub fn receiveDatagramStepWithRoutePathWithScratch(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3766,7 +3863,7 @@ pub fn Tls13ServerEndpoint(
         /// the caller-supplied `record`.
         pub fn receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
             self: *Self,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3840,7 +3937,7 @@ pub fn Tls13ServerEndpoint(
         pub fn receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
             self: *Self,
             allocator: std.mem.Allocator,
-            path: endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             unpredictable_prefix: []const u8,
@@ -3993,4 +4090,99 @@ pub fn Tls13ServerEndpoint(
             };
         }
     };
+}
+
+test "Tls13ServerEndpoint IPv6 record admission retains its complete route" {
+    const Record = struct {
+        transport: Tls13ServerTransport,
+        retry_validated: bool = false,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return self.transport.connectionRef();
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.transport.cryptoBackend();
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.transport.peerInitialSourceConnectionId();
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.transport.localInitialSourceConnectionId();
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated)
+                self.transport.localInitialSourceConnectionId()
+            else
+                self.transport.originalDestinationConnectionId();
+        }
+
+        fn markRetryValidated(self: *@This()) void {
+            self.retry_validated = true;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.transport.deinit();
+        }
+    };
+    const Legacy = Tls13ServerEndpoint(
+        Record,
+        Record.connectionRef,
+        Record.cryptoBackend,
+        Record.destinationConnectionId,
+        Record.sourceConnectionId,
+        Record.initialDestinationConnectionId,
+        Record.markRetryValidated,
+        Record.deinit,
+    );
+    const LegacyInstance = Tls13ServerEndpointForTuple(
+        endpoint.Udp4Tuple,
+        Record,
+        Record.connectionRef,
+        Record.cryptoBackend,
+        Record.destinationConnectionId,
+        Record.sourceConnectionId,
+        Record.initialDestinationConnectionId,
+        Record.markRetryValidated,
+        Record.deinit,
+    );
+    try std.testing.expect(Legacy == LegacyInstance);
+    try std.testing.expect(@TypeOf(@as(Legacy.DatagramPathResult, undefined).path.remote.octets) == [4]u8);
+
+    const Server = Tls13ServerEndpointForTuple(
+        endpoint.Udp6Tuple,
+        Record,
+        Record.connectionRef,
+        Record.cryptoBackend,
+        Record.destinationConnectionId,
+        Record.sourceConnectionId,
+        Record.initialDestinationConnectionId,
+        Record.markRetryValidated,
+        Record.deinit,
+    );
+    var server = try Server.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
+    });
+    defer server.deinit();
+    const path = endpoint.Udp6Tuple{
+        .local = endpoint.Udp6Address.init(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 4433, 3),
+        .remote = endpoint.Udp6Address.init(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 4444, 3),
+    };
+    const record = try std.testing.allocator.create(Record);
+    var record_owned = false;
+    errdefer if (!record_owned) std.testing.allocator.destroy(record);
+    record.* = .{ .transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{}) };
+    errdefer if (!record_owned) record.deinit();
+    _ = try server.adoptRetryRecordAndSwitchInitialRoute(7, record, "original", "retry", path, .{});
+    record_owned = true;
+    try std.testing.expectEqual(@as(usize, 1), server.activeConnectionCount());
+    try std.testing.expect((try server.lifecycle.currentRoutePath("retry")).eql(path));
+    try std.testing.expect(@TypeOf(@as(Server.InitialRecordAdmissionResult, undefined).initial) == endpoint_types.ForTuple(endpoint.Udp6Tuple).EndpointAcceptedInitialCryptoBackendDatagramDrainResult);
+    const retired = try server.retireRecord(7);
+    try std.testing.expectEqual(@as(usize, 1), retired.routes_retired);
+    try std.testing.expectEqual(@as(usize, 0), server.activeConnectionCount());
 }

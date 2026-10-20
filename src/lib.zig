@@ -173,6 +173,7 @@ pub const AckElicitingSendAdmission = connection_rules.AckElicitingSendAdmission
 
 test {
     _ = runtime.server;
+    _ = @import("runtime/ipv6_tests.zig");
     _ = protection;
     _ = address_validation_token;
     _ = endpoint;
@@ -292,9 +293,13 @@ pub const EndpointCryptoBackendDriveView = struct {
 /// routing and UDP-path policy decisions.
 const endpoint_lifecycle_module = @import("quic/endpoint_lifecycle.zig");
 pub const EndpointConnectionLifecycle = endpoint_lifecycle_module.EndpointConnectionLifecycle;
+/// Select the lifecycle specialization for a UDP tuple type.
+pub const EndpointConnectionLifecycleForTuple = endpoint_lifecycle_module.EndpointConnectionLifecycleForTuple;
 
 const endpoint_connection_registry_module = @import("quic/endpoint_connection_registry.zig");
 pub const EndpointConnectionRegistry = endpoint_connection_registry_module.EndpointConnectionRegistry;
+/// Select the bounded record registry specialization for a UDP tuple type.
+pub const EndpointConnectionRegistryForTuple = endpoint_connection_registry_module.EndpointConnectionRegistryForTuple;
 test {
     _ = endpoint_connection_registry_module;
 }
@@ -307,6 +312,8 @@ test {
 
 const tls13_client_endpoint_module = @import("quic/tls13_client_endpoint.zig");
 pub const Tls13ClientEndpoint = tls13_client_endpoint_module.Tls13ClientEndpoint;
+/// Select a TLS client endpoint without changing legacy IPv4 path types.
+pub const Tls13ClientEndpointForTuple = tls13_client_endpoint_module.Tls13ClientEndpointForTuple;
 test {
     _ = tls13_client_endpoint_module;
 }
@@ -319,6 +326,8 @@ test {
 
 const tls13_server_endpoint_module = @import("quic/tls13_server_endpoint.zig");
 pub const Tls13ServerEndpoint = tls13_server_endpoint_module.Tls13ServerEndpoint;
+/// Select a TLS server endpoint without changing legacy IPv4 path types.
+pub const Tls13ServerEndpointForTuple = tls13_server_endpoint_module.Tls13ServerEndpointForTuple;
 test {
     _ = tls13_server_endpoint_module;
 }

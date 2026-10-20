@@ -109,6 +109,30 @@ pub fn build(b: *std.Build) void {
         "Run the blocking mobile C ABI against the native QUIC server",
     );
     run_mobile_abi_loopback.dependOn(&b.addRunArtifact(mobile_abi_loopback).step);
+    const mobile_ipv6_header = b.addTranslateC(.{
+        .root_source_file = b.path("include/quicz_mobile.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mobile_ipv6_abi_loopback = b.addExecutable(.{
+        .name = "quicz-mobile-ipv6-abi-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mobile_ipv6_abi_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz_mobile", .module = mobile_abi_mod },
+                .{ .name = "quicz_mobile_c", .module = mobile_ipv6_header.createModule() },
+            },
+        }),
+    });
+    b.step("build-mobile-ipv6-abi-loopback", "Compile native IPv6 C ABI layout and loopback checks")
+        .dependOn(&mobile_ipv6_abi_loopback.step);
+    b.step("run-mobile-ipv6-abi-loopback", "Verify native IPv6 STUN, authenticated punch, TLS and stream through the C ABI")
+        .dependOn(&b.addRunArtifact(mobile_ipv6_abi_loopback).step);
+
     const mobile_deadline_regression = b.addExecutable(.{
         .name = "quicz-mobile-deadline-regression",
         .root_module = b.createModule(.{

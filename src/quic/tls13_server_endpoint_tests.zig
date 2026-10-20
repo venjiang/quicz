@@ -24,6 +24,236 @@ const tls13_server_endpoint_mod = @import("tls13_server_endpoint.zig");
 const Tls13ServerEndpoint = tls13_server_endpoint_mod.Tls13ServerEndpoint;
 const address_validation_token = @import("address_validation_token.zig");
 
+const RejectingInitialBackend = struct {
+    fn backend(self: *@This()) root.CryptoBackend {
+        return .{
+            .context = self,
+            .receive = receive,
+            .pull = pull,
+        };
+    }
+
+    fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {
+        return error.InvalidPacket;
+    }
+
+    fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+        return null;
+    }
+};
+const RejectingHandshakeBackend = struct {
+    secrets: root.HandshakeTrafficSecrets,
+    secrets_sent: bool = false,
+    initial_crypto: []const u8 = &.{},
+    initial_sent: bool = false,
+
+    fn backend(self: *@This()) root.CryptoBackend {
+        return .{
+            .context = self,
+            .receive = receive,
+            .pull = pull,
+            .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+        };
+    }
+
+    fn receive(_: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
+        if (space == .handshake) return error.InvalidPacket;
+    }
+
+    fn pull(context: *anyopaque, space: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+        if (space == .handshake) return error.InvalidPacket;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (space == .initial and !self.initial_sent and self.initial_crypto.len != 0) {
+            self.initial_sent = true;
+            return self.initial_crypto;
+        }
+        return null;
+    }
+
+    fn pullHandshakeTrafficSecrets(context: *anyopaque) root.Error!?root.HandshakeTrafficSecrets {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.secrets_sent) return null;
+        self.secrets_sent = true;
+        return self.secrets;
+    }
+};
+
+const AdmissionScenario = enum { initial_rejected, handshake_rejected, capacity_rejected, overlapping_outputs, empty_outputs, admitted };
+
+fn checkInitialAdmissionOwnership(comptime Path: type, owned: bool, scenario: AdmissionScenario) !void {
+    const TestRecord = struct {
+        connection: Connection,
+        backend: root.CryptoBackend,
+        destructions: *usize,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "server";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "original";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.destructions.* += 1;
+            self.connection.deinit();
+        }
+    };
+    const TestEndpoint = tls13_server_endpoint_mod.Tls13ServerEndpointForTuple(
+        Path,
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+    var owner = try TestEndpoint.initWithCapacity(std.testing.allocator, if (scenario == .capacity_rejected) 0 else 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
+    });
+    var owner_initialized = true;
+    defer if (owner_initialized) owner.deinit();
+
+    const path: Path = if (Path == endpoint.Udp4Tuple) .{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    } else .{
+        .local = endpoint.Udp6Address.init(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 4433, 0),
+        .remote = endpoint.Udp6Address.init(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 5443, 0),
+    };
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    const original_dcid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const server_scid = "server";
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    try client.sendCryptoInSpace(.initial, "endpoint owned record admission");
+    const datagram = (try client.pollInitialProtectedDatagram(1, &original_dcid, &client_scid, &.{}, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var action_buffer: [256]u8 = undefined;
+    const action = try owner.lifecycle.handleDatagramWithVersionNegotiation(&action_buffer, path, datagram, &.{}, &.{.v1});
+    const initial_accept = switch (action) {
+        .accept_initial => |initial| initial,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var initial_rejecting_backend = RejectingInitialBackend{};
+    var handshake_backend = RejectingHandshakeBackend{
+        .secrets = .{ .local = secrets.server.secret, .peer = secrets.client.secret },
+        .secrets_sent = scenario != .handshake_rejected,
+        .initial_crypto = "server Initial response",
+    };
+    var destructions: usize = 0;
+    const handle = 7;
+    const record = try std.testing.allocator.create(TestRecord);
+    record.* = .{
+        .connection = Connection.init(std.testing.allocator, .server, .{}) catch |err| {
+            std.testing.allocator.destroy(record);
+            return err;
+        },
+        .backend = if (scenario == .initial_rejected) initial_rejecting_backend.backend() else handshake_backend.backend(),
+        .destructions = &destructions,
+    };
+    // Use the external destruction count before touching a rejected record.
+    defer if (destructions == 0 and owner.records.get(handle) == null) {
+        record.deinit();
+        std.testing.allocator.destroy(record);
+    };
+    var scratch: [512]u8 = undefined;
+    var initial_out: [2]endpoint_types.EndpointPolledDatagramResult = @splat(.{ .connection_id = 0, .datagram = &.{} });
+    var handshake_out: [2]endpoint_types.EndpointPolledDatagramResult = @splat(.{ .connection_id = 0, .datagram = &.{} });
+    var caller_owns_outputs = !owned;
+    defer if (caller_owns_outputs) {
+        for (&initial_out) |output| if (output.datagram.len != 0) std.testing.allocator.free(output.datagram);
+        for (&handshake_out) |output| if (output.datagram.len != 0) std.testing.allocator.free(output.datagram);
+    };
+    const initial_slice = if (scenario == .empty_outputs) initial_out[0..0] else initial_out[0..];
+    const handshake_slice = switch (scenario) {
+        .overlapping_outputs => initial_out[1..],
+        .empty_outputs => handshake_out[0..0],
+        else => handshake_out[0..],
+    };
+    const admitted = if (owned)
+        owner.acceptOwnedInitialRecord(handle, record, 2, initial_accept, server_scid, datagram, .{}, &scratch, initial_slice, handshake_slice)
+    else
+        owner.acceptInitialRecord(handle, record, 2, initial_accept, server_scid, datagram, .{}, &scratch, initial_slice, handshake_slice);
+    switch (scenario) {
+        .initial_rejected, .handshake_rejected => try std.testing.expectError(error.InvalidPacket, admitted),
+        .capacity_rejected => try std.testing.expectError(error.ConnectionLimitReached, admitted),
+        .overlapping_outputs => try std.testing.expectError(error.BufferTooSmall, admitted),
+        .admitted, .empty_outputs => {
+            const result = try admitted;
+            caller_owns_outputs = true;
+            if (scenario == .empty_outputs) {
+                try std.testing.expectEqual(@as(usize, 0), result.initial.drain.datagrams_written);
+            } else {
+                try std.testing.expect(result.initial.drain.datagrams_written > 0);
+            }
+            try std.testing.expectEqual(@as(usize, 0), destructions);
+            try std.testing.expect(owner.records.get(handle) != null);
+            owner.deinit();
+            owner_initialized = false;
+            try std.testing.expectEqual(@as(usize, 1), destructions);
+            return;
+        },
+    }
+    const consumed = owned or scenario == .handshake_rejected;
+    try std.testing.expectEqual(@as(usize, if (consumed) 1 else 0), destructions);
+    try std.testing.expect(owner.records.get(handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), owner.lifecycle.recoveryTimerCount());
+    if (scenario == .handshake_rejected) {
+        try std.testing.expect(handshake_backend.initial_sent);
+        if (owned) try std.testing.expectEqual(@as(usize, 0), initial_out[0].datagram.len);
+    }
+}
+
+test "Tls13ServerEndpoint owned admission consumes pre-adoption failures" {
+    inline for (.{ endpoint.Udp4Tuple, endpoint.Udp6Tuple }) |Path| {
+        try checkInitialAdmissionOwnership(Path, true, .initial_rejected);
+        try checkInitialAdmissionOwnership(Path, true, .capacity_rejected);
+        try checkInitialAdmissionOwnership(Path, true, .overlapping_outputs);
+    }
+}
+
+test "Tls13ServerEndpoint owned admission consumes post-adoption failure and Initial output" {
+    inline for (.{ endpoint.Udp4Tuple, endpoint.Udp6Tuple }) |Path| {
+        try checkInitialAdmissionOwnership(Path, true, .handshake_rejected);
+    }
+}
+
+test "Tls13ServerEndpoint owned admission retains successful records until shutdown" {
+    inline for (.{ endpoint.Udp4Tuple, endpoint.Udp6Tuple }) |Path| {
+        try checkInitialAdmissionOwnership(Path, true, .admitted);
+        try checkInitialAdmissionOwnership(Path, true, .empty_outputs);
+    }
+}
+
+test "Tls13ServerEndpoint legacy admission retains its actual failure ownership" {
+    inline for (.{ endpoint.Udp4Tuple, endpoint.Udp6Tuple }) |Path| {
+        try checkInitialAdmissionOwnership(Path, false, .initial_rejected);
+        try checkInitialAdmissionOwnership(Path, false, .capacity_rejected);
+        try checkInitialAdmissionOwnership(Path, false, .handshake_rejected);
+        try checkInitialAdmissionOwnership(Path, false, .admitted);
+    }
+}
 test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const TestRecord = struct {
         handle: u64,
@@ -57,52 +287,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
 
         fn deinit(self: *@This()) void {
             self.connection.deinit();
-        }
-    };
-    const RejectingInitialBackend = struct {
-        fn backend(self: *@This()) root.CryptoBackend {
-            return .{
-                .context = self,
-                .receive = receive,
-                .pull = pull,
-            };
-        }
-
-        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {
-            return error.InvalidPacket;
-        }
-
-        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
-            return null;
-        }
-    };
-    const RejectingHandshakeBackend = struct {
-        secrets: root.HandshakeTrafficSecrets,
-        secrets_sent: bool = false,
-
-        fn backend(self: *@This()) root.CryptoBackend {
-            return .{
-                .context = self,
-                .receive = receive,
-                .pull = pull,
-                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
-            };
-        }
-
-        fn receive(_: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
-            if (space == .handshake) return error.InvalidPacket;
-        }
-
-        fn pull(_: *anyopaque, space: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
-            if (space == .handshake) return error.InvalidPacket;
-            return null;
-        }
-
-        fn pullHandshakeTrafficSecrets(context: *anyopaque) root.Error!?root.HandshakeTrafficSecrets {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (self.secrets_sent) return null;
-            self.secrets_sent = true;
-            return self.secrets;
         }
     };
     const EmptyBackend = struct {

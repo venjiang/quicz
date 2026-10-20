@@ -78,6 +78,53 @@ pub const Udp4Tuple = struct {
     }
 };
 
+/// Binary IPv6 peer binding length: family, address, port, and scope ID.
+pub const ipv6_address_validation_peer_binding_len: usize = 23;
+
+/// IPv6 UDP address with a scope ID retained in path identity.
+pub const Udp6Address = struct {
+    octets: [16]u8,
+    port: u16,
+    scope_id: u32 = 0,
+
+    /// Construct an IPv6 UDP address without mapping or truncating its bytes.
+    pub fn init(octets: [16]u8, port: u16, scope_id: u32) Udp6Address {
+        return .{ .octets = octets, .port = port, .scope_id = scope_id };
+    }
+
+    /// Return whether all address bytes, the port, and scope ID match.
+    pub fn eql(self: Udp6Address, other: Udp6Address) bool {
+        return self.port == other.port and self.scope_id == other.scope_id and
+            std.mem.eql(u8, &self.octets, &other.octets);
+    }
+
+    /// Bind tokens to the IPv6 family and complete peer address in network order.
+    pub fn addressValidationBinding(self: Udp6Address) [ipv6_address_validation_peer_binding_len]u8 {
+        var binding: [ipv6_address_validation_peer_binding_len]u8 = undefined;
+        binding[0] = 6;
+        @memcpy(binding[1..17], &self.octets);
+        std.mem.writeInt(u16, binding[17..19], self.port, .big);
+        std.mem.writeInt(u32, binding[19..23], self.scope_id, .big);
+        return binding;
+    }
+};
+
+/// Complete local and remote IPv6 UDP path.
+pub const Udp6Tuple = struct {
+    local: Udp6Address,
+    remote: Udp6Address,
+
+    /// Return whether both endpoint addresses, ports, and scope IDs match.
+    pub fn eql(self: Udp6Tuple, other: Udp6Tuple) bool {
+        return self.local.eql(other.local) and self.remote.eql(other.remote);
+    }
+
+    /// Return the peer token binding without including the local destination.
+    pub fn peerAddressValidationBinding(self: Udp6Tuple) [ipv6_address_validation_peer_binding_len]u8 {
+        return self.remote.addressValidationBinding();
+    }
+};
+
 /// Fixed-storage QUIC connection ID.
 pub const ConnectionId = struct {
     bytes: [max_connection_id_len]u8 = undefined,
@@ -135,18 +182,22 @@ pub const ClientInitialRouteOptions = struct {
 /// Slices borrow from the triggering datagram. The destination CID is the
 /// client's Original Destination Connection ID; the source CID is the peer CID
 /// that a server uses as the destination CID for its first response.
-pub const InitialAcceptResult = struct {
-    /// UDP path that carried the new Initial.
-    path: Udp4Tuple,
-    /// QUIC version from the long header.
-    version: packet.Version,
-    /// Destination Connection ID from the client Initial.
-    original_destination_connection_id: []const u8,
-    /// Source Connection ID from the client Initial.
-    source_connection_id: []const u8,
-    /// Initial token, if present.
-    token: []const u8,
-};
+pub const InitialAcceptResult = InitialAcceptResultForTuple(Udp4Tuple);
+
+fn InitialAcceptResultForTuple(comptime Path: type) type {
+    return struct {
+        /// UDP path that carried the new Initial.
+        path: Path,
+        /// QUIC version from the long header.
+        version: packet.Version,
+        /// Destination Connection ID from the client Initial.
+        original_destination_connection_id: []const u8,
+        /// Source Connection ID from the client Initial.
+        source_connection_id: []const u8,
+        /// Initial token, if present.
+        token: []const u8,
+    };
+}
 
 /// Options for registering endpoint routes after accepting a server Initial.
 pub const AcceptedInitialRouteOptions = struct {
@@ -165,18 +216,22 @@ pub const AcceptedInitialRouteResult = struct {
 };
 
 /// Endpoint-level action for one received UDP datagram.
-pub const DatagramAction = union(enum) {
-    /// Deliver the datagram to a caller-owned connection.
-    routed: RouteResult,
-    /// Accept this supported-version Initial as a new server-side connection.
-    accept_initial: InitialAcceptResult,
-    /// Send this Version Negotiation datagram on the same UDP path.
-    version_negotiation: []const u8,
-    /// Send this stateless reset datagram on the same UDP path.
-    stateless_reset: []const u8,
-    /// Drop the datagram without a connection delivery or reset response.
-    dropped,
-};
+pub const DatagramAction = DatagramActionForTuple(Udp4Tuple);
+
+fn DatagramActionForTuple(comptime Path: type) type {
+    return union(enum) {
+        /// Deliver the datagram to a caller-owned connection.
+        routed: RouteResult,
+        /// Accept this supported-version Initial as a new server-side connection.
+        accept_initial: InitialAcceptResultForTuple(Path),
+        /// Send this Version Negotiation datagram on the same UDP path.
+        version_negotiation: []const u8,
+        /// Send this stateless reset datagram on the same UDP path.
+        stateless_reset: []const u8,
+        /// Drop the datagram without a connection delivery or reset response.
+        dropped,
+    };
+}
 
 /// Version-independent long-header connection IDs from the first packet in a datagram.
 pub const LongHeaderConnectionIds = struct {
@@ -216,11 +271,13 @@ pub const EcnPathValidationState = enum {
     failed,
 };
 
-const EcnPathEntry = struct {
-    connection_id: u64,
-    path: Udp4Tuple,
-    state: EcnPathValidationState,
-};
+fn EcnPathEntryForTuple(comptime Path: type) type {
+    return struct {
+        connection_id: u64,
+        path: Path,
+        state: EcnPathValidationState,
+    };
+}
 
 /// In-memory endpoint ECN policy keyed by connection handle and UDP path.
 ///
@@ -228,94 +285,101 @@ const EcnPathEntry = struct {
 /// This endpoint helper keeps the resulting ECN decision scoped to a concrete
 /// UDP tuple so migration can re-enter validation on the new path without
 /// inheriting a failed or capable state from a previous path.
-pub const EcnPathPolicy = struct {
-    allocator: std.mem.Allocator,
-    paths: std.ArrayList(EcnPathEntry) = .empty,
+pub const EcnPathPolicy = EcnPathPolicyForTuple(Udp4Tuple);
 
-    /// Create an empty endpoint ECN path policy.
-    pub fn init(allocator: std.mem.Allocator) EcnPathPolicy {
-        return .{ .allocator = allocator };
-    }
+fn EcnPathPolicyForTuple(comptime Path: type) type {
+    return struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        paths: std.ArrayList(EcnPathEntryForTuple(Path)) = .empty,
 
-    /// Release stored path state.
-    pub fn deinit(self: *EcnPathPolicy) void {
-        self.paths.deinit(self.allocator);
-    }
-
-    /// Return the ECN state for one connection path, or `unknown` when unseen.
-    pub fn stateForConnectionPath(
-        self: *const EcnPathPolicy,
-        connection_id: u64,
-        path: Udp4Tuple,
-    ) EcnPathValidationState {
-        const index = self.findPathIndex(connection_id, path) orelse return .unknown;
-        return self.paths.items[index].state;
-    }
-
-    /// Return whether endpoint packetization may set ECT on one connection path.
-    pub fn mayUseEctOnConnectionPath(
-        self: *const EcnPathPolicy,
-        connection_id: u64,
-        path: Udp4Tuple,
-    ) bool {
-        return self.stateForConnectionPath(connection_id, path) != .failed;
-    }
-
-    /// Store the current ECN validation state for one connection path.
-    pub fn setStateForConnectionPath(
-        self: *EcnPathPolicy,
-        connection_id: u64,
-        path: Udp4Tuple,
-        state: EcnPathValidationState,
-    ) RouteError!void {
-        if (self.findPathIndex(connection_id, path)) |index| {
-            self.paths.items[index].state = state;
-            return;
+        /// Create an empty endpoint ECN path policy.
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .allocator = allocator };
         }
-        self.paths.append(self.allocator, .{
-            .connection_id = connection_id,
-            .path = path,
-            .state = state,
-        }) catch return error.OutOfMemory;
-    }
 
-    /// Remove stored ECN state for one connection path.
-    pub fn resetConnectionPath(self: *EcnPathPolicy, connection_id: u64, path: Udp4Tuple) bool {
-        const index = self.findPathIndex(connection_id, path) orelse return false;
-        _ = self.paths.orderedRemove(index);
-        return true;
-    }
+        /// Release stored path state.
+        pub fn deinit(self: *Self) void {
+            self.paths.deinit(self.allocator);
+        }
 
-    /// Remove all ECN state for a retired connection handle.
-    pub fn resetConnection(self: *EcnPathPolicy, connection_id: u64) usize {
-        var removed: usize = 0;
-        var index: usize = 0;
-        while (index < self.paths.items.len) {
-            if (self.paths.items[index].connection_id == connection_id) {
-                _ = self.paths.orderedRemove(index);
-                removed += 1;
-            } else {
-                index += 1;
+        /// Return the ECN state for one connection path, or `unknown` when unseen.
+        pub fn stateForConnectionPath(
+            self: *const Self,
+            connection_id: u64,
+            path: Path,
+        ) EcnPathValidationState {
+            const index = self.findPathIndex(connection_id, path) orelse return .unknown;
+            return self.paths.items[index].state;
+        }
+
+        /// Return whether endpoint packetization may set ECT on one connection path.
+        pub fn mayUseEctOnConnectionPath(
+            self: *const Self,
+            connection_id: u64,
+            path: Path,
+        ) bool {
+            return self.stateForConnectionPath(connection_id, path) != .failed;
+        }
+
+        /// Store the current ECN validation state for one connection path.
+        pub fn setStateForConnectionPath(
+            self: *Self,
+            connection_id: u64,
+            path: Path,
+            state: EcnPathValidationState,
+        ) RouteError!void {
+            if (self.findPathIndex(connection_id, path)) |index| {
+                self.paths.items[index].state = state;
+                return;
             }
+            self.paths.append(self.allocator, .{
+                .connection_id = connection_id,
+                .path = path,
+                .state = state,
+            }) catch return error.OutOfMemory;
         }
-        return removed;
-    }
 
-    fn findPathIndex(self: *const EcnPathPolicy, connection_id: u64, path: Udp4Tuple) ?usize {
-        for (self.paths.items, 0..) |entry, index| {
-            if (entry.connection_id == connection_id and entry.path.eql(path)) return index;
+        /// Remove stored ECN state for one connection path.
+        pub fn resetConnectionPath(self: *Self, connection_id: u64, path: Path) bool {
+            const index = self.findPathIndex(connection_id, path) orelse return false;
+            _ = self.paths.orderedRemove(index);
+            return true;
         }
-        return null;
-    }
-};
 
-const Route = struct {
-    connection_id: u64,
-    sequence_number: ?u64,
-    destination_connection_id: ConnectionId,
-    path: Udp4Tuple,
-    active_migration_disabled: bool,
-};
+        /// Remove all ECN state for a retired connection handle.
+        pub fn resetConnection(self: *Self, connection_id: u64) usize {
+            var removed: usize = 0;
+            var index: usize = 0;
+            while (index < self.paths.items.len) {
+                if (self.paths.items[index].connection_id == connection_id) {
+                    _ = self.paths.orderedRemove(index);
+                    removed += 1;
+                } else {
+                    index += 1;
+                }
+            }
+            return removed;
+        }
+
+        fn findPathIndex(self: *const Self, connection_id: u64, path: Path) ?usize {
+            for (self.paths.items, 0..) |entry, index| {
+                if (entry.connection_id == connection_id and entry.path.eql(path)) return index;
+            }
+            return null;
+        }
+    };
+}
+
+fn RouteForTuple(comptime Path: type) type {
+    return struct {
+        connection_id: u64,
+        sequence_number: ?u64,
+        destination_connection_id: ConnectionId,
+        path: Path,
+        active_migration_disabled: bool,
+    };
+}
 
 const StatelessResetRoute = struct {
     destination_connection_id: ConnectionId,
@@ -346,241 +410,232 @@ pub const AddressValidationSecretSet = struct {
 /// for rotation, and a replay filter. It can export/import the token secret set
 /// and replay-filter fingerprints for external persistence or worker
 /// distribution.
-pub const AddressValidationPolicy = struct {
-    allocator: std.mem.Allocator,
-    current_secret: address_validation_token.Secret,
-    max_previous_secrets: usize,
-    previous_secrets: std.ArrayList(address_validation_token.Secret) = .empty,
-    replay_filter: address_validation_token.ReplayFilter,
+pub const AddressValidationPolicy = AddressValidationPolicyForTuple(Udp4Tuple);
 
-    /// Create an endpoint token policy with one active secret.
-    pub fn init(
+fn AddressValidationPolicyForTuple(comptime Path: type) type {
+    return struct {
+        const Self = @This();
         allocator: std.mem.Allocator,
         current_secret: address_validation_token.Secret,
-        options: AddressValidationPolicyOptions,
-    ) AddressValidationPolicy {
-        return .{
-            .allocator = allocator,
-            .current_secret = current_secret,
-            .max_previous_secrets = options.max_previous_secrets,
-            .replay_filter = address_validation_token.ReplayFilter.init(allocator, options.max_replay_entries),
-        };
-    }
+        max_previous_secrets: usize,
+        previous_secrets: std.ArrayList(address_validation_token.Secret) = .empty,
+        replay_filter: address_validation_token.ReplayFilter,
 
-    /// Create an endpoint token policy from an externally persisted secret set.
-    ///
-    /// Previous secrets are copied and trimmed to the configured retention
-    /// limit, keeping the newest retained values from the end of the snapshot.
-    /// Replay-filter state starts empty; use
-    /// `initWithSecretSetAndReplayFilter()` when restoring replay state too.
-    pub fn initWithSecretSet(
-        allocator: std.mem.Allocator,
-        secret_set: AddressValidationSecretSet,
-        options: AddressValidationPolicyOptions,
-    ) address_validation_token.Error!AddressValidationPolicy {
-        var policy = AddressValidationPolicy.init(allocator, secret_set.current_secret, options);
-        errdefer policy.deinit();
+        /// Create an endpoint token policy with one active secret.
+        pub fn init(
+            allocator: std.mem.Allocator,
+            current_secret: address_validation_token.Secret,
+            options: AddressValidationPolicyOptions,
+        ) Self {
+            return .{
+                .allocator = allocator,
+                .current_secret = current_secret,
+                .max_previous_secrets = options.max_previous_secrets,
+                .replay_filter = address_validation_token.ReplayFilter.init(allocator, options.max_replay_entries),
+            };
+        }
 
-        const retained = if (secret_set.previous_secrets.len > options.max_previous_secrets)
-            secret_set.previous_secrets[secret_set.previous_secrets.len - options.max_previous_secrets ..]
-        else
-            secret_set.previous_secrets;
-        policy.previous_secrets.appendSlice(allocator, retained) catch return error.OutOfMemory;
-        return policy;
-    }
+        /// Create an endpoint token policy from an externally persisted secret set.
+        ///
+        /// Previous secrets are copied and trimmed to the configured retention
+        /// limit, keeping the newest retained values from the end of the snapshot.
+        /// Replay-filter state starts empty; use
+        /// `initWithSecretSetAndReplayFilter()` when restoring replay state too.
+        pub fn initWithSecretSet(
+            allocator: std.mem.Allocator,
+            secret_set: AddressValidationSecretSet,
+            options: AddressValidationPolicyOptions,
+        ) address_validation_token.Error!Self {
+            var policy = Self.init(allocator, secret_set.current_secret, options);
+            errdefer policy.deinit();
 
-    /// Create an endpoint token policy from persisted secrets and replay state.
-    ///
-    /// Replay fingerprints are copied and trimmed to `max_replay_entries`,
-    /// keeping newest entries from the end of the snapshot.
-    pub fn initWithSecretSetAndReplayFilter(
-        allocator: std.mem.Allocator,
-        secret_set: AddressValidationSecretSet,
-        replay_snapshot: address_validation_token.ReplayFilterSnapshot,
-        options: AddressValidationPolicyOptions,
-    ) address_validation_token.Error!AddressValidationPolicy {
-        var policy = try AddressValidationPolicy.initWithSecretSet(allocator, secret_set, options);
-        errdefer policy.deinit();
+            const retained = if (secret_set.previous_secrets.len > options.max_previous_secrets)
+                secret_set.previous_secrets[secret_set.previous_secrets.len - options.max_previous_secrets ..]
+            else
+                secret_set.previous_secrets;
+            policy.previous_secrets.appendSlice(allocator, retained) catch return error.OutOfMemory;
+            return policy;
+        }
 
-        var replay_filter = try address_validation_token.ReplayFilter.initWithSnapshot(
-            allocator,
-            options.max_replay_entries,
-            replay_snapshot,
-        );
-        errdefer replay_filter.deinit();
+        /// Create an endpoint token policy from persisted secrets and replay state.
+        ///
+        /// Replay fingerprints are copied and trimmed to `max_replay_entries`,
+        /// keeping newest entries from the end of the snapshot.
+        pub fn initWithSecretSetAndReplayFilter(
+            allocator: std.mem.Allocator,
+            secret_set: AddressValidationSecretSet,
+            replay_snapshot: address_validation_token.ReplayFilterSnapshot,
+            options: AddressValidationPolicyOptions,
+        ) address_validation_token.Error!Self {
+            var policy = try Self.initWithSecretSet(allocator, secret_set, options);
+            errdefer policy.deinit();
 
-        policy.replay_filter.deinit();
-        policy.replay_filter = replay_filter;
-        return policy;
-    }
+            var replay_filter = try address_validation_token.ReplayFilter.initWithSnapshot(
+                allocator,
+                options.max_replay_entries,
+                replay_snapshot,
+            );
+            errdefer replay_filter.deinit();
 
-    /// Release endpoint token-policy storage.
-    pub fn deinit(self: *AddressValidationPolicy) void {
-        self.replay_filter.deinit();
-        self.previous_secrets.deinit(self.allocator);
-    }
+            policy.replay_filter.deinit();
+            policy.replay_filter = replay_filter;
+            return policy;
+        }
 
-    /// Return the number of retained previous token secrets.
-    pub fn previousSecretCount(self: *const AddressValidationPolicy) usize {
-        return self.previous_secrets.items.len;
-    }
+        /// Release endpoint token-policy storage.
+        pub fn deinit(self: *Self) void {
+            self.replay_filter.deinit();
+            self.previous_secrets.deinit(self.allocator);
+        }
 
-    /// Return the number of retained replay fingerprints.
-    pub fn replayFilterEntryCount(self: *const AddressValidationPolicy) usize {
-        return self.replay_filter.entryCount();
-    }
+        /// Return the number of retained previous token secrets.
+        pub fn previousSecretCount(self: *const Self) usize {
+            return self.previous_secrets.items.len;
+        }
 
-    /// Export the active and retained previous secrets for external storage.
-    pub fn exportSecretSet(self: *const AddressValidationPolicy, allocator: std.mem.Allocator) address_validation_token.Error!AddressValidationSecretSet {
-        const previous = allocator.alloc(address_validation_token.Secret, self.previous_secrets.items.len) catch return error.OutOfMemory;
-        @memcpy(previous, self.previous_secrets.items);
-        return .{
-            .current_secret = self.current_secret,
-            .previous_secrets = previous,
-        };
-    }
+        /// Return the number of retained replay fingerprints.
+        pub fn replayFilterEntryCount(self: *const Self) usize {
+            return self.replay_filter.entryCount();
+        }
 
-    /// Export replay fingerprints for external storage or worker distribution.
-    pub fn exportReplayFilter(self: *const AddressValidationPolicy, allocator: std.mem.Allocator) address_validation_token.Error!address_validation_token.ReplayFilterSnapshot {
-        return self.replay_filter.exportSnapshot(allocator);
-    }
+        /// Export the active and retained previous secrets for external storage.
+        pub fn exportSecretSet(self: *const Self, allocator: std.mem.Allocator) address_validation_token.Error!AddressValidationSecretSet {
+            const previous = allocator.alloc(address_validation_token.Secret, self.previous_secrets.items.len) catch return error.OutOfMemory;
+            @memcpy(previous, self.previous_secrets.items);
+            return .{
+                .current_secret = self.current_secret,
+                .previous_secrets = previous,
+            };
+        }
 
-    /// Rotate to a new active secret while retaining the previous one.
-    ///
-    /// Retained previous secrets allow already-issued tokens to validate until
-    /// their encoded lifetimes expire. When the configured retention limit is
-    /// exceeded, the oldest previous secret is dropped.
-    pub fn rotateSecret(
-        self: *AddressValidationPolicy,
-        new_secret: address_validation_token.Secret,
-    ) address_validation_token.Error!void {
-        if (std.crypto.timing_safe.eql(address_validation_token.Secret, self.current_secret, new_secret)) return;
-        if (self.max_previous_secrets != 0) {
-            self.previous_secrets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
-            self.previous_secrets.appendAssumeCapacity(self.current_secret);
-            while (self.previous_secrets.items.len > self.max_previous_secrets) {
-                _ = self.previous_secrets.orderedRemove(0);
+        /// Export replay fingerprints for external storage or worker distribution.
+        pub fn exportReplayFilter(self: *const Self, allocator: std.mem.Allocator) address_validation_token.Error!address_validation_token.ReplayFilterSnapshot {
+            return self.replay_filter.exportSnapshot(allocator);
+        }
+
+        /// Rotate to a new active secret while retaining the previous one.
+        ///
+        /// Retained previous secrets allow already-issued tokens to validate until
+        /// their encoded lifetimes expire. When the configured retention limit is
+        /// exceeded, the oldest previous secret is dropped.
+        pub fn rotateSecret(
+            self: *Self,
+            new_secret: address_validation_token.Secret,
+        ) address_validation_token.Error!void {
+            if (std.crypto.timing_safe.eql(address_validation_token.Secret, self.current_secret, new_secret)) return;
+            if (self.max_previous_secrets != 0) {
+                self.previous_secrets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
+                self.previous_secrets.appendAssumeCapacity(self.current_secret);
+                while (self.previous_secrets.items.len > self.max_previous_secrets) {
+                    _ = self.previous_secrets.orderedRemove(0);
+                }
             }
+            self.current_secret = new_secret;
         }
-        self.current_secret = new_secret;
-    }
 
-    /// Issue an address-validation token bound to a UDP peer path.
-    pub fn issueTokenForPath(
-        self: *const AddressValidationPolicy,
-        allocator: std.mem.Allocator,
-        kind: address_validation_token.Kind,
-        now_nanos: i64,
-        lifetime_nanos: u64,
-        path: Udp4Tuple,
-        nonce: address_validation_token.Nonce,
-    ) address_validation_token.Error![]u8 {
-        return self.issueTokenForPathForVersion(allocator, kind, .v1, now_nanos, lifetime_nanos, path, nonce);
-    }
+        /// Issue an address-validation token bound to a UDP peer path.
+        pub fn issueTokenForPath(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            kind: address_validation_token.Kind,
+            now_nanos: i64,
+            lifetime_nanos: u64,
+            path: Path,
+            nonce: address_validation_token.Nonce,
+        ) address_validation_token.Error![]u8 {
+            return self.issueTokenForPathForVersion(allocator, kind, .v1, now_nanos, lifetime_nanos, path, nonce);
+        }
 
-    /// Issue an address-validation token for a specific originating QUIC version.
-    pub fn issueTokenForPathForVersion(
-        self: *const AddressValidationPolicy,
-        allocator: std.mem.Allocator,
-        kind: address_validation_token.Kind,
-        originating_version: packet.Version,
-        now_nanos: i64,
-        lifetime_nanos: u64,
-        path: Udp4Tuple,
-        nonce: address_validation_token.Nonce,
-    ) address_validation_token.Error![]u8 {
-        const binding = path.peerAddressValidationBinding();
-        return address_validation_token.encode(allocator, self.current_secret, .{
-            .kind = kind,
-            .originating_version = originating_version,
-            .issued_nanos = now_nanos,
-            .lifetime_nanos = lifetime_nanos,
-            .peer_address = &binding,
-            .nonce = nonce,
-        });
-    }
+        /// Issue an address-validation token for a specific originating QUIC version.
+        pub fn issueTokenForPathForVersion(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            kind: address_validation_token.Kind,
+            originating_version: packet.Version,
+            now_nanos: i64,
+            lifetime_nanos: u64,
+            path: Path,
+            nonce: address_validation_token.Nonce,
+        ) address_validation_token.Error![]u8 {
+            const binding = path.peerAddressValidationBinding();
+            return address_validation_token.encode(allocator, self.current_secret, .{
+                .kind = kind,
+                .originating_version = originating_version,
+                .issued_nanos = now_nanos,
+                .lifetime_nanos = lifetime_nanos,
+                .peer_address = &binding,
+                .nonce = nonce,
+            });
+        }
 
-    /// Validate an address token against this endpoint path and record replay state.
-    ///
-    /// Successful validation remembers the token fingerprint. A later attempt
-    /// to validate the same token returns `error.TokenReplay`.
-    pub fn validateTokenForPath(
-        self: *AddressValidationPolicy,
-        expected_kind: address_validation_token.Kind,
-        now_nanos: i64,
-        path: Udp4Tuple,
-        encoded: []const u8,
-    ) address_validation_token.Error!address_validation_token.Validation {
-        return self.validateTokenForPathForVersion(expected_kind, .v1, now_nanos, path, encoded);
-    }
+        /// Validate an address token against this endpoint path and record replay state.
+        ///
+        /// Successful validation remembers the token fingerprint. A later attempt
+        /// to validate the same token returns `error.TokenReplay`.
+        pub fn validateTokenForPath(
+            self: *Self,
+            expected_kind: address_validation_token.Kind,
+            now_nanos: i64,
+            path: Path,
+            encoded: []const u8,
+        ) address_validation_token.Error!address_validation_token.Validation {
+            return self.validateTokenForPathForVersion(expected_kind, .v1, now_nanos, path, encoded);
+        }
 
-    /// Validate a version-bound address token and record replay state.
-    pub fn validateTokenForPathForVersion(
-        self: *AddressValidationPolicy,
-        expected_kind: address_validation_token.Kind,
-        expected_originating_version: packet.Version,
-        now_nanos: i64,
-        path: Udp4Tuple,
-        encoded: []const u8,
-    ) address_validation_token.Error!address_validation_token.Validation {
-        const validation = try self.validateTokenForPathWithoutReplayForVersion(
-            expected_kind,
-            expected_originating_version,
-            now_nanos,
-            path,
-            encoded,
-        );
-        try self.replay_filter.rememberValidated(encoded);
-        return validation;
-    }
-
-    /// Validate an address token against this endpoint path without recording replay state.
-    pub fn validateTokenForPathWithoutReplay(
-        self: *const AddressValidationPolicy,
-        expected_kind: address_validation_token.Kind,
-        now_nanos: i64,
-        path: Udp4Tuple,
-        encoded: []const u8,
-    ) address_validation_token.Error!address_validation_token.Validation {
-        return self.validateTokenForPathWithoutReplayForVersion(expected_kind, .v1, now_nanos, path, encoded);
-    }
-
-    /// Validate a version-bound address token without recording replay state.
-    pub fn validateTokenForPathWithoutReplayForVersion(
-        self: *const AddressValidationPolicy,
-        expected_kind: address_validation_token.Kind,
-        expected_originating_version: packet.Version,
-        now_nanos: i64,
-        path: Udp4Tuple,
-        encoded: []const u8,
-    ) address_validation_token.Error!address_validation_token.Validation {
-        const binding = path.peerAddressValidationBinding();
-        return self.validateTokenForBinding(expected_kind, expected_originating_version, now_nanos, &binding, encoded);
-    }
-
-    fn validateTokenForBinding(
-        self: *const AddressValidationPolicy,
-        expected_kind: address_validation_token.Kind,
-        expected_originating_version: packet.Version,
-        now_nanos: i64,
-        peer_address: []const u8,
-        encoded: []const u8,
-    ) address_validation_token.Error!address_validation_token.Validation {
-        var authenticated_error: ?address_validation_token.Error = null;
-        if (address_validation_token.validateForVersion(self.current_secret, expected_kind, expected_originating_version, now_nanos, peer_address, encoded)) |validation| {
+        /// Validate a version-bound address token and record replay state.
+        pub fn validateTokenForPathForVersion(
+            self: *Self,
+            expected_kind: address_validation_token.Kind,
+            expected_originating_version: packet.Version,
+            now_nanos: i64,
+            path: Path,
+            encoded: []const u8,
+        ) address_validation_token.Error!address_validation_token.Validation {
+            const validation = try self.validateTokenForPathWithoutReplayForVersion(
+                expected_kind,
+                expected_originating_version,
+                now_nanos,
+                path,
+                encoded,
+            );
+            try self.replay_filter.rememberValidated(encoded);
             return validation;
-        } else |err| switch (err) {
-            error.InvalidToken => {},
-            error.TokenExpired, error.TokenNotYetValid => if (authenticated_error == null) {
-                authenticated_error = err;
-            },
-            error.TokenReplay, error.OutOfMemory => return err,
         }
 
-        var index = self.previous_secrets.items.len;
-        while (index > 0) {
-            index -= 1;
-            if (address_validation_token.validateForVersion(self.previous_secrets.items[index], expected_kind, expected_originating_version, now_nanos, peer_address, encoded)) |validation| {
+        /// Validate an address token against this endpoint path without recording replay state.
+        pub fn validateTokenForPathWithoutReplay(
+            self: *const Self,
+            expected_kind: address_validation_token.Kind,
+            now_nanos: i64,
+            path: Path,
+            encoded: []const u8,
+        ) address_validation_token.Error!address_validation_token.Validation {
+            return self.validateTokenForPathWithoutReplayForVersion(expected_kind, .v1, now_nanos, path, encoded);
+        }
+
+        /// Validate a version-bound address token without recording replay state.
+        pub fn validateTokenForPathWithoutReplayForVersion(
+            self: *const Self,
+            expected_kind: address_validation_token.Kind,
+            expected_originating_version: packet.Version,
+            now_nanos: i64,
+            path: Path,
+            encoded: []const u8,
+        ) address_validation_token.Error!address_validation_token.Validation {
+            const binding = path.peerAddressValidationBinding();
+            return self.validateTokenForBinding(expected_kind, expected_originating_version, now_nanos, &binding, encoded);
+        }
+
+        fn validateTokenForBinding(
+            self: *const Self,
+            expected_kind: address_validation_token.Kind,
+            expected_originating_version: packet.Version,
+            now_nanos: i64,
+            peer_address: []const u8,
+            encoded: []const u8,
+        ) address_validation_token.Error!address_validation_token.Validation {
+            var authenticated_error: ?address_validation_token.Error = null;
+            if (address_validation_token.validateForVersion(self.current_secret, expected_kind, expected_originating_version, now_nanos, peer_address, encoded)) |validation| {
                 return validation;
             } else |err| switch (err) {
                 error.InvalidToken => {},
@@ -589,12 +644,26 @@ pub const AddressValidationPolicy = struct {
                 },
                 error.TokenReplay, error.OutOfMemory => return err,
             }
-        }
 
-        if (authenticated_error) |err| return err;
-        return error.InvalidToken;
-    }
-};
+            var index = self.previous_secrets.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (address_validation_token.validateForVersion(self.previous_secrets.items[index], expected_kind, expected_originating_version, now_nanos, peer_address, encoded)) |validation| {
+                    return validation;
+                } else |err| switch (err) {
+                    error.InvalidToken => {},
+                    error.TokenExpired, error.TokenNotYetValid => if (authenticated_error == null) {
+                        authenticated_error = err;
+                    },
+                    error.TokenReplay, error.OutOfMemory => return err,
+                }
+            }
+
+            if (authenticated_error) |err| return err;
+            return error.InvalidToken;
+        }
+    };
+}
 
 /// Options for `AddressValidationPolicy`.
 pub const AddressValidationPolicyOptions = struct {
@@ -620,660 +689,665 @@ pub const EndpointRouterOptions = struct {
 ///
 /// This table does not perform socket I/O and does not own `Connection`
 /// instances. It maps destination connection IDs to caller-owned connection
-/// handles, checks the IPv4 UDP tuple associated with the route, and can route
+/// handles, checks the complete UDP tuple associated with the route, and can route
 /// either long-header datagrams with an encoded DCID length or short-header
 /// datagrams by matching registered CID prefixes.
-pub const EndpointRouter = struct {
-    allocator: std.mem.Allocator,
-    max_routes: usize,
-    max_stateless_reset_tokens: usize,
-    routes: std.ArrayList(Route) = .empty,
-    reset_tokens: std.ArrayList(StatelessResetRoute) = .empty,
+pub const EndpointRouter = EndpointRouterForTuple(Udp4Tuple);
 
-    /// Create an empty endpoint routing table.
-    pub fn init(allocator: std.mem.Allocator) EndpointRouter {
-        return initWithOptions(allocator, .{});
-    }
+fn EndpointRouterForTuple(comptime Path: type) type {
+    return struct {
+        const Self = @This();
+        allocator: std.mem.Allocator,
+        max_routes: usize,
+        max_stateless_reset_tokens: usize,
+        routes: std.ArrayList(RouteForTuple(Path)) = .empty,
+        reset_tokens: std.ArrayList(StatelessResetRoute) = .empty,
 
-    /// Create an endpoint routing table with explicit resource limits.
-    pub fn initWithOptions(allocator: std.mem.Allocator, options: EndpointRouterOptions) EndpointRouter {
-        return .{
-            .allocator = allocator,
-            .max_routes = options.max_routes,
-            .max_stateless_reset_tokens = options.max_stateless_reset_tokens,
-        };
-    }
-
-    /// Release all route storage.
-    pub fn deinit(self: *EndpointRouter) void {
-        self.reset_tokens.deinit(self.allocator);
-        self.routes.deinit(self.allocator);
-    }
-
-    /// Reserve configured route and reset-token storage for a bounded endpoint.
-    ///
-    /// Unbounded compatibility-mode routers retain their lazy allocation
-    /// behavior. A caller that supplies explicit limits can reserve both
-    /// tables before accepting untrusted connections.
-    pub fn reserveConfiguredCapacity(self: *EndpointRouter) RouteError!void {
-        if (self.max_routes != std.math.maxInt(usize)) {
-            self.routes.ensureTotalCapacity(self.allocator, self.max_routes) catch return error.OutOfMemory;
+        /// Create an empty endpoint routing table.
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return initWithOptions(allocator, .{});
         }
-        if (self.max_stateless_reset_tokens != std.math.maxInt(usize)) {
-            self.reset_tokens.ensureTotalCapacity(self.allocator, self.max_stateless_reset_tokens) catch return error.OutOfMemory;
+
+        /// Create an endpoint routing table with explicit resource limits.
+        pub fn initWithOptions(allocator: std.mem.Allocator, options: EndpointRouterOptions) Self {
+            return .{
+                .allocator = allocator,
+                .max_routes = options.max_routes,
+                .max_stateless_reset_tokens = options.max_stateless_reset_tokens,
+            };
         }
-    }
 
-    /// Return the number of active destination-CID routes.
-    pub fn routeCount(self: *const EndpointRouter) usize {
-        return self.routes.items.len;
-    }
-
-    /// Return the number of destination CIDs with stateless reset tokens.
-    pub fn statelessResetTokenCount(self: *const EndpointRouter) usize {
-        return self.reset_tokens.items.len;
-    }
-
-    /// Register a destination connection ID for a caller-owned connection handle.
-    pub fn registerConnectionId(
-        self: *EndpointRouter,
-        connection_id: u64,
-        destination_connection_id: []const u8,
-        path: Udp4Tuple,
-        options: RouteOptions,
-    ) RouteError!void {
-        const cid = try ConnectionId.init(destination_connection_id);
-        if (cid.len == 0) {
-            if (options.sequence_number != null) return error.InvalidConnectionIdLength;
-            if (options.stateless_reset_token != null) return error.InvalidConnectionIdLength;
-            if (self.findZeroLengthRouteIndex(path) != null) return error.DuplicateConnectionId;
-        } else if (self.findRouteIndex(cid) != null) return error.DuplicateConnectionId;
-        if (options.sequence_number) |sequence_number| {
-            if (self.findRouteSequenceIndex(connection_id, sequence_number) != null) return error.DuplicateConnectionId;
+        /// Release all route storage.
+        pub fn deinit(self: *Self) void {
+            self.reset_tokens.deinit(self.allocator);
+            self.routes.deinit(self.allocator);
         }
-        if (options.stateless_reset_token) |token| {
+
+        /// Reserve configured route and reset-token storage for a bounded endpoint.
+        ///
+        /// Unbounded compatibility-mode routers retain their lazy allocation
+        /// behavior. A caller that supplies explicit limits can reserve both
+        /// tables before accepting untrusted connections.
+        pub fn reserveConfiguredCapacity(self: *Self) RouteError!void {
+            if (self.max_routes != std.math.maxInt(usize)) {
+                self.routes.ensureTotalCapacity(self.allocator, self.max_routes) catch return error.OutOfMemory;
+            }
+            if (self.max_stateless_reset_tokens != std.math.maxInt(usize)) {
+                self.reset_tokens.ensureTotalCapacity(self.allocator, self.max_stateless_reset_tokens) catch return error.OutOfMemory;
+            }
+        }
+
+        /// Return the number of active destination-CID routes.
+        pub fn routeCount(self: *const Self) usize {
+            return self.routes.items.len;
+        }
+
+        /// Return the number of destination CIDs with stateless reset tokens.
+        pub fn statelessResetTokenCount(self: *const Self) usize {
+            return self.reset_tokens.items.len;
+        }
+
+        /// Register a destination connection ID for a caller-owned connection handle.
+        pub fn registerConnectionId(
+            self: *Self,
+            connection_id: u64,
+            destination_connection_id: []const u8,
+            path: Path,
+            options: RouteOptions,
+        ) RouteError!void {
+            const cid = try ConnectionId.init(destination_connection_id);
+            if (cid.len == 0) {
+                if (options.sequence_number != null) return error.InvalidConnectionIdLength;
+                if (options.stateless_reset_token != null) return error.InvalidConnectionIdLength;
+                if (self.findZeroLengthRouteIndex(path) != null) return error.DuplicateConnectionId;
+            } else if (self.findRouteIndex(cid) != null) return error.DuplicateConnectionId;
+            if (options.sequence_number) |sequence_number| {
+                if (self.findRouteSequenceIndex(connection_id, sequence_number) != null) return error.DuplicateConnectionId;
+            }
+            if (options.stateless_reset_token) |token| {
+                try self.ensureStatelessResetTokenAllowed(cid, token);
+                if (self.findStatelessResetTokenIndex(cid) == null and
+                    self.reset_tokens.items.len >= self.max_stateless_reset_tokens)
+                {
+                    return error.StatelessResetTokenCapacityReached;
+                }
+            }
+            if (self.routes.items.len >= self.max_routes) return error.RouteCapacityReached;
+            self.routes.append(self.allocator, .{
+                .connection_id = connection_id,
+                .sequence_number = options.sequence_number,
+                .destination_connection_id = cid,
+                .path = path,
+                .active_migration_disabled = options.active_migration_disabled,
+            }) catch return error.OutOfMemory;
+            errdefer _ = self.routes.orderedRemove(self.routes.items.len - 1);
+            if (options.stateless_reset_token) |token| {
+                try self.registerStatelessResetTokenForCid(cid, token);
+            }
+        }
+
+        /// Register the client Initial Source CID before sending a client Initial.
+        ///
+        /// Servers send Initial, Handshake, Version Negotiation, and Retry packets
+        /// back to the Source Connection ID chosen by the client Initial. This
+        /// helper installs that local CID as an inbound endpoint route for the
+        /// caller-owned client connection. It does not own socket I/O or construct
+        /// the Initial packet; callers still choose the outgoing Destination CID and
+        /// packetization policy at the connection layer.
+        pub fn registerClientInitialSourceConnectionId(
+            self: *Self,
+            connection_id: u64,
+            client_source_connection_id: []const u8,
+            path: Path,
+            options: ClientInitialRouteOptions,
+        ) RouteError!RouteResult {
+            try self.registerConnectionId(connection_id, client_source_connection_id, path, .{
+                .active_migration_disabled = options.active_migration_disabled,
+            });
+            return self.routeConnectionId(client_source_connection_id, path);
+        }
+
+        /// Register routes for a server connection created from an accepted Initial.
+        ///
+        /// The Original Destination Connection ID remains routable for client
+        /// Initial retransmissions that occur before the peer learns the server's
+        /// Source CID. The server Source CID is installed as the endpoint-issued
+        /// Initial CID with sequence number 0 when it is non-empty. This helper does
+        /// not validate packet protection or address tokens; callers should invoke
+        /// it only after accepting the Initial and creating the connection object.
+        pub fn registerAcceptedInitialConnectionIds(
+            self: *Self,
+            connection_id: u64,
+            initial_accept: InitialAcceptResultForTuple(Path),
+            server_source_connection_id: []const u8,
+            options: AcceptedInitialRouteOptions,
+        ) RouteError!AcceptedInitialRouteResult {
+            const original_cid = try ConnectionId.init(initial_accept.original_destination_connection_id);
+            if (original_cid.len < 8) return error.InvalidConnectionIdLength;
+            const server_cid = try ConnectionId.init(server_source_connection_id);
+
+            try self.registerConnectionId(connection_id, original_cid.asSlice(), initial_accept.path, .{
+                .active_migration_disabled = options.active_migration_disabled,
+            });
+            errdefer _ = self.retireConnectionIdOnPath(original_cid.asSlice(), initial_accept.path) catch false;
+
+            try self.registerConnectionId(connection_id, server_cid.asSlice(), initial_accept.path, .{
+                .sequence_number = if (server_cid.len == 0) null else 0,
+                .active_migration_disabled = options.active_migration_disabled,
+                .stateless_reset_token = options.stateless_reset_token,
+            });
+
+            return .{
+                .original_destination_route = try self.routeConnectionId(original_cid.asSlice(), initial_accept.path),
+                .server_source_route = try self.routeConnectionId(server_cid.asSlice(), initial_accept.path),
+            };
+        }
+
+        /// Register a stateless reset token for a destination CID.
+        ///
+        /// Tokens survive active route retirement so a later packet for the retired
+        /// CID can be answered by endpoint policy without owning a connection.
+        pub fn registerStatelessResetToken(
+            self: *Self,
+            destination_connection_id: []const u8,
+            token: [stateless_reset_token_len]u8,
+        ) RouteError!void {
+            const cid = try ConnectionId.init(destination_connection_id);
+            if (cid.len == 0) return error.InvalidConnectionIdLength;
             try self.ensureStatelessResetTokenAllowed(cid, token);
             if (self.findStatelessResetTokenIndex(cid) == null and
                 self.reset_tokens.items.len >= self.max_stateless_reset_tokens)
             {
                 return error.StatelessResetTokenCapacityReached;
             }
-        }
-        if (self.routes.items.len >= self.max_routes) return error.RouteCapacityReached;
-        self.routes.append(self.allocator, .{
-            .connection_id = connection_id,
-            .sequence_number = options.sequence_number,
-            .destination_connection_id = cid,
-            .path = path,
-            .active_migration_disabled = options.active_migration_disabled,
-        }) catch return error.OutOfMemory;
-        errdefer _ = self.routes.orderedRemove(self.routes.items.len - 1);
-        if (options.stateless_reset_token) |token| {
             try self.registerStatelessResetTokenForCid(cid, token);
         }
-    }
 
-    /// Register the client Initial Source CID before sending a client Initial.
-    ///
-    /// Servers send Initial, Handshake, Version Negotiation, and Retry packets
-    /// back to the Source Connection ID chosen by the client Initial. This
-    /// helper installs that local CID as an inbound endpoint route for the
-    /// caller-owned client connection. It does not own socket I/O or construct
-    /// the Initial packet; callers still choose the outgoing Destination CID and
-    /// packetization policy at the connection layer.
-    pub fn registerClientInitialSourceConnectionId(
-        self: *EndpointRouter,
-        connection_id: u64,
-        client_source_connection_id: []const u8,
-        path: Udp4Tuple,
-        options: ClientInitialRouteOptions,
-    ) RouteError!RouteResult {
-        try self.registerConnectionId(connection_id, client_source_connection_id, path, .{
-            .active_migration_disabled = options.active_migration_disabled,
-        });
-        return self.routeConnectionId(client_source_connection_id, path);
-    }
-
-    /// Register routes for a server connection created from an accepted Initial.
-    ///
-    /// The Original Destination Connection ID remains routable for client
-    /// Initial retransmissions that occur before the peer learns the server's
-    /// Source CID. The server Source CID is installed as the endpoint-issued
-    /// Initial CID with sequence number 0 when it is non-empty. This helper does
-    /// not validate packet protection or address tokens; callers should invoke
-    /// it only after accepting the Initial and creating the connection object.
-    pub fn registerAcceptedInitialConnectionIds(
-        self: *EndpointRouter,
-        connection_id: u64,
-        initial_accept: InitialAcceptResult,
-        server_source_connection_id: []const u8,
-        options: AcceptedInitialRouteOptions,
-    ) RouteError!AcceptedInitialRouteResult {
-        const original_cid = try ConnectionId.init(initial_accept.original_destination_connection_id);
-        if (original_cid.len < 8) return error.InvalidConnectionIdLength;
-        const server_cid = try ConnectionId.init(server_source_connection_id);
-
-        try self.registerConnectionId(connection_id, original_cid.asSlice(), initial_accept.path, .{
-            .active_migration_disabled = options.active_migration_disabled,
-        });
-        errdefer _ = self.retireConnectionIdOnPath(original_cid.asSlice(), initial_accept.path) catch false;
-
-        try self.registerConnectionId(connection_id, server_cid.asSlice(), initial_accept.path, .{
-            .sequence_number = if (server_cid.len == 0) null else 0,
-            .active_migration_disabled = options.active_migration_disabled,
-            .stateless_reset_token = options.stateless_reset_token,
-        });
-
-        return .{
-            .original_destination_route = try self.routeConnectionId(original_cid.asSlice(), initial_accept.path),
-            .server_source_route = try self.routeConnectionId(server_cid.asSlice(), initial_accept.path),
-        };
-    }
-
-    /// Register a stateless reset token for a destination CID.
-    ///
-    /// Tokens survive active route retirement so a later packet for the retired
-    /// CID can be answered by endpoint policy without owning a connection.
-    pub fn registerStatelessResetToken(
-        self: *EndpointRouter,
-        destination_connection_id: []const u8,
-        token: [stateless_reset_token_len]u8,
-    ) RouteError!void {
-        const cid = try ConnectionId.init(destination_connection_id);
-        if (cid.len == 0) return error.InvalidConnectionIdLength;
-        try self.ensureStatelessResetTokenAllowed(cid, token);
-        if (self.findStatelessResetTokenIndex(cid) == null and
-            self.reset_tokens.items.len >= self.max_stateless_reset_tokens)
-        {
-            return error.StatelessResetTokenCapacityReached;
+        /// Remove a destination connection ID route.
+        pub fn retireConnectionId(self: *Self, destination_connection_id: []const u8) RouteError!bool {
+            const cid = try ConnectionId.init(destination_connection_id);
+            if (cid.len == 0) return error.AmbiguousConnectionId;
+            const index = self.findRouteIndex(cid) orelse return false;
+            _ = self.routes.orderedRemove(index);
+            return true;
         }
-        try self.registerStatelessResetTokenForCid(cid, token);
-    }
 
-    /// Remove a destination connection ID route.
-    pub fn retireConnectionId(self: *EndpointRouter, destination_connection_id: []const u8) RouteError!bool {
-        const cid = try ConnectionId.init(destination_connection_id);
-        if (cid.len == 0) return error.AmbiguousConnectionId;
-        const index = self.findRouteIndex(cid) orelse return false;
-        _ = self.routes.orderedRemove(index);
-        return true;
-    }
+        /// Remove a destination connection ID route bound to a UDP tuple.
+        pub fn retireConnectionIdOnPath(
+            self: *Self,
+            destination_connection_id: []const u8,
+            path: Path,
+        ) RouteError!bool {
+            const cid = try ConnectionId.init(destination_connection_id);
+            const index = if (cid.len == 0) self.findZeroLengthRouteIndex(path) else self.findRouteIndex(cid);
+            const route_index = index orelse return false;
+            _ = self.routes.orderedRemove(route_index);
+            return true;
+        }
 
-    /// Remove a destination connection ID route bound to a UDP tuple.
-    pub fn retireConnectionIdOnPath(
-        self: *EndpointRouter,
-        destination_connection_id: []const u8,
-        path: Udp4Tuple,
-    ) RouteError!bool {
-        const cid = try ConnectionId.init(destination_connection_id);
-        const index = if (cid.len == 0) self.findZeroLengthRouteIndex(path) else self.findRouteIndex(cid);
-        const route_index = index orelse return false;
-        _ = self.routes.orderedRemove(route_index);
-        return true;
-    }
+        /// Remove a route by caller-owned connection handle and NEW_CONNECTION_ID sequence number.
+        pub fn retireConnectionIdSequence(
+            self: *Self,
+            connection_id: u64,
+            sequence_number: u64,
+        ) bool {
+            const index = self.findRouteSequenceIndex(connection_id, sequence_number) orelse return false;
+            _ = self.routes.orderedRemove(index);
+            return true;
+        }
 
-    /// Remove a route by caller-owned connection handle and NEW_CONNECTION_ID sequence number.
-    pub fn retireConnectionIdSequence(
-        self: *EndpointRouter,
-        connection_id: u64,
-        sequence_number: u64,
-    ) bool {
-        const index = self.findRouteSequenceIndex(connection_id, sequence_number) orelse return false;
-        _ = self.routes.orderedRemove(index);
-        return true;
-    }
+        /// Remove routes whose sequence number is lower than `retire_prior_to`.
+        ///
+        /// This mirrors the NEW_CONNECTION_ID Retire Prior To threshold while
+        /// leaving stateless reset tokens available for later inactive-CID packets.
+        pub fn retireConnectionIdSequencesBefore(
+            self: *Self,
+            connection_id: u64,
+            retire_prior_to: u64,
+        ) usize {
+            var retired: usize = 0;
+            var index: usize = 0;
+            while (index < self.routes.items.len) {
+                const route = self.routes.items[index];
+                const sequence_number = route.sequence_number orelse {
+                    index += 1;
+                    continue;
+                };
+                if (route.connection_id != connection_id or sequence_number >= retire_prior_to) {
+                    index += 1;
+                    continue;
+                }
+                _ = self.routes.orderedRemove(index);
+                retired += 1;
+            }
+            return retired;
+        }
 
-    /// Remove routes whose sequence number is lower than `retire_prior_to`.
-    ///
-    /// This mirrors the NEW_CONNECTION_ID Retire Prior To threshold while
-    /// leaving stateless reset tokens available for later inactive-CID packets.
-    pub fn retireConnectionIdSequencesBefore(
-        self: *EndpointRouter,
-        connection_id: u64,
-        retire_prior_to: u64,
-    ) usize {
-        var retired: usize = 0;
-        var index: usize = 0;
-        while (index < self.routes.items.len) {
-            const route = self.routes.items[index];
-            const sequence_number = route.sequence_number orelse {
-                index += 1;
-                continue;
+        /// Remove every active route owned by one caller connection handle.
+        ///
+        /// This is the endpoint lifecycle hook for a closed connection. Stateless
+        /// reset tokens are intentionally retained, matching individual CID
+        /// retirement: a later datagram for an inactive route can still be answered
+        /// by endpoint policy without keeping the connection object alive.
+        pub fn retireConnectionRoutes(self: *Self, connection_id: u64) usize {
+            var retired: usize = 0;
+            var index: usize = 0;
+            while (index < self.routes.items.len) {
+                if (self.routes.items[index].connection_id != connection_id) {
+                    index += 1;
+                    continue;
+                }
+                _ = self.routes.orderedRemove(index);
+                retired += 1;
+            }
+            return retired;
+        }
+
+        /// Register a replacement destination CID and retire older sequence routes.
+        ///
+        /// This mirrors NEW_CONNECTION_ID replacement semantics at endpoint routing
+        /// scope. The replacement route is installed first so the endpoint keeps at
+        /// least one active route while applying `retire_prior_to`; the threshold
+        /// must not exceed the replacement sequence number.
+        pub fn registerReplacementConnectionId(
+            self: *Self,
+            connection_id: u64,
+            destination_connection_id: []const u8,
+            path: Path,
+            sequence_number: u64,
+            retire_prior_to: u64,
+            options: ReplacementRouteOptions,
+        ) RouteError!ReplacementResult {
+            if (retire_prior_to > sequence_number) return error.InvalidConnectionIdSequence;
+            try self.registerConnectionId(connection_id, destination_connection_id, path, .{
+                .sequence_number = sequence_number,
+                .active_migration_disabled = options.active_migration_disabled,
+                .stateless_reset_token = options.stateless_reset_token,
+            });
+            return .{
+                .sequence_number = sequence_number,
+                .retire_prior_to = retire_prior_to,
+                .retired_count = self.retireConnectionIdSequencesBefore(connection_id, retire_prior_to),
             };
-            if (route.connection_id != connection_id or sequence_number >= retire_prior_to) {
-                index += 1;
-                continue;
-            }
-            _ = self.routes.orderedRemove(index);
-            retired += 1;
-        }
-        return retired;
-    }
-
-    /// Remove every active route owned by one caller connection handle.
-    ///
-    /// This is the endpoint lifecycle hook for a closed connection. Stateless
-    /// reset tokens are intentionally retained, matching individual CID
-    /// retirement: a later datagram for an inactive route can still be answered
-    /// by endpoint policy without keeping the connection object alive.
-    pub fn retireConnectionRoutes(self: *EndpointRouter, connection_id: u64) usize {
-        var retired: usize = 0;
-        var index: usize = 0;
-        while (index < self.routes.items.len) {
-            if (self.routes.items[index].connection_id != connection_id) {
-                index += 1;
-                continue;
-            }
-            _ = self.routes.orderedRemove(index);
-            retired += 1;
-        }
-        return retired;
-    }
-
-    /// Register a replacement destination CID and retire older sequence routes.
-    ///
-    /// This mirrors NEW_CONNECTION_ID replacement semantics at endpoint routing
-    /// scope. The replacement route is installed first so the endpoint keeps at
-    /// least one active route while applying `retire_prior_to`; the threshold
-    /// must not exceed the replacement sequence number.
-    pub fn registerReplacementConnectionId(
-        self: *EndpointRouter,
-        connection_id: u64,
-        destination_connection_id: []const u8,
-        path: Udp4Tuple,
-        sequence_number: u64,
-        retire_prior_to: u64,
-        options: ReplacementRouteOptions,
-    ) RouteError!ReplacementResult {
-        if (retire_prior_to > sequence_number) return error.InvalidConnectionIdSequence;
-        try self.registerConnectionId(connection_id, destination_connection_id, path, .{
-            .sequence_number = sequence_number,
-            .active_migration_disabled = options.active_migration_disabled,
-            .stateless_reset_token = options.stateless_reset_token,
-        });
-        return .{
-            .sequence_number = sequence_number,
-            .retire_prior_to = retire_prior_to,
-            .retired_count = self.retireConnectionIdSequencesBefore(connection_id, retire_prior_to),
-        };
-    }
-
-    /// Replace an Initial route's destination CID with the Retry Source CID.
-    ///
-    /// After a server sends a Retry packet, the client uses the Retry Source
-    /// Connection ID as the Destination Connection ID on the next Initial. This
-    /// helper keeps the same caller-owned connection handle and UDP path while
-    /// making that route switch explicit in endpoint policy. It is only for
-    /// Initial routes, so routes created from NEW_CONNECTION_ID sequence numbers
-    /// are rejected.
-    pub fn switchInitialDestinationConnectionIdAfterRetry(
-        self: *EndpointRouter,
-        original_destination_connection_id: []const u8,
-        retry_source_connection_id: []const u8,
-        path: Udp4Tuple,
-    ) RouteError!RouteResult {
-        const original_cid = try ConnectionId.init(original_destination_connection_id);
-        const retry_cid = try ConnectionId.init(retry_source_connection_id);
-        const index = if (original_cid.len == 0)
-            self.findZeroLengthRouteIndex(path) orelse return error.UnknownConnectionId
-        else
-            self.findRouteIndex(original_cid) orelse return error.UnknownConnectionId;
-        const route = &self.routes.items[index];
-        if (!route.path.eql(path)) return error.PathMismatch;
-        if (route.sequence_number != null) return error.InvalidConnectionIdSequence;
-
-        const duplicate_index = if (retry_cid.len == 0) self.findZeroLengthRouteIndex(path) else self.findRouteIndex(retry_cid);
-        if (duplicate_index) |existing_index| {
-            if (existing_index != index) return error.DuplicateConnectionId;
         }
 
-        route.destination_connection_id = retry_cid;
-        return resultForRoute(route.*, path);
-    }
+        /// Replace an Initial route's destination CID with the Retry Source CID.
+        ///
+        /// After a server sends a Retry packet, the client uses the Retry Source
+        /// Connection ID as the Destination Connection ID on the next Initial. This
+        /// helper keeps the same caller-owned connection handle and UDP path while
+        /// making that route switch explicit in endpoint policy. It is only for
+        /// Initial routes, so routes created from NEW_CONNECTION_ID sequence numbers
+        /// are rejected.
+        pub fn switchInitialDestinationConnectionIdAfterRetry(
+            self: *Self,
+            original_destination_connection_id: []const u8,
+            retry_source_connection_id: []const u8,
+            path: Path,
+        ) RouteError!RouteResult {
+            const original_cid = try ConnectionId.init(original_destination_connection_id);
+            const retry_cid = try ConnectionId.init(retry_source_connection_id);
+            const index = if (original_cid.len == 0)
+                self.findZeroLengthRouteIndex(path) orelse return error.UnknownConnectionId
+            else
+                self.findRouteIndex(original_cid) orelse return error.UnknownConnectionId;
+            const route = &self.routes.items[index];
+            if (!route.path.eql(path)) return error.PathMismatch;
+            if (route.sequence_number != null) return error.InvalidConnectionIdSequence;
 
-    /// Commit a caller-validated migration to a server preferred address.
-    ///
-    /// The QUIC transport parameter carries a preferred-address connection ID
-    /// and stateless reset token. After the caller validates the preferred UDP
-    /// path, this helper installs the preferred route for the same
-    /// caller-owned connection handle and retires the previous active route.
-    /// Socket I/O and path validation remain outside this in-memory policy.
-    pub fn commitPreferredAddressMigration(
-        self: *EndpointRouter,
-        current_destination_connection_id: []const u8,
-        current_path: Udp4Tuple,
-        preferred_destination_connection_id: []const u8,
-        preferred_path: Udp4Tuple,
-        preferred_stateless_reset_token: [stateless_reset_token_len]u8,
-    ) RouteError!RouteResult {
-        const current_cid = try ConnectionId.init(current_destination_connection_id);
-        const preferred_cid = try ConnectionId.init(preferred_destination_connection_id);
-        if (preferred_cid.len == 0) return error.InvalidConnectionIdLength;
-
-        const current_index = self.findRouteIndexForPath(current_cid, current_path) orelse return error.UnknownConnectionId;
-        const current_route = self.routes.items[current_index];
-        if (!current_route.path.eql(current_path)) return error.PathMismatch;
-
-        try self.registerConnectionId(current_route.connection_id, preferred_cid.asSlice(), preferred_path, .{
-            .active_migration_disabled = current_route.active_migration_disabled,
-            .stateless_reset_token = preferred_stateless_reset_token,
-        });
-        _ = self.routes.orderedRemove(current_index);
-
-        const preferred_index = self.findRouteIndexForPath(preferred_cid, preferred_path) orelse return error.UnknownConnectionId;
-        return resultForRoute(self.routes.items[preferred_index], preferred_path);
-    }
-
-    /// Move a route to a newly validated UDP tuple.
-    ///
-    /// The caller is responsible for QUIC path validation and packet-number
-    /// ordering. `current_path` must still match the route so a stale validation
-    /// result cannot overwrite a newer path update.
-    pub fn updateRoutePath(
-        self: *EndpointRouter,
-        destination_connection_id: []const u8,
-        current_path: Udp4Tuple,
-        new_path: Udp4Tuple,
-    ) RouteError!RouteResult {
-        const cid = try ConnectionId.init(destination_connection_id);
-        const index = self.findRouteIndexForPath(cid, current_path) orelse return error.UnknownConnectionId;
-        const route = &self.routes.items[index];
-        if (!route.path.eql(current_path)) return error.PathMismatch;
-        if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
-        if (cid.len == 0 and !route.path.eql(new_path)) {
-            if (self.findZeroLengthRouteIndex(new_path)) |existing_index| {
+            const duplicate_index = if (retry_cid.len == 0) self.findZeroLengthRouteIndex(path) else self.findRouteIndex(retry_cid);
+            if (duplicate_index) |existing_index| {
                 if (existing_index != index) return error.DuplicateConnectionId;
             }
+
+            route.destination_connection_id = retry_cid;
+            return resultForRoute(Path, route.*, path);
         }
-        route.path = new_path;
-        return resultForRoute(route.*, new_path);
-    }
 
-    /// Move a non-empty-CID route to the UDP tuple that carried validated traffic.
-    ///
-    /// This is the endpoint-side commit primitive for helpers that already
-    /// authenticated a protected datagram and proved it consumed a pending
-    /// PATH_CHALLENGE. Zero-length CID routes cannot be updated by CID alone
-    /// because their route identity is the UDP tuple.
-    pub fn updateRoutePathFromValidatedDatagram(
-        self: *EndpointRouter,
-        destination_connection_id: []const u8,
-        new_path: Udp4Tuple,
-    ) RouteError!RouteResult {
-        const cid = try ConnectionId.init(destination_connection_id);
-        if (cid.len == 0) return error.AmbiguousConnectionId;
+        /// Commit a caller-validated migration to a server preferred address.
+        ///
+        /// The QUIC transport parameter carries a preferred-address connection ID
+        /// and stateless reset token. After the caller validates the preferred UDP
+        /// path, this helper installs the preferred route for the same
+        /// caller-owned connection handle and retires the previous active route.
+        /// Socket I/O and path validation remain outside this in-memory policy.
+        pub fn commitPreferredAddressMigration(
+            self: *Self,
+            current_destination_connection_id: []const u8,
+            current_path: Path,
+            preferred_destination_connection_id: []const u8,
+            preferred_path: Path,
+            preferred_stateless_reset_token: [stateless_reset_token_len]u8,
+        ) RouteError!RouteResult {
+            const current_cid = try ConnectionId.init(current_destination_connection_id);
+            const preferred_cid = try ConnectionId.init(preferred_destination_connection_id);
+            if (preferred_cid.len == 0) return error.InvalidConnectionIdLength;
 
-        const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
-        const route = &self.routes.items[index];
-        if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
+            const current_index = self.findRouteIndexForPath(current_cid, current_path) orelse return error.UnknownConnectionId;
+            const current_route = self.routes.items[current_index];
+            if (!current_route.path.eql(current_path)) return error.PathMismatch;
 
-        route.path = new_path;
-        return resultForRoute(route.*, new_path);
-    }
+            try self.registerConnectionId(current_route.connection_id, preferred_cid.asSlice(), preferred_path, .{
+                .active_migration_disabled = current_route.active_migration_disabled,
+                .stateless_reset_token = preferred_stateless_reset_token,
+            });
+            _ = self.routes.orderedRemove(current_index);
 
-    /// Return a stateless reset token for a datagram that has no active route on this path.
-    ///
-    /// Active routes take precedence and return null. Long-header datagrams are
-    /// matched by their encoded DCID. Short-header datagrams are matched against
-    /// registered reset-token CID prefixes, with ambiguity rejected instead of
-    /// guessing.
-    pub fn statelessResetTokenForDatagram(
-        self: *const EndpointRouter,
-        path: Udp4Tuple,
-        datagram: []const u8,
-    ) RouteError!?[stateless_reset_token_len]u8 {
-        if (datagram.len < 1) return error.InvalidDatagram;
-        if ((datagram[0] & 0x80) != 0) {
-            if ((datagram[0] & 0x40) == 0) {
-                if (datagram.len < 5) return error.InvalidDatagram;
-                const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-                if (@intFromEnum(version) != 0) return null;
+            const preferred_index = self.findRouteIndexForPath(preferred_cid, preferred_path) orelse return error.UnknownConnectionId;
+            return resultForRoute(Path, self.routes.items[preferred_index], preferred_path);
+        }
+
+        /// Move a route to a newly validated UDP tuple.
+        ///
+        /// The caller is responsible for QUIC path validation and packet-number
+        /// ordering. `current_path` must still match the route so a stale validation
+        /// result cannot overwrite a newer path update.
+        pub fn updateRoutePath(
+            self: *Self,
+            destination_connection_id: []const u8,
+            current_path: Path,
+            new_path: Path,
+        ) RouteError!RouteResult {
+            const cid = try ConnectionId.init(destination_connection_id);
+            const index = self.findRouteIndexForPath(cid, current_path) orelse return error.UnknownConnectionId;
+            const route = &self.routes.items[index];
+            if (!route.path.eql(current_path)) return error.PathMismatch;
+            if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
+            if (cid.len == 0 and !route.path.eql(new_path)) {
+                if (self.findZeroLengthRouteIndex(new_path)) |existing_index| {
+                    if (existing_index != index) return error.DuplicateConnectionId;
+                }
             }
-            const dcid = try ConnectionId.init(try peekLongDestinationConnectionId(datagram));
-            if (self.findRouteIndexForPath(dcid, path) != null) return null;
-            const reset_index = self.findStatelessResetTokenIndex(dcid) orelse return null;
+            route.path = new_path;
+            return resultForRoute(Path, route.*, new_path);
+        }
+
+        /// Move a non-empty-CID route to the UDP tuple that carried validated traffic.
+        ///
+        /// This is the endpoint-side commit primitive for helpers that already
+        /// authenticated a protected datagram and proved it consumed a pending
+        /// PATH_CHALLENGE. Zero-length CID routes cannot be updated by CID alone
+        /// because their route identity is the UDP tuple.
+        pub fn updateRoutePathFromValidatedDatagram(
+            self: *Self,
+            destination_connection_id: []const u8,
+            new_path: Path,
+        ) RouteError!RouteResult {
+            const cid = try ConnectionId.init(destination_connection_id);
+            if (cid.len == 0) return error.AmbiguousConnectionId;
+
+            const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
+            const route = &self.routes.items[index];
+            if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
+
+            route.path = new_path;
+            return resultForRoute(Path, route.*, new_path);
+        }
+
+        /// Return a stateless reset token for a datagram that has no active route on this path.
+        ///
+        /// Active routes take precedence and return null. Long-header datagrams are
+        /// matched by their encoded DCID. Short-header datagrams are matched against
+        /// registered reset-token CID prefixes, with ambiguity rejected instead of
+        /// guessing.
+        pub fn statelessResetTokenForDatagram(
+            self: *const Self,
+            path: Path,
+            datagram: []const u8,
+        ) RouteError!?[stateless_reset_token_len]u8 {
+            if (datagram.len < 1) return error.InvalidDatagram;
+            if ((datagram[0] & 0x80) != 0) {
+                if ((datagram[0] & 0x40) == 0) {
+                    if (datagram.len < 5) return error.InvalidDatagram;
+                    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+                    if (@intFromEnum(version) != 0) return null;
+                }
+                const dcid = try ConnectionId.init(try peekLongDestinationConnectionId(datagram));
+                if (self.findRouteIndexForPath(dcid, path) != null) return null;
+                const reset_index = self.findStatelessResetTokenIndex(dcid) orelse return null;
+                return self.reset_tokens.items[reset_index].token;
+            }
+            if ((datagram[0] & 0x40) == 0) return null;
+
+            if (try self.findShortRouteIndex(path, datagram)) |_| return null;
+            const reset_index = (try self.findShortStatelessResetTokenIndex(datagram)) orelse return null;
             return self.reset_tokens.items[reset_index].token;
         }
-        if ((datagram[0] & 0x40) == 0) return null;
 
-        if (try self.findShortRouteIndex(path, datagram)) |_| return null;
-        const reset_index = (try self.findShortStatelessResetTokenIndex(datagram)) orelse return null;
-        return self.reset_tokens.items[reset_index].token;
-    }
+        /// Write a stateless reset datagram for an inactive destination CID.
+        ///
+        /// The caller supplies unpredictable prefix bytes and owns the output
+        /// buffer. Active routes return null, and the generated reset must be
+        /// shorter than the triggering datagram so endpoint code cannot create a
+        /// reset loop with another endpoint.
+        pub fn writeStatelessResetForDatagram(
+            self: *const Self,
+            out: []u8,
+            path: Path,
+            triggering_datagram: []const u8,
+            unpredictable_prefix: []const u8,
+        ) RouteError!?[]const u8 {
+            const token = (try self.statelessResetTokenForDatagram(path, triggering_datagram)) orelse return null;
+            if (unpredictable_prefix.len < packet.min_stateless_reset_datagram_len - stateless_reset_token_len) {
+                return error.InvalidResetSize;
+            }
+            if (!packet.isStatelessResetPrefix(unpredictable_prefix)) return error.InvalidResetSize;
+            const reset_len = unpredictable_prefix.len + stateless_reset_token_len;
+            if (reset_len >= triggering_datagram.len) return error.InvalidResetSize;
+            if (out.len < reset_len) return error.BufferTooSmall;
 
-    /// Write a stateless reset datagram for an inactive destination CID.
-    ///
-    /// The caller supplies unpredictable prefix bytes and owns the output
-    /// buffer. Active routes return null, and the generated reset must be
-    /// shorter than the triggering datagram so endpoint code cannot create a
-    /// reset loop with another endpoint.
-    pub fn writeStatelessResetForDatagram(
-        self: *const EndpointRouter,
-        out: []u8,
-        path: Udp4Tuple,
-        triggering_datagram: []const u8,
-        unpredictable_prefix: []const u8,
-    ) RouteError!?[]const u8 {
-        const token = (try self.statelessResetTokenForDatagram(path, triggering_datagram)) orelse return null;
-        if (unpredictable_prefix.len < packet.min_stateless_reset_datagram_len - stateless_reset_token_len) {
-            return error.InvalidResetSize;
-        }
-        if (!packet.isStatelessResetPrefix(unpredictable_prefix)) return error.InvalidResetSize;
-        const reset_len = unpredictable_prefix.len + stateless_reset_token_len;
-        if (reset_len >= triggering_datagram.len) return error.InvalidResetSize;
-        if (out.len < reset_len) return error.BufferTooSmall;
-
-        @memcpy(out[0..unpredictable_prefix.len], unpredictable_prefix);
-        @memcpy(out[unpredictable_prefix.len..][0..stateless_reset_token_len], &token);
-        return out[0..reset_len];
-    }
-
-    /// Decide endpoint receive handling for one UDP datagram.
-    ///
-    /// Active routes are returned for connection delivery. Unknown CIDs are
-    /// answered with a stateless reset only when an inactive-CID token is known;
-    /// otherwise the datagram is dropped. Malformed, ambiguous, or policy-
-    /// rejected datagrams are surfaced as errors so callers do not accidentally
-    /// reset packets that still belong to an active connection. Packets with
-    /// the QUIC fixed bit cleared are ignored before routing or stateless reset
-    /// handling.
-    pub fn handleDatagram(
-        self: *const EndpointRouter,
-        out: []u8,
-        path: Udp4Tuple,
-        datagram: []const u8,
-        unpredictable_prefix: []const u8,
-    ) RouteError!DatagramAction {
-        if (datagram.len < 1) return error.InvalidDatagram;
-        if ((datagram[0] & 0x40) == 0) {
-            if ((datagram[0] & 0x80) == 0) return .dropped;
-            if (datagram.len < 5) return error.InvalidDatagram;
-            const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-            if (@intFromEnum(version) != 0) return .dropped;
+            @memcpy(out[0..unpredictable_prefix.len], unpredictable_prefix);
+            @memcpy(out[unpredictable_prefix.len..][0..stateless_reset_token_len], &token);
+            return out[0..reset_len];
         }
 
-        if (self.routeDatagram(path, datagram)) |route| {
-            return .{ .routed = route };
-        } else |err| switch (err) {
-            error.UnknownConnectionId => {},
-            else => return err,
-        }
-
-        if (try self.writeStatelessResetForDatagram(out, path, datagram, unpredictable_prefix)) |reset| {
-            return .{ .stateless_reset = reset };
-        }
-        return .dropped;
-    }
-
-    /// Decide endpoint receive handling with RFC 8999 Version Negotiation.
-    ///
-    /// If the datagram starts with a long header whose Version is unsupported,
-    /// this writes a Version Negotiation response before route lookup. Short
-    /// headers, Version Negotiation packets, and supported versions continue
-    /// through normal route/reset/drop handling.
-    pub fn handleDatagramWithVersionNegotiation(
-        self: *const EndpointRouter,
-        out: []u8,
-        path: Udp4Tuple,
-        datagram: []const u8,
-        unpredictable_prefix: []const u8,
-        supported_versions: []const packet.Version,
-    ) RouteError!DatagramAction {
-        if (try writeVersionNegotiationForUnsupportedVersion(out, datagram, supported_versions)) |response| {
-            return .{ .version_negotiation = response };
-        }
-        const action = try self.handleDatagram(out, path, datagram, unpredictable_prefix);
-        switch (action) {
-            .dropped => {},
-            else => return action,
-        }
-        if (try peekInitialAcceptDatagram(path, datagram, supported_versions)) |accept| {
-            return .{ .accept_initial = accept };
-        }
-        return .dropped;
-    }
-
-    /// Route a datagram by peeking the destination connection ID.
-    ///
-    /// Long headers carry an explicit DCID length. Short headers do not, so the
-    /// router matches the datagram against registered CIDs and rejects ambiguous
-    /// prefix matches.
-    pub fn routeDatagram(
-        self: *const EndpointRouter,
-        path: Udp4Tuple,
-        datagram: []const u8,
-    ) RouteError!RouteResult {
-        if (datagram.len < 1) return error.InvalidDatagram;
-        if ((datagram[0] & 0x80) != 0) {
+        /// Decide endpoint receive handling for one UDP datagram.
+        ///
+        /// Active routes are returned for connection delivery. Unknown CIDs are
+        /// answered with a stateless reset only when an inactive-CID token is known;
+        /// otherwise the datagram is dropped. Malformed, ambiguous, or policy-
+        /// rejected datagrams are surfaced as errors so callers do not accidentally
+        /// reset packets that still belong to an active connection. Packets with
+        /// the QUIC fixed bit cleared are ignored before routing or stateless reset
+        /// handling.
+        pub fn handleDatagram(
+            self: *const Self,
+            out: []u8,
+            path: Path,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+        ) RouteError!DatagramActionForTuple(Path) {
+            if (datagram.len < 1) return error.InvalidDatagram;
             if ((datagram[0] & 0x40) == 0) {
+                if ((datagram[0] & 0x80) == 0) return .dropped;
                 if (datagram.len < 5) return error.InvalidDatagram;
                 const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-                if (@intFromEnum(version) != 0) return error.InvalidDatagram;
+                if (@intFromEnum(version) != 0) return .dropped;
             }
-            return self.routeConnectionId(try peekLongDestinationConnectionId(datagram), path);
+
+            if (self.routeDatagram(path, datagram)) |route| {
+                return .{ .routed = route };
+            } else |err| switch (err) {
+                error.UnknownConnectionId => {},
+                else => return err,
+            }
+
+            if (try self.writeStatelessResetForDatagram(out, path, datagram, unpredictable_prefix)) |reset| {
+                return .{ .stateless_reset = reset };
+            }
+            return .dropped;
         }
-        if ((datagram[0] & 0x40) == 0) return error.InvalidDatagram;
-        return self.routeShortDatagram(path, datagram);
-    }
 
-    /// Route a datagram when the destination connection ID is already known.
-    pub fn routeConnectionId(
-        self: *const EndpointRouter,
-        destination_connection_id: []const u8,
-        path: Udp4Tuple,
-    ) RouteError!RouteResult {
-        const cid = try ConnectionId.init(destination_connection_id);
-        const index = self.findRouteIndexForPath(cid, path) orelse return error.UnknownConnectionId;
-        return resultForRoute(self.routes.items[index], path);
-    }
+        /// Decide endpoint receive handling with RFC 8999 Version Negotiation.
+        ///
+        /// If the datagram starts with a long header whose Version is unsupported,
+        /// this writes a Version Negotiation response before route lookup. Short
+        /// headers, Version Negotiation packets, and supported versions continue
+        /// through normal route/reset/drop handling.
+        pub fn handleDatagramWithVersionNegotiation(
+            self: *const Self,
+            out: []u8,
+            path: Path,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const packet.Version,
+        ) RouteError!DatagramActionForTuple(Path) {
+            if (try writeVersionNegotiationForUnsupportedVersion(out, datagram, supported_versions)) |response| {
+                return .{ .version_negotiation = response };
+            }
+            const action = try self.handleDatagram(out, path, datagram, unpredictable_prefix);
+            switch (action) {
+                .dropped => {},
+                else => return action,
+            }
+            if (try peekInitialAcceptDatagramForTuple(Path, path, datagram, supported_versions)) |accept| {
+                return .{ .accept_initial = accept };
+            }
+            return .dropped;
+        }
 
-    /// Return the committed UDP tuple for a registered destination connection ID.
-    pub fn currentRoutePath(
-        self: *const EndpointRouter,
-        destination_connection_id: []const u8,
-    ) RouteError!Udp4Tuple {
-        const cid = try ConnectionId.init(destination_connection_id);
-        const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
-        return self.routes.items[index].path;
-    }
+        /// Route a datagram by peeking the destination connection ID.
+        ///
+        /// Long headers carry an explicit DCID length. Short headers do not, so the
+        /// router matches the datagram against registered CIDs and rejects ambiguous
+        /// prefix matches.
+        pub fn routeDatagram(
+            self: *const Self,
+            path: Path,
+            datagram: []const u8,
+        ) RouteError!RouteResult {
+            if (datagram.len < 1) return error.InvalidDatagram;
+            if ((datagram[0] & 0x80) != 0) {
+                if ((datagram[0] & 0x40) == 0) {
+                    if (datagram.len < 5) return error.InvalidDatagram;
+                    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+                    if (@intFromEnum(version) != 0) return error.InvalidDatagram;
+                }
+                return self.routeConnectionId(try peekLongDestinationConnectionId(datagram), path);
+            }
+            if ((datagram[0] & 0x40) == 0) return error.InvalidDatagram;
+            return self.routeShortDatagram(path, datagram);
+        }
 
-    fn routeShortDatagram(self: *const EndpointRouter, path: Udp4Tuple, datagram: []const u8) RouteError!RouteResult {
-        const index = (try self.findShortRouteIndex(path, datagram)) orelse return error.UnknownConnectionId;
-        return resultForRoute(self.routes.items[index], path);
-    }
+        /// Route a datagram when the destination connection ID is already known.
+        pub fn routeConnectionId(
+            self: *const Self,
+            destination_connection_id: []const u8,
+            path: Path,
+        ) RouteError!RouteResult {
+            const cid = try ConnectionId.init(destination_connection_id);
+            const index = self.findRouteIndexForPath(cid, path) orelse return error.UnknownConnectionId;
+            return resultForRoute(Path, self.routes.items[index], path);
+        }
 
-    fn findShortRouteIndex(self: *const EndpointRouter, path: Udp4Tuple, datagram: []const u8) RouteError!?usize {
-        if (datagram.len < 1) return error.InvalidDatagram;
-        if ((datagram[0] & 0x40) == 0) return null;
-        var match_index: ?usize = null;
-        for (self.routes.items, 0..) |route, index| {
-            const cid = route.destination_connection_id.asSlice();
-            if (cid.len == 0) {
-                if (!route.path.eql(path)) continue;
-            } else {
+        /// Return the committed UDP tuple for a registered destination connection ID.
+        pub fn currentRoutePath(
+            self: *const Self,
+            destination_connection_id: []const u8,
+        ) RouteError!Path {
+            const cid = try ConnectionId.init(destination_connection_id);
+            const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
+            return self.routes.items[index].path;
+        }
+
+        fn routeShortDatagram(self: *const Self, path: Path, datagram: []const u8) RouteError!RouteResult {
+            const index = (try self.findShortRouteIndex(path, datagram)) orelse return error.UnknownConnectionId;
+            return resultForRoute(Path, self.routes.items[index], path);
+        }
+
+        fn findShortRouteIndex(self: *const Self, path: Path, datagram: []const u8) RouteError!?usize {
+            if (datagram.len < 1) return error.InvalidDatagram;
+            if ((datagram[0] & 0x40) == 0) return null;
+            var match_index: ?usize = null;
+            for (self.routes.items, 0..) |route, index| {
+                const cid = route.destination_connection_id.asSlice();
+                if (cid.len == 0) {
+                    if (!route.path.eql(path)) continue;
+                } else {
+                    if (datagram.len < 1 + cid.len) continue;
+                    if (!std.mem.eql(u8, cid, datagram[1..][0..cid.len])) continue;
+                }
+                if (match_index != null) return error.AmbiguousConnectionId;
+                match_index = index;
+            }
+            return match_index;
+        }
+
+        fn findRouteIndexForPath(self: *const Self, cid: ConnectionId, path: Path) ?usize {
+            if (cid.len == 0) return self.findZeroLengthRouteIndex(path);
+            return self.findRouteIndex(cid);
+        }
+
+        fn findRouteIndex(self: *const Self, cid: ConnectionId) ?usize {
+            for (self.routes.items, 0..) |route, index| {
+                if (route.destination_connection_id.eqlSlice(cid.asSlice())) return index;
+            }
+            return null;
+        }
+
+        fn findRouteSequenceIndex(self: *const Self, connection_id: u64, sequence_number: u64) ?usize {
+            for (self.routes.items, 0..) |route, index| {
+                if (route.connection_id != connection_id) continue;
+                if (route.sequence_number == null or route.sequence_number.? != sequence_number) continue;
+                return index;
+            }
+            return null;
+        }
+
+        fn findZeroLengthRouteIndex(self: *const Self, path: Path) ?usize {
+            for (self.routes.items, 0..) |route, index| {
+                if (route.destination_connection_id.len == 0 and route.path.eql(path)) return index;
+            }
+            return null;
+        }
+
+        fn ensureStatelessResetTokenAllowed(
+            self: *const Self,
+            cid: ConnectionId,
+            token: [stateless_reset_token_len]u8,
+        ) RouteError!void {
+            for (self.reset_tokens.items) |reset_route| {
+                const same_cid = reset_route.destination_connection_id.eqlSlice(cid.asSlice());
+                const same_token = std.crypto.timing_safe.eql([stateless_reset_token_len]u8, reset_route.token, token);
+                if (same_cid and !same_token) return error.DuplicateConnectionId;
+                if (!same_cid and same_token) return error.DuplicateConnectionId;
+            }
+        }
+
+        fn registerStatelessResetTokenForCid(
+            self: *Self,
+            cid: ConnectionId,
+            token: [stateless_reset_token_len]u8,
+        ) RouteError!void {
+            if (self.findStatelessResetTokenIndex(cid) != null) return;
+            self.reset_tokens.append(self.allocator, .{
+                .destination_connection_id = cid,
+                .token = token,
+            }) catch return error.OutOfMemory;
+        }
+
+        fn findStatelessResetTokenIndex(self: *const Self, cid: ConnectionId) ?usize {
+            for (self.reset_tokens.items, 0..) |reset_route, index| {
+                if (reset_route.destination_connection_id.eqlSlice(cid.asSlice())) return index;
+            }
+            return null;
+        }
+
+        fn findShortStatelessResetTokenIndex(self: *const Self, datagram: []const u8) RouteError!?usize {
+            if (datagram.len < 1) return error.InvalidDatagram;
+            if ((datagram[0] & 0x40) == 0) return null;
+            var match_index: ?usize = null;
+            for (self.reset_tokens.items, 0..) |reset_route, index| {
+                const cid = reset_route.destination_connection_id.asSlice();
                 if (datagram.len < 1 + cid.len) continue;
                 if (!std.mem.eql(u8, cid, datagram[1..][0..cid.len])) continue;
+                if (match_index != null) return error.AmbiguousConnectionId;
+                match_index = index;
             }
-            if (match_index != null) return error.AmbiguousConnectionId;
-            match_index = index;
+            return match_index;
         }
-        return match_index;
-    }
-
-    fn findRouteIndexForPath(self: *const EndpointRouter, cid: ConnectionId, path: Udp4Tuple) ?usize {
-        if (cid.len == 0) return self.findZeroLengthRouteIndex(path);
-        return self.findRouteIndex(cid);
-    }
-
-    fn findRouteIndex(self: *const EndpointRouter, cid: ConnectionId) ?usize {
-        for (self.routes.items, 0..) |route, index| {
-            if (route.destination_connection_id.eqlSlice(cid.asSlice())) return index;
-        }
-        return null;
-    }
-
-    fn findRouteSequenceIndex(self: *const EndpointRouter, connection_id: u64, sequence_number: u64) ?usize {
-        for (self.routes.items, 0..) |route, index| {
-            if (route.connection_id != connection_id) continue;
-            if (route.sequence_number == null or route.sequence_number.? != sequence_number) continue;
-            return index;
-        }
-        return null;
-    }
-
-    fn findZeroLengthRouteIndex(self: *const EndpointRouter, path: Udp4Tuple) ?usize {
-        for (self.routes.items, 0..) |route, index| {
-            if (route.destination_connection_id.len == 0 and route.path.eql(path)) return index;
-        }
-        return null;
-    }
-
-    fn ensureStatelessResetTokenAllowed(
-        self: *const EndpointRouter,
-        cid: ConnectionId,
-        token: [stateless_reset_token_len]u8,
-    ) RouteError!void {
-        for (self.reset_tokens.items) |reset_route| {
-            const same_cid = reset_route.destination_connection_id.eqlSlice(cid.asSlice());
-            const same_token = std.crypto.timing_safe.eql([stateless_reset_token_len]u8, reset_route.token, token);
-            if (same_cid and !same_token) return error.DuplicateConnectionId;
-            if (!same_cid and same_token) return error.DuplicateConnectionId;
-        }
-    }
-
-    fn registerStatelessResetTokenForCid(
-        self: *EndpointRouter,
-        cid: ConnectionId,
-        token: [stateless_reset_token_len]u8,
-    ) RouteError!void {
-        if (self.findStatelessResetTokenIndex(cid) != null) return;
-        self.reset_tokens.append(self.allocator, .{
-            .destination_connection_id = cid,
-            .token = token,
-        }) catch return error.OutOfMemory;
-    }
-
-    fn findStatelessResetTokenIndex(self: *const EndpointRouter, cid: ConnectionId) ?usize {
-        for (self.reset_tokens.items, 0..) |reset_route, index| {
-            if (reset_route.destination_connection_id.eqlSlice(cid.asSlice())) return index;
-        }
-        return null;
-    }
-
-    fn findShortStatelessResetTokenIndex(self: *const EndpointRouter, datagram: []const u8) RouteError!?usize {
-        if (datagram.len < 1) return error.InvalidDatagram;
-        if ((datagram[0] & 0x40) == 0) return null;
-        var match_index: ?usize = null;
-        for (self.reset_tokens.items, 0..) |reset_route, index| {
-            const cid = reset_route.destination_connection_id.asSlice();
-            if (datagram.len < 1 + cid.len) continue;
-            if (!std.mem.eql(u8, cid, datagram[1..][0..cid.len])) continue;
-            if (match_index != null) return error.AmbiguousConnectionId;
-            match_index = index;
-        }
-        return match_index;
-    }
-};
+    };
+}
 
 /// Write an RFC 8999 Version Negotiation packet for an unsupported long header.
 ///
@@ -1314,11 +1388,14 @@ pub fn writeVersionNegotiationForUnsupportedVersion(
 /// packet protection, validate Retry/address tokens, or mutate route state.
 /// Non-Initial long headers, unsupported versions, Version Negotiation packets,
 /// and short headers return `null`.
-pub fn peekInitialAcceptDatagram(
-    path: Udp4Tuple,
+pub const peekInitialAcceptDatagram = ForTuple(Udp4Tuple).peekInitialAcceptDatagram;
+
+fn peekInitialAcceptDatagramForTuple(
+    comptime Path: type,
+    path: Path,
     datagram: []const u8,
     supported_versions: []const packet.Version,
-) RouteError!?InitialAcceptResult {
+) RouteError!?InitialAcceptResultForTuple(Path) {
     if (datagram.len < 1) return error.InvalidDatagram;
     if ((datagram[0] & 0x80) == 0) return null;
     if ((datagram[0] & 0x40) == 0) return null;
@@ -1390,7 +1467,7 @@ pub fn peekLongHeaderConnectionIds(datagram: []const u8) RouteError!LongHeaderCo
     };
 }
 
-fn resultForRoute(route: Route, path: Udp4Tuple) RouteError!RouteResult {
+fn resultForRoute(comptime Path: type, route: RouteForTuple(Path), path: Path) RouteError!RouteResult {
     const path_changed = !route.path.eql(path);
     if (path_changed and route.active_migration_disabled) return error.ActiveMigrationDisabled;
     return .{
@@ -1423,6 +1500,29 @@ fn validateSupportedVersions(supported_versions: []const packet.Version) RouteEr
         if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
         if (packet.isReservedVersion(supported)) return error.InvalidVersionList;
     }
+}
+
+/// Endpoint routing and policy types specialized for a complete UDP tuple.
+///
+/// Tuple equality and peer token binding remain the address source of truth.
+/// Existing top-level exports retain the exact IPv4 specialization types.
+pub fn ForTuple(comptime Path: type) type {
+    return struct {
+        pub const InitialAcceptResult = InitialAcceptResultForTuple(Path);
+        pub const DatagramAction = DatagramActionForTuple(Path);
+        pub const EcnPathPolicy = EcnPathPolicyForTuple(Path);
+        pub const AddressValidationPolicy = AddressValidationPolicyForTuple(Path);
+        pub const EndpointRouter = EndpointRouterForTuple(Path);
+
+        /// Classify an Initial while retaining its complete received UDP tuple.
+        pub fn peekInitialAcceptDatagram(
+            path: Path,
+            datagram: []const u8,
+            supported_versions: []const packet.Version,
+        ) RouteError!?InitialAcceptResultForTuple(Path) {
+            return peekInitialAcceptDatagramForTuple(Path, path, datagram, supported_versions);
+        }
+    };
 }
 
 fn testPath(remote_port: u16) Udp4Tuple {
@@ -2835,4 +2935,136 @@ test "EndpointRouter rejects stateless reset token reuse across connection IDs" 
     );
     try std.testing.expectError(error.UnknownConnectionId, router.routeConnectionId(&cid1, path));
     try std.testing.expectEqual(@as(usize, 2), router.statelessResetTokenCount());
+}
+
+fn testIPv6Path() Udp6Tuple {
+    return .{
+        .local = Udp6Address.init(.{ 0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 4433, 0),
+        .remote = Udp6Address.init(.{ 0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 50_000, 3),
+    };
+}
+
+fn testIPv6PathVariants(path: Udp6Tuple) [6]Udp6Tuple {
+    var paths = [_]Udp6Tuple{path} ** 6;
+    paths[0].remote.octets[15] += 1;
+    paths[1].remote.port += 1;
+    paths[2].remote.scope_id += 1;
+    paths[3].local.octets[15] += 1;
+    paths[4].local.port += 1;
+    paths[5].local.scope_id += 1;
+    return paths;
+}
+
+test "Udp6Tuple includes every address byte port and scope in identity" {
+    const path = testIPv6Path();
+    try std.testing.expect(path.eql(path));
+    for (testIPv6PathVariants(path)) |changed| try std.testing.expect(!path.eql(changed));
+    const peer = Udp6Address.init(.{ 0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 0x1234, 0x01020304);
+    const binding = peer.addressValidationBinding();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        6,    0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        0x12, 0x34, 1, 2,    3,    4,
+    }, &binding);
+    try std.testing.expectEqualSlices(u8, &path.remote.addressValidationBinding(), &path.peerAddressValidationBinding());
+}
+
+test "IPv6 address token policy rejects changed peer identity and IPv4 binding" {
+    const Family = ForTuple(Udp6Tuple);
+    const secret: address_validation_token.Secret = .{0x7a} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = .{0x51} ** address_validation_token.nonce_len;
+    const path = testIPv6Path();
+    var policy = Family.AddressValidationPolicy.init(std.testing.allocator, secret, .{});
+    defer policy.deinit();
+    const token = try policy.issueTokenForPath(std.testing.allocator, .new_token, 1_000, 10_000, path, nonce);
+    defer std.testing.allocator.free(token);
+    const variants = testIPv6PathVariants(path);
+    for (variants[0..3]) |changed| {
+        try std.testing.expectError(error.InvalidToken, policy.validateTokenForPathWithoutReplay(.new_token, 1_100, changed, token));
+    }
+    for (variants[3..6]) |changed_local| {
+        _ = try policy.validateTokenForPathWithoutReplay(.new_token, 1_100, changed_local, token);
+    }
+    var ipv4_policy = AddressValidationPolicy.init(std.testing.allocator, secret, .{});
+    defer ipv4_policy.deinit();
+    try std.testing.expectError(error.InvalidToken, ipv4_policy.validateTokenForPathWithoutReplay(.new_token, 1_100, testPath(50_000), token));
+    _ = try policy.validateTokenForPath(.new_token, 1_100, path, token);
+    try std.testing.expectError(error.TokenReplay, policy.validateTokenForPath(.new_token, 1_200, path, token));
+}
+
+test "IPv6 ECN policy isolates the complete local and remote tuple" {
+    const Family = ForTuple(Udp6Tuple);
+    const path = testIPv6Path();
+    var policy = Family.EcnPathPolicy.init(std.testing.allocator);
+    defer policy.deinit();
+    try policy.setStateForConnectionPath(7, path, .capable);
+    for (testIPv6PathVariants(path)) |changed| {
+        try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(7, changed));
+    }
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(8, path));
+    try std.testing.expectEqual(EcnPathValidationState.capable, policy.stateForConnectionPath(7, path));
+}
+
+test "IPv6 CID routing rejects a different address port or scope on a fixed path" {
+    const Family = ForTuple(Udp6Tuple);
+    const path = testIPv6Path();
+    const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const short_datagram = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 1 };
+    var router = Family.EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+    try router.registerConnectionId(7, &dcid, path, .{ .active_migration_disabled = true });
+    try std.testing.expectEqual(@as(u64, 7), (try router.routeDatagram(path, &short_datagram)).connection_id);
+    for (testIPv6PathVariants(path)) |changed| {
+        try std.testing.expectError(error.ActiveMigrationDisabled, router.routeDatagram(changed, &short_datagram));
+    }
+    try std.testing.expect(path.eql(try router.currentRoutePath(&dcid)));
+}
+
+test "IPv6 zero CID routing isolates final octets ports and scopes" {
+    const Family = ForTuple(Udp6Tuple);
+    const path = testIPv6Path();
+    const variants = testIPv6PathVariants(path);
+    const datagram = [_]u8{ 0x40, 1, 2, 3 };
+    var router = Family.EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+    try router.registerConnectionId(1, &.{}, path, .{});
+    for (variants, 0..) |changed, index| {
+        try router.registerConnectionId(@intCast(index + 2), &.{}, changed, .{});
+    }
+    try std.testing.expectEqual(@as(u64, 1), (try router.routeDatagram(path, &datagram)).connection_id);
+    for (variants, 0..) |changed, index| {
+        try std.testing.expectEqual(@as(u64, @intCast(index + 2)), (try router.routeDatagram(changed, &datagram)).connection_id);
+    }
+    var unknown = path;
+    unknown.remote.octets[15] = 99;
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(unknown, &datagram));
+    try std.testing.expect(try router.retireConnectionIdOnPath(&.{}, path));
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(path, &datagram));
+    try std.testing.expectEqual(@as(u64, 2), (try router.routeDatagram(variants[0], &datagram)).connection_id);
+}
+
+test "IPv6 Initial classification retains the complete received tuple" {
+    const Family = ForTuple(Udp6Tuple);
+    const path = testIPv6Path();
+    const initial = [_]u8{ 0xc0, 0, 0, 0, 1, 1, 0xaa, 1, 0xbb, 0, 1, 0 };
+    const accept = (try Family.peekInitialAcceptDatagram(path, &initial, &.{.v1})) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(path.eql(accept.path));
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, accept.original_destination_connection_id);
+    var router = Family.EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+    var response: [64]u8 = undefined;
+    const action = try router.handleDatagramWithVersionNegotiation(&response, path, &initial, &.{}, &.{.v1});
+    switch (action) {
+        .accept_initial => |result| try std.testing.expect(path.eql(result.path)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "legacy endpoint exports retain exact IPv4 specialization types" {
+    const Family = ForTuple(Udp4Tuple);
+    try std.testing.expect(InitialAcceptResult == Family.InitialAcceptResult);
+    try std.testing.expect(DatagramAction == Family.DatagramAction);
+    try std.testing.expect(EcnPathPolicy == Family.EcnPathPolicy);
+    try std.testing.expect(AddressValidationPolicy == Family.AddressValidationPolicy);
+    try std.testing.expect(EndpointRouter == Family.EndpointRouter);
+    try std.testing.expect(@TypeOf(peekInitialAcceptDatagram) == @TypeOf(Family.peekInitialAcceptDatagram));
 }

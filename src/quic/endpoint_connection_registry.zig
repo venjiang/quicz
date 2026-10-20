@@ -19,6 +19,18 @@ pub fn EndpointConnectionRegistry(
     comptime connection_of: *const fn (*Record) *root.Connection,
     comptime deinit_record: *const fn (*Record) void,
 ) type {
+    return EndpointConnectionRegistryForTuple(root.endpoint.Udp4Tuple, Record, connection_of, deinit_record);
+}
+
+/// Build the same bounded record registry for a selected UDP tuple type.
+pub fn EndpointConnectionRegistryForTuple(
+    comptime Path: type,
+    comptime Record: type,
+    comptime connection_of: *const fn (*Record) *root.Connection,
+    comptime deinit_record: *const fn (*Record) void,
+) type {
+    const Lifecycle = @import("endpoint_lifecycle.zig").EndpointConnectionLifecycleForTuple(Path);
+    const PathResults = endpoint_types.ForTuple(Path);
     return struct {
         const Self = @This();
 
@@ -178,7 +190,7 @@ pub fn EndpointConnectionRegistry(
         /// state, and record storage are retired as one operation.
         pub fn retire(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             connection_id: u64,
         ) error{ Internal, UnknownConnectionId }!endpoint_types.EndpointConnectionRetireResult {
             if (self.records.get(connection_id) == null) return error.UnknownConnectionId;
@@ -280,7 +292,7 @@ pub fn EndpointConnectionRegistry(
         /// Select the earliest lifecycle deadline from the records owned by this registry.
         pub fn nextDeadline(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
         ) !?endpoint_types.EndpointConnectionDeadline {
             _ = try self.removeClosedRecords(lifecycle);
@@ -299,7 +311,7 @@ pub fn EndpointConnectionRegistry(
         /// active record; closed records are retired before the views are built.
         pub fn nextDeadlineWithStorage(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             out: []root.EndpointConnectionView,
         ) root.Error!?endpoint_types.EndpointConnectionDeadline {
             _ = try self.removeClosedRecords(lifecycle);
@@ -314,7 +326,7 @@ pub fn EndpointConnectionRegistry(
         /// bounded event-loop path.
         pub fn nextDeadlineWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
         ) root.Error!?endpoint_types.EndpointConnectionDeadline {
             const views = self.deadline_view_scratch orelse return error.BufferTooSmall;
             return self.nextDeadlineWithStorage(lifecycle, views);
@@ -323,7 +335,7 @@ pub fn EndpointConnectionRegistry(
         /// Retire lifecycle state and remove every record whose connection has reached the closed state.
         pub fn removeClosedRecords(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
         ) root.Error!usize {
             var removed_count: usize = 0;
             while (true) {
@@ -349,7 +361,7 @@ pub fn EndpointConnectionRegistry(
         /// this registry destroys the matching endpoint-owned records.
         pub fn processPendingWork(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
             now_nanos: i64,
         ) root.Error!endpoint_types.EndpointPendingWorkSweepResult {
@@ -374,7 +386,7 @@ pub fn EndpointConnectionRegistry(
         /// Sweep pending work using registry-owned receive-view scratch storage.
         pub fn processPendingWorkWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
         ) root.Error!endpoint_types.EndpointPendingWorkSweepResult {
             _ = try self.removeClosedRecords(lifecycle);
@@ -392,7 +404,7 @@ pub fn EndpointConnectionRegistry(
         /// Output is only drained when at least one recovery timer was serviced.
         pub fn processPendingWorkAndDrainDatagrams(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
@@ -459,7 +471,7 @@ pub fn EndpointConnectionRegistry(
         /// occur after timer or recovery side effects.
         pub fn processPendingWorkAndDrainDatagramsWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             out: []endpoint_types.EndpointPolledDatagramResult,
@@ -498,7 +510,7 @@ pub fn EndpointConnectionRegistry(
         /// all-or-nothing behavior around scratch availability.
         pub fn drainDatagramsAcrossConnectionsWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             out: []endpoint_types.EndpointPolledDatagramResult,
@@ -518,7 +530,7 @@ pub fn EndpointConnectionRegistry(
 
         fn drainDatagramsAcrossConnectionViews(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             views: []const root.EndpointConnectionPollView,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
@@ -548,7 +560,7 @@ pub fn EndpointConnectionRegistry(
         /// selecting the next deadline.
         pub fn processPendingWorkAndSelectNextDeadline(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
             now_nanos: i64,
         ) root.Error!endpoint_types.EndpointPendingWorkNextDeadlineResult {
@@ -571,7 +583,7 @@ pub fn EndpointConnectionRegistry(
         /// cannot occur after timer or recovery side effects.
         pub fn processPendingWorkAndSelectNextDeadlineWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
         ) root.Error!endpoint_types.EndpointPendingWorkNextDeadlineResult {
             _ = self.receive_view_scratch orelse return error.BufferTooSmall;
@@ -588,7 +600,7 @@ pub fn EndpointConnectionRegistry(
         /// lifecycle allocation contract.
         pub fn processDueDeadlineAndDrainDatagrams(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
             now_nanos: i64,
             out: []endpoint_types.EndpointPolledDatagramResult,
@@ -631,7 +643,7 @@ pub fn EndpointConnectionRegistry(
         /// `BufferTooSmall` before servicing timers or emitting recovery output.
         pub fn processDueDeadlineAndDrainDatagramsWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
             out: []endpoint_types.EndpointPolledDatagramResult,
             comptime destination_connection_id: *const fn (*const Record) []const u8,
@@ -658,7 +670,7 @@ pub fn EndpointConnectionRegistry(
         /// one busy connection does not permanently starve later records.
         pub fn pollDatagramAcrossConnections(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
@@ -696,7 +708,7 @@ pub fn EndpointConnectionRegistry(
         /// a missing scratch-storage failure.
         pub fn pollDatagramAcrossConnectionsWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             comptime destination_connection_id: *const fn (*const Record) []const u8,
@@ -714,7 +726,7 @@ pub fn EndpointConnectionRegistry(
 
         fn pollDatagramAcrossConnectionViews(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             views: []const root.EndpointConnectionPollView,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
@@ -765,13 +777,13 @@ pub fn EndpointConnectionRegistry(
         /// behavior while eliminating caller-managed receive-view snapshots.
         pub fn feedDatagramWithInstalledKeys(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedInstalledKeyDatagramResult {
             if (self.receive_view_scratch != null) {
                 return self.feedDatagramWithInstalledKeysWithScratch(
                     lifecycle,
@@ -796,13 +808,13 @@ pub fn EndpointConnectionRegistry(
         /// Classify one installed-key datagram and return the next live deadline.
         pub fn feedDatagramWithInstalledKeysAndSelectNextDeadline(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
             if (self.receive_view_scratch != null and self.deadline_view_scratch != null) {
                 return self.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
                     lifecycle,
@@ -832,12 +844,12 @@ pub fn EndpointConnectionRegistry(
         /// reported before datagram classification can mutate endpoint state.
         pub fn feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
-            path: root.endpoint.Udp4Tuple,
+            lifecycle: *Lifecycle,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
             _ = self.receive_view_scratch orelse return error.BufferTooSmall;
             _ = self.deadline_view_scratch orelse return error.BufferTooSmall;
             return .{
@@ -855,13 +867,13 @@ pub fn EndpointConnectionRegistry(
         /// Classify one installed-key datagram, sweep pending work, and return the next deadline.
         pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
+            lifecycle: *Lifecycle,
             allocator: std.mem.Allocator,
-            path: root.endpoint.Udp4Tuple,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedPendingWorkNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedPendingWorkNextDeadlineResult {
             if (self.receive_view_scratch != null and self.deadline_view_scratch != null) {
                 return self.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
                     lifecycle,
@@ -896,12 +908,12 @@ pub fn EndpointConnectionRegistry(
         /// cannot fail after datagram or pending-work side effects.
         pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
-            path: root.endpoint.Udp4Tuple,
+            lifecycle: *Lifecycle,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedPendingWorkNextDeadlineResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedPendingWorkNextDeadlineResult {
             _ = self.receive_view_scratch orelse return error.BufferTooSmall;
             _ = self.deadline_view_scratch orelse return error.BufferTooSmall;
             const feed = try self.feedDatagramWithInstalledKeysWithScratch(
@@ -930,12 +942,12 @@ pub fn EndpointConnectionRegistry(
         /// state.
         pub fn feedDatagramWithInstalledKeysWithScratch(
             self: *Self,
-            lifecycle: *root.EndpointConnectionLifecycle,
-            path: root.endpoint.Udp4Tuple,
+            lifecycle: *Lifecycle,
+            path: Path,
             now_nanos: i64,
             datagram: []const u8,
             options: endpoint_types.EndpointFeedInstalledKeyDatagramOptions,
-        ) endpoint_types.EndpointProtectedDatagramError!endpoint_types.EndpointFeedInstalledKeyDatagramResult {
+        ) endpoint_types.EndpointProtectedDatagramError!PathResults.EndpointFeedInstalledKeyDatagramResult {
             const views = self.receive_view_scratch orelse return error.BufferTooSmall;
             _ = try self.removeClosedRecords(lifecycle);
             return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
