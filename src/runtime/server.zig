@@ -16,6 +16,50 @@ const StunBinding = @import("stun_binding.zig").Binding;
 
 const log = std.log.scoped(.quicz_runtime);
 
+test "IPv6 runtime accepts a socket handoff while the legacy runtime retains its family guard" {
+    const pem = @embedFile("../quic/testdata/quicz-echo-ca.pem");
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+    const encoded_start = (std.mem.indexOf(u8, pem, begin_marker) orelse return error.TestUnexpectedResult) + begin_marker.len;
+    const encoded_end = std.mem.indexOfPos(u8, pem, encoded_start, end_marker) orelse return error.TestUnexpectedResult;
+    const encoded = std.mem.trim(u8, pem[encoded_start..encoded_end], " \t\r\n");
+    var cert_der: [512]u8 = undefined;
+    const cert_len = try std.base64.standard.decoderWithIgnore("\r\n").decode(&cert_der, encoded);
+    // Match the existing mutual-TLS loopback certificate and P-256 identity.
+    const private_key = [_]u8{
+        0x5b, 0xbf, 0x4f, 0x5a, 0x48, 0x42, 0x9f, 0x00,
+        0x5a, 0x57, 0x09, 0xc3, 0xb4, 0xc1, 0x3a, 0x64,
+        0x2e, 0xb1, 0x61, 0xf5, 0x0b, 0xde, 0x64, 0x4b,
+        0x3a, 0x38, 0xa6, 0x8f, 0xfa, 0x48, 0xda, 0x51,
+    };
+
+    const io = std.testing.io;
+    const address = std.Io.net.IpAddress{ .ip6 = .loopback(0) };
+    const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    try std.testing.expectError(error.UnsupportedServerSocketFamily, Server.initWithSocket(std.testing.allocator, io, socket, .{
+        .port = socket.address.getPort(),
+        .alpn = &.{"hq-interop"},
+        .cert_der = cert_der[0..cert_len],
+        .private_key = &private_key,
+        .max_connections = 1,
+    }));
+    var server = IPv6Server.initWithSocket(std.testing.allocator, io, socket, .{
+        .port = socket.address.getPort(),
+        .alpn = &.{"hq-interop"},
+        .cert_der = cert_der[0..cert_len],
+        .private_key = &private_key,
+        .max_connections = 1,
+    }) catch |err| {
+        socket.close(io);
+        return err;
+    };
+    defer server.deinit();
+
+    try std.testing.expect(std.meta.activeTag(server.socket.address) == .ip6);
+    try std.testing.expectEqualSlices(u8, &address.ip6.bytes, &server.socket.address.ip6.bytes);
+    try std.testing.expectEqual(socket.address.getPort(), server.localPort());
+}
+
 test "running server refreshes STUN through its single UDP receiver" {
     const io = std.testing.io;
     const local = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
@@ -253,16 +297,19 @@ const ServerRecord = struct {
     }
 };
 
-const ServerEndpoint = quicz.Tls13ServerEndpoint(
-    ServerRecord,
-    ServerRecord.connectionRef,
-    ServerRecord.cryptoBackend,
-    ServerRecord.destinationConnectionId,
-    ServerRecord.sourceConnectionId,
-    ServerRecord.initialDestinationConnectionId,
-    ServerRecord.markRetryValidated,
-    ServerRecord.deinit,
-);
+fn ServerEndpointForTuple(comptime Path: type) type {
+    return @import("../quic/tls13_server_endpoint.zig").Tls13ServerEndpointForTuple(
+        Path,
+        ServerRecord,
+        ServerRecord.connectionRef,
+        ServerRecord.cryptoBackend,
+        ServerRecord.destinationConnectionId,
+        ServerRecord.sourceConnectionId,
+        ServerRecord.initialDestinationConnectionId,
+        ServerRecord.markRetryValidated,
+        ServerRecord.deinit,
+    );
+}
 
 /// Datagram received by the recv task, waiting for the drive task.
 const queued_datagram_pool_size = 16;
@@ -481,973 +528,1040 @@ test "connection drain releases every concurrent stream flush" {
 }
 
 /// Async streaming QUIC server (multi-connection, std.http model).
-pub const Server = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    socket: std.Io.net.Socket,
-    server_ep: ServerEndpoint,
-    next_handle: u64 = 1,
-    alpn: []const []const u8,
-    cert_der: []const u8,
-    private_key: []const u8,
-    private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
-    prefer_chacha20: bool = false,
-    max_idle_timeout_ms: u64 = 30_000,
-    punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
-    /// Optional externally-owned dynamic responders for attempts sharing this
-    /// UDP socket. The caller must keep the registry alive until deinit.
-    punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
-    /// Borrowed active-punch coordinator for this shared socket.
-    shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
-    shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
-    stun_binding: StunBinding = .{},
+pub const Server = ServerForTuple(endpoint.Udp4Tuple);
+/// Native IPv6 server with an explicitly bound source socket.
+pub const IPv6Server = ServerForTuple(endpoint.Udp6Tuple);
 
-    mutex: std.atomic.Mutex = .unlocked,
-    conns: std.AutoHashMap(u64, *ConnState),
-    pending_accept: std.ArrayList(u64) = .empty,
-    /// Posted by the drive task when a new connection is accepted.
-    accept_sem: std.Io.Semaphore = .{ .permits = 0 },
-    /// Futex word bumped by every drive wakeup source (recv task, senders,
-    /// stop); the drive task parks on it with an absolute deadline
-    /// (std.Build.WebServer update_id pattern).
-    wake_id: std.atomic.Value(u32) = .init(0),
-    queue_mutex: std.atomic.Mutex = .unlocked,
-    /// Datagrams received by the recv task, consumed FIFO by the drive task.
-    datagram_queue: std.ArrayList(QueuedDatagram),
-    datagram_read_offset: usize = 0,
-    /// Reusable receive buffers, avoiding a per-datagram allocation.
-    datagram_pool: DatagramPool,
-    drive_group: std.Io.Group = .init,
-    started: bool = false,
-    stopping: bool = false,
-    /// Set by serveH3 before handlers spawn; read by h3ServeHandler.
-    h3_request_handler: ?h3_proto.RequestHandler = null,
-    h3_qpack_max_table_capacity: u64 = 4096,
-    h3_qpack_blocked_streams: u64 = 8,
+/// Build the shared streaming server and handles for one UDP address family.
+pub fn ServerForTuple(comptime Path: type) type {
+    const Family = @import("udp_address.zig").ForTuple(Path);
+    const RuntimeEndpoint = ServerEndpointForTuple(Path);
+    const datagram_mtu = if (Path == endpoint.Udp6Tuple) 1200 else send_mtu;
+    return struct {
+        const ServerSelf = @This();
+        pub const HandlerFn = *const fn (ServerSelf.ServerConnection) std.Io.Cancelable!void;
 
-    pub const Config = struct {
-        port: u16,
-        alpn: []const []const u8,
-        cert_der: []const u8,
-        private_key: []const u8,
-        private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm = .ecdsa_p256_sha256,
-        prefer_chacha20: bool = false,
-        /// Maximum connection idle time advertised to peers. Production
-        /// defaults to 30 seconds; focused runtime tests may lower it.
-        max_idle_timeout_ms: u64 = 30_000,
-        /// IPv4 address to bind. Defaults to loopback (127.0.0.1); set to
-        /// `.{0,0,0,0}` to listen on all interfaces (cross-host benchmarks).
-        bind_addr: ?[4]u8 = null,
-        /// Maximum concurrent connections accepted by this server. The
-        /// endpoint pre-allocates routing and scratch state for this many
-        /// connections, so set it to your expected peak + headroom.
-        max_connections: usize = 4096,
-        /// Optional authenticated probe handler retained after this runtime
-        /// takes ownership of a connectivity-validated UDP socket.
-        punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
-        /// Dynamic attempt responders for a Host-level shared endpoint. This
-        /// registry is borrowed, never cleared or deinitialized by Server.
-        punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
-        shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
-        shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
-    };
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Server {
-        const local_ip = if (config.bind_addr) |ip| ip else [_]u8{ 127, 0, 0, 1 };
-        var address = std.Io.net.IpAddress{ .ip4 = .{ .bytes = local_ip, .port = config.port } };
-        const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
-        errdefer socket.close(io);
-        return initWithSocket(allocator, io, socket, config);
-    }
-
-    /// Create a server from an already-bound IPv4 UDP socket. On success the
-    /// server owns and closes the socket; on failure ownership stays with the
-    /// caller. Connectivity checks can therefore open the NAT mapping before
-    /// QUIC starts without changing the server port.
-    pub fn initWithSocket(
         allocator: std.mem.Allocator,
         io: std.Io,
         socket: std.Io.net.Socket,
-        config: Config,
-    ) !Server {
-        switch (socket.address) {
-            .ip4 => {},
-            .ip6 => return error.UnsupportedServerSocketFamily,
+        server_ep: RuntimeEndpoint,
+        next_handle: u64 = 1,
+        alpn: []const []const u8,
+        cert_der: []const u8,
+        private_key: []const u8,
+        private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
+        prefer_chacha20: bool = false,
+        max_idle_timeout_ms: u64 = 30_000,
+        punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
+        /// Optional externally-owned dynamic responders for attempts sharing this
+        /// UDP socket. The caller must keep the registry alive until deinit.
+        punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
+        /// Borrowed active-punch coordinator for this shared socket.
+        shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
+        shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
+        stun_binding: StunBinding = .{},
+
+        mutex: std.atomic.Mutex = .unlocked,
+        conns: std.AutoHashMap(u64, *ConnState),
+        pending_accept: std.ArrayList(u64) = .empty,
+        /// Posted by the drive task when a new connection is accepted.
+        accept_sem: std.Io.Semaphore = .{ .permits = 0 },
+        /// Futex word bumped by every drive wakeup source (recv task, senders,
+        /// stop); the drive task parks on it with an absolute deadline
+        /// (std.Build.WebServer update_id pattern).
+        wake_id: std.atomic.Value(u32) = .init(0),
+        queue_mutex: std.atomic.Mutex = .unlocked,
+        /// Datagrams received by the recv task, consumed FIFO by the drive task.
+        datagram_queue: std.ArrayList(QueuedDatagram),
+        datagram_read_offset: usize = 0,
+        /// Reusable receive buffers, avoiding a per-datagram allocation.
+        datagram_pool: DatagramPool,
+        drive_group: std.Io.Group = .init,
+        started: bool = false,
+        stopping: bool = false,
+        /// Set by serveH3 before handlers spawn; read by h3ServeHandler.
+        h3_request_handler: ?h3_proto.RequestHandler = null,
+        h3_qpack_max_table_capacity: u64 = 4096,
+        h3_qpack_blocked_streams: u64 = 8,
+
+        pub const Config = if (Path == endpoint.Udp4Tuple) IPv4Config else IPv6Config;
+
+        pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !ServerSelf {
+            var address: std.Io.net.IpAddress = if (Path == endpoint.Udp4Tuple)
+                .{ .ip4 = .{ .bytes = config.bind_addr orelse .{ 127, 0, 0, 1 }, .port = config.port } }
+            else
+                .{ .ip6 = .{
+                    .bytes = config.bind_addr orelse std.Io.net.Ip6Address.loopback(0).bytes,
+                    .port = config.port,
+                    .interface = .{ .index = config.bind_scope_id },
+                } };
+            const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+            errdefer socket.close(io);
+            return initWithSocket(allocator, io, socket, config);
         }
-        enlargeSocketReceiveBuffer(socket.handle);
-        const route_capacity = std.math.mul(
-            usize,
-            config.max_connections,
-            route_slots_per_connection,
-        ) catch std.math.maxInt(usize);
-        const server_ep = try ServerEndpoint.initWithCapacity(allocator, config.max_connections, .{
-            .max_routes = route_capacity,
-            .max_stateless_reset_tokens = route_capacity,
-        });
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .socket = socket,
-            .server_ep = server_ep,
-            .alpn = config.alpn,
-            .cert_der = config.cert_der,
-            .private_key = config.private_key,
-            .private_key_algorithm = config.private_key_algorithm,
-            .prefer_chacha20 = config.prefer_chacha20,
-            .max_idle_timeout_ms = config.max_idle_timeout_ms,
-            .punch_responder = config.punch_responder,
-            .punch_responder_registry = config.punch_responder_registry,
-            .shared_punch_coordinator = config.shared_punch_coordinator,
-            .shared_punch_failure_handler = config.shared_punch_failure_handler,
-            .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
-            .datagram_queue = .empty,
-            .datagram_pool = DatagramPool.init(allocator),
-        };
-    }
 
-    pub fn start(self: *Server) !void {
-        if (self.started) return;
-        try self.drive_group.concurrent(self.io, Server.recvTask, .{self});
-        self.drive_group.concurrent(self.io, Server.drive, .{self}) catch |err| {
-            @atomicStore(bool, &self.stopping, true, .release);
-            self.drive_group.cancel(self.io);
-            self.drive_group.await(self.io) catch {};
-            return err;
-        };
-        self.started = true;
-    }
-
-    pub fn localPort(self: *const Server) u16 {
-        return switch (self.socket.address) {
-            .ip4 => |address| address.port,
-            .ip6 => |address| address.port,
-        };
-    }
-
-    /// Refresh this socket's mapping while the normal runtime remains its
-    /// only receiver. STUN cancellation does not interrupt active QUIC streams.
-    pub fn discoverReflexiveAddress(self: *Server, server: std.Io.net.IpAddress, config: quicz.connectivity.stun_transaction.Config) !quicz.connectivity.stun.MappedAddress {
-        if (!self.started) return error.ServerNotStarted;
-        return self.stun_binding.discover(self.io, &self.socket, server, config);
-    }
-
-    /// Wake the drive loop after an externally-owned shared punch coordinator
-    /// registers or removes an attempt.
-    pub fn wake(self: *Server) void {
-        self.notifyDrive(self.io);
-    }
-
-    /// Signal the drive task and all accept/receive loops to stop.
-    pub fn stop(self: *Server) void {
-        self.stun_binding.stop(self.io);
-        @atomicStore(bool, &self.stopping, true, .release);
-        // Wake a blocked accept loop so it observes `stopping`.
-        self.accept_sem.post(self.io);
-        // Wake the parked drive task.
-        self.notifyDrive(self.io);
-    }
-
-    /// Aggregate metrics across all active connections (for a monitoring
-    /// endpoint pooled over the lifetime of the server). Reads are lock-serialized
-    /// with the drive task's conns traversal; per-connection stats are best-effort
-    /// snapshots that may straddle an in-flight update.
-    pub const Metrics = struct {
-        active_connections: usize,
-        stream_bytes_sent: u64,
-        stream_bytes_received: u64,
-        total_bytes_in_flight: usize,
-        smoothed_rtt_us: u64,
-        rttvar_us: u64,
-        congestion_window: usize,
-        packets_lost: u64,
-        packets_retransmitted: u64,
-    };
-
-    /// Return an aggregate metrics snapshot across all live connections.
-    pub fn metricsSnapshot(self: *Server) Metrics {
-        var m: Metrics = .{
-            .active_connections = 0,
-            .stream_bytes_sent = 0,
-            .stream_bytes_received = 0,
-            .total_bytes_in_flight = 0,
-            .smoothed_rtt_us = 0,
-            .rttvar_us = 0,
-            .congestion_window = 0,
-            .packets_lost = 0,
-            .packets_retransmitted = 0,
-        };
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        var it = self.conns.valueIterator();
-        while (it.next()) |csp| {
-            const st = csp.*;
-            if (st.conn.isClosingOrClosed()) continue;
-            const cs = st.conn.connectionStats();
-            m.active_connections += 1;
-            m.stream_bytes_sent += cs.stream_bytes_sent;
-            m.stream_bytes_received += cs.stream_bytes_received;
-            m.total_bytes_in_flight += cs.total_bytes_in_flight;
-            m.smoothed_rtt_us += cs.smoothed_rtt_us;
-            m.rttvar_us += cs.rttvar_us;
-            m.congestion_window += cs.congestion_window;
-            m.packets_lost += cs.packets_lost;
-            m.packets_retransmitted += cs.packets_retransmitted;
-        }
-        self.mutex.unlock();
-        return m;
-    }
-
-    /// Start the server (if not already started) and spawn the serve task,
-    /// which accepts connections and runs one handler task per connection
-    /// (std.Build.WebServer serve pattern). The runtime releases each
-    /// connection when its handler returns; deinit cancels the serve task
-    /// and every handler task.
-    pub fn serve(self: *Server, handler: HandlerFn) !void {
-        try self.start();
-        try self.drive_group.concurrent(self.io, Server.serveLoop, .{ self, handler });
-        log.info("quicz server listening on {f}/", .{self.socket.address});
-    }
-
-    /// HTTP/3 QPACK dynamic-table options (RFC 9204).
-    pub const H3ServeOptions = struct {
-        qpack_max_table_capacity: u64 = 4096,
-        qpack_blocked_streams: u64 = 8,
-    };
-
-    /// Serve HTTP/3 on this transport server: every accepted connection is
-    /// driven by the runtime H3 driver with `handler` as the request handler.
-    /// The transport (socket, endpoint, connection lifecycle) stays owned by
-    /// this `Server`; only the application protocol is wired here.
-    pub fn serveH3(self: *Server, options: H3ServeOptions, handler: h3_proto.RequestHandler) !void {
-        self.h3_request_handler = handler;
-        self.h3_qpack_max_table_capacity = options.qpack_max_table_capacity;
-        self.h3_qpack_blocked_streams = options.qpack_blocked_streams;
-        try self.serve(h3ServeHandler);
-    }
-
-    /// Per-connection handler backing serveH3: one runtime H3 driver per
-    /// connection, exactly the layering recommended for production.
-    fn h3ServeHandler(conn: ServerConnection) std.Io.Cancelable!void {
-        const srv = conn.server;
-        const handler = srv.h3_request_handler orelse return;
-        var driver = runtime_h3.H3Server.init(
-            srv.allocator,
-            srv,
-            conn.id,
-            handler,
-            srv.h3_qpack_max_table_capacity,
-            srv.h3_qpack_blocked_streams,
-        );
-        defer driver.deinit();
-        try driver.run();
-    }
-
-    /// Serve task body: accept loop plus per-connection handler tasks
-    /// (std.Build.WebServer.serve pattern: per-conn group.concurrent,
-    /// defer group.cancel for cleanup).
-    fn serveLoop(self: *Server, handler: HandlerFn) std.Io.Cancelable!void {
-        const io = self.io;
-        var group: std.Io.Group = .init;
-        defer group.cancel(io);
-        while (true) {
-            const conn = try self.accept();
-            group.concurrent(io, handlerTask, .{ self, conn, handler }) catch |err| {
-                log.err("unable to spawn connection handler: {}", .{err});
-                self.releaseConnection(conn.id);
-                continue;
+        /// Create a server from an already-bound UDP socket of this address family. On success the
+        /// server owns and closes the socket; on failure ownership stays with the
+        /// caller. Connectivity checks can therefore open the NAT mapping before
+        /// QUIC starts without changing the server port.
+        pub fn initWithSocket(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            socket: std.Io.net.Socket,
+            config: Config,
+        ) !ServerSelf {
+            const bound_address = Family.fromIp(socket.address) orelse return error.UnsupportedServerSocketFamily;
+            if (Path == endpoint.Udp6Tuple and std.mem.allEqual(u8, &bound_address.octets, 0))
+                return error.ExplicitIPv6LocalAddressRequired;
+            enlargeSocketReceiveBuffer(socket.handle);
+            const route_capacity = std.math.mul(
+                usize,
+                config.max_connections,
+                route_slots_per_connection,
+            ) catch std.math.maxInt(usize);
+            const server_ep = try RuntimeEndpoint.initWithCapacity(allocator, config.max_connections, .{
+                .max_routes = route_capacity,
+                .max_stateless_reset_tokens = route_capacity,
+            });
+            return .{
+                .allocator = allocator,
+                .io = io,
+                .socket = socket,
+                .server_ep = server_ep,
+                .alpn = config.alpn,
+                .cert_der = config.cert_der,
+                .private_key = config.private_key,
+                .private_key_algorithm = config.private_key_algorithm,
+                .prefer_chacha20 = config.prefer_chacha20,
+                .max_idle_timeout_ms = config.max_idle_timeout_ms,
+                .punch_responder = config.punch_responder,
+                .punch_responder_registry = config.punch_responder_registry,
+                .shared_punch_coordinator = config.shared_punch_coordinator,
+                .shared_punch_failure_handler = config.shared_punch_failure_handler,
+                .conns = std.AutoHashMap(u64, *ConnState).init(allocator),
+                .datagram_queue = .empty,
+                .datagram_pool = DatagramPool.init(allocator),
             };
         }
-    }
 
-    /// Handler task wrapper: releases the connection reference when the
-    /// handler finishes so the drive task can reclaim the state.
-    fn handlerTask(self: *Server, conn: ServerConnection, handler: HandlerFn) std.Io.Cancelable!void {
-        defer self.releaseConnection(conn.id);
-        handler(conn) catch |err| {
-            if (err != error.Canceled) log.err("connection {d} handler failed: {}", .{ conn.id, err });
+        pub fn start(self: *ServerSelf) !void {
+            if (self.started) return;
+            try self.drive_group.concurrent(self.io, ServerSelf.recvTask, .{self});
+            self.drive_group.concurrent(self.io, ServerSelf.drive, .{self}) catch |err| {
+                @atomicStore(bool, &self.stopping, true, .release);
+                self.drive_group.cancel(self.io);
+                self.drive_group.await(self.io) catch {};
+                return err;
+            };
+            self.started = true;
+        }
+
+        pub fn localPort(self: *const ServerSelf) u16 {
+            return switch (self.socket.address) {
+                .ip4 => |address| address.port,
+                .ip6 => |address| address.port,
+            };
+        }
+
+        /// Refresh this socket's mapping while the normal runtime remains its
+        /// only receiver. STUN cancellation does not interrupt active QUIC streams.
+        pub fn discoverReflexiveAddress(self: *ServerSelf, server: std.Io.net.IpAddress, config: quicz.connectivity.stun_transaction.Config) !quicz.connectivity.stun.MappedAddress {
+            if (!self.started) return error.ServerNotStarted;
+            return self.stun_binding.discover(self.io, &self.socket, server, config);
+        }
+
+        /// Wake the drive loop after an externally-owned shared punch coordinator
+        /// registers or removes an attempt.
+        pub fn wake(self: *ServerSelf) void {
+            self.notifyDrive(self.io);
+        }
+
+        /// Signal the drive task and all accept/receive loops to stop.
+        pub fn stop(self: *ServerSelf) void {
+            self.stun_binding.stop(self.io);
+            @atomicStore(bool, &self.stopping, true, .release);
+            // Wake a blocked accept loop so it observes `stopping`.
+            self.accept_sem.post(self.io);
+            // Wake the parked drive task.
+            self.notifyDrive(self.io);
+        }
+
+        /// Aggregate metrics across all active connections (for a monitoring
+        /// endpoint pooled over the lifetime of the server). Reads are lock-serialized
+        /// with the drive task's conns traversal; per-connection stats are best-effort
+        /// snapshots that may straddle an in-flight update.
+        pub const Metrics = struct {
+            active_connections: usize,
+            stream_bytes_sent: u64,
+            stream_bytes_received: u64,
+            total_bytes_in_flight: usize,
+            smoothed_rtt_us: u64,
+            rttvar_us: u64,
+            congestion_window: usize,
+            packets_lost: u64,
+            packets_retransmitted: u64,
         };
-    }
 
-    pub fn deinit(self: *Server) void {
-        if (self.started) {
-            self.stop();
-            self.drive_group.cancel(self.io);
-            self.drive_group.await(self.io) catch {};
-            self.started = false;
+        /// Return an aggregate metrics snapshot across all live connections.
+        pub fn metricsSnapshot(self: *ServerSelf) Metrics {
+            var m: Metrics = .{
+                .active_connections = 0,
+                .stream_bytes_sent = 0,
+                .stream_bytes_received = 0,
+                .total_bytes_in_flight = 0,
+                .smoothed_rtt_us = 0,
+                .rttvar_us = 0,
+                .congestion_window = 0,
+                .packets_lost = 0,
+                .packets_retransmitted = 0,
+            };
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            var it = self.conns.valueIterator();
+            while (it.next()) |csp| {
+                const st = csp.*;
+                if (st.conn.isClosingOrClosed()) continue;
+                const cs = st.conn.connectionStats();
+                m.active_connections += 1;
+                m.stream_bytes_sent += cs.stream_bytes_sent;
+                m.stream_bytes_received += cs.stream_bytes_received;
+                m.total_bytes_in_flight += cs.total_bytes_in_flight;
+                m.smoothed_rtt_us += cs.smoothed_rtt_us;
+                m.rttvar_us += cs.rttvar_us;
+                m.congestion_window += cs.congestion_window;
+                m.packets_lost += cs.packets_lost;
+                m.packets_retransmitted += cs.packets_retransmitted;
+            }
+            self.mutex.unlock();
+            return m;
         }
-        var it = self.conns.valueIterator();
-        while (it.next()) |cs| {
-            cs.*.deinit(self.allocator);
-            self.allocator.destroy(cs.*);
+
+        /// Start the server (if not already started) and spawn the serve task,
+        /// which accepts connections and runs one handler task per connection
+        /// (std.Build.WebServer serve pattern). The runtime releases each
+        /// connection when its handler returns; deinit cancels the serve task
+        /// and every handler task.
+        pub fn serve(self: *ServerSelf, handler: ServerSelf.HandlerFn) !void {
+            try self.start();
+            try self.drive_group.concurrent(self.io, ServerSelf.serveLoop, .{ self, handler });
+            log.info("quicz server listening on {f}/", .{self.socket.address});
         }
-        self.conns.deinit();
-        self.pending_accept.deinit(self.allocator);
-        for (self.datagram_queue.items[self.datagram_read_offset..]) |qd| {
-            if (qd.pooled) self.datagram_pool.release(qd.data) else self.allocator.free(qd.data);
+
+        /// HTTP/3 QPACK dynamic-table options (RFC 9204).
+        pub const H3ServeOptions = struct {
+            qpack_max_table_capacity: u64 = 4096,
+            qpack_blocked_streams: u64 = 8,
+        };
+
+        /// Serve HTTP/3 on this transport server: every accepted connection is
+        /// driven by the runtime H3 driver with `handler` as the request handler.
+        /// The transport (socket, endpoint, connection lifecycle) stays owned by
+        /// this `ServerSelf`; only the application protocol is wired here.
+        pub fn serveH3(self: *ServerSelf, options: H3ServeOptions, handler: h3_proto.RequestHandler) !void {
+            if (Path != endpoint.Udp4Tuple) @compileError("IPv6 HTTP/3 is outside this runtime entry point");
+            self.h3_request_handler = handler;
+            self.h3_qpack_max_table_capacity = options.qpack_max_table_capacity;
+            self.h3_qpack_blocked_streams = options.qpack_blocked_streams;
+            try self.serve(h3ServeHandler);
         }
-        self.datagram_queue.deinit(self.allocator);
-        self.datagram_pool.deinit(self.allocator);
-        if (self.punch_responder) |*responder| responder.deinit();
-        self.punch_responder = null;
-        self.server_ep.deinit();
-        self.socket.close(self.io);
-    }
 
-    /// Mark the handler done with a connection. Call once per connection
-    /// when the handler finishes; the drive task frees the state once the
-    /// connection is also closed (single-owner reclamation).
-    pub fn releaseConnection(self: *Server, conn_id: u64) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        if (self.conns.get(conn_id)) |cs| {
-            cs.handler_done = true;
+        /// Per-connection handler backing serveH3: one runtime H3 driver per
+        /// connection, exactly the layering recommended for production.
+        fn h3ServeHandler(conn: ServerSelf.ServerConnection) std.Io.Cancelable!void {
+            const srv = conn.server;
+            const handler = srv.h3_request_handler orelse return;
+            var driver = runtime_h3.H3Server.init(
+                srv.allocator,
+                srv,
+                conn.id,
+                handler,
+                srv.h3_qpack_max_table_capacity,
+                srv.h3_qpack_blocked_streams,
+            );
+            defer driver.deinit();
+            try driver.run();
         }
-        self.mutex.unlock();
-        self.notifyDrive(self.io);
-    }
 
-    /// Ask the drive task to close one connection without stopping the server.
-    /// Safe to call after a handler's stream bridge fails; repeated requests
-    /// and already-closed connections are ignored.
-    pub fn closeConnection(self: *Server, conn_id: u64, application_error_code: u64) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        if (self.conns.get(conn_id)) |cs| {
-            cs.close_requested = true;
-            cs.close_error_code = application_error_code;
+        /// Serve task body: accept loop plus per-connection handler tasks
+        /// (std.Build.WebServer.serve pattern: per-conn group.concurrent,
+        /// defer group.cancel for cleanup).
+        fn serveLoop(self: *ServerSelf, handler: ServerSelf.HandlerFn) std.Io.Cancelable!void {
+            const io = self.io;
+            var group: std.Io.Group = .init;
+            defer group.cancel(io);
+            while (true) {
+                const conn = try self.accept();
+                group.concurrent(io, handlerTask, .{ self, conn, handler }) catch |err| {
+                    log.err("unable to spawn connection handler: {}", .{err});
+                    self.releaseConnection(conn.id);
+                    continue;
+                };
+            }
         }
-        self.mutex.unlock();
-        self.notifyDrive(self.io);
-    }
 
-    /// Raise SO_RCVBUF so client bursts do not overflow the kernel receive
-    /// buffer before the drive task drains it; loss recovery still covers
-    /// any residual drops.
-    fn enlargeSocketReceiveBuffer(handle: std.Io.net.Socket.Handle) void {
-        const size: u32 = 4 * 1024 * 1024;
-        std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&size)) catch {};
-    }
+        /// Handler task wrapper: releases the connection reference when the
+        /// handler finishes so the drive task can reclaim the state.
+        fn handlerTask(self: *ServerSelf, conn: ServerSelf.ServerConnection, handler: ServerSelf.HandlerFn) std.Io.Cancelable!void {
+            defer self.releaseConnection(conn.id);
+            handler(conn) catch |err| {
+                if (err != error.Canceled) log.err("connection {d} handler failed: {}", .{ conn.id, err });
+            };
+        }
 
-    fn nowNanos(self: *const Server) i64 {
-        return @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds);
-    }
+        pub fn deinit(self: *ServerSelf) void {
+            if (self.started) {
+                self.stop();
+                self.drive_group.cancel(self.io);
+                self.drive_group.await(self.io) catch {};
+                self.started = false;
+            }
+            var it = self.conns.valueIterator();
+            while (it.next()) |cs| {
+                cs.*.deinit(self.allocator);
+                self.allocator.destroy(cs.*);
+            }
+            self.conns.deinit();
+            self.pending_accept.deinit(self.allocator);
+            for (self.datagram_queue.items[self.datagram_read_offset..]) |qd| {
+                if (qd.pooled) self.datagram_pool.release(qd.data) else self.allocator.free(qd.data);
+            }
+            self.datagram_queue.deinit(self.allocator);
+            self.datagram_pool.deinit(self.allocator);
+            if (self.punch_responder) |*responder| responder.deinit();
+            self.punch_responder = null;
+            self.server_ep.deinit();
+            self.socket.close(self.io);
+        }
 
-    /// Drain queued stream sends and emit outgoing datagrams.
-    fn drainOutgoing(self: *Server, io: std.Io, allocator: std.mem.Allocator) void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        var closed_handles: [64]u64 = undefined;
-        var closed_count: usize = 0;
-        var cit = self.conns.valueIterator();
-        while (cit.next()) |csp| {
-            const st = csp.*;
-            // The endpoint reclaims records of closed connections during
-            // deadline queries; only dereference the connection while its
-            // record is alive. The cached close state keeps this ConnState
-            // reclaimable after the record is gone.
-            const record_alive = self.server_ep.records.get(st.handle) != null;
-            if (st.close_requested) {
-                st.close_requested = false;
-                if (record_alive and !st.conn.isClosingOrClosed()) {
-                    st.conn.closeApplication(st.close_error_code, "") catch |err|
-                        log.err("connection {d} close failed: {}", .{ st.handle, err });
+        /// Mark the handler done with a connection. Call once per connection
+        /// when the handler finishes; the drive task frees the state once the
+        /// connection is also closed (single-owner reclamation).
+        pub fn releaseConnection(self: *ServerSelf, conn_id: u64) void {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            if (self.conns.get(conn_id)) |cs| {
+                cs.handler_done = true;
+            }
+            self.mutex.unlock();
+            self.notifyDrive(self.io);
+        }
+
+        /// Ask the drive task to close one connection without stopping the server.
+        /// Safe to call after a handler's stream bridge fails; repeated requests
+        /// and already-closed connections are ignored.
+        pub fn closeConnection(self: *ServerSelf, conn_id: u64, application_error_code: u64) void {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            if (self.conns.get(conn_id)) |cs| {
+                cs.close_requested = true;
+                cs.close_error_code = application_error_code;
+            }
+            self.mutex.unlock();
+            self.notifyDrive(self.io);
+        }
+
+        /// Raise SO_RCVBUF so client bursts do not overflow the kernel receive
+        /// buffer before the drive task drains it; loss recovery still covers
+        /// any residual drops.
+        fn enlargeSocketReceiveBuffer(handle: std.Io.net.Socket.Handle) void {
+            const size: u32 = 4 * 1024 * 1024;
+            std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&size)) catch {};
+        }
+
+        fn nowNanos(self: *const ServerSelf) i64 {
+            return @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds);
+        }
+
+        /// Drain queued stream sends and emit outgoing datagrams.
+        fn drainOutgoing(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            var closed_handles: [64]u64 = undefined;
+            var closed_count: usize = 0;
+            var cit = self.conns.valueIterator();
+            while (cit.next()) |csp| {
+                const st = csp.*;
+                // The endpoint reclaims records of closed connections during
+                // deadline queries; only dereference the connection while its
+                // record is alive. The cached close state keeps this ConnState
+                // reclaimable after the record is gone.
+                const record_alive = self.server_ep.records.get(st.handle) != null;
+                if (st.close_requested) {
+                    st.close_requested = false;
+                    if (record_alive and !st.conn.isClosingOrClosed()) {
+                        st.conn.closeApplication(st.close_error_code, "") catch |err|
+                            log.err("connection {d} close failed: {}", .{ st.handle, err });
+                    }
                 }
-            }
-            const closing_now = if (record_alive) st.conn.isClosingOrClosed() else true;
-            const closing_prev = @atomicRmw(bool, &st.closing_or_closed, .Xchg, closing_now, .acq_rel);
-            if (closing_now and !closing_prev) {
-                // A blocked handler cannot learn about the close from stream
-                // data or EOF; wake it so it observes error.ConnectionClosed.
-                st.data_sem.post(io);
-            }
-            if (closing_now and st.handler_done) {
-                if (closed_count < closed_handles.len) {
-                    closed_handles[closed_count] = st.handle;
-                    closed_count += 1;
+                const closing_now = if (record_alive) st.conn.isClosingOrClosed() else true;
+                const closing_prev = @atomicRmw(bool, &st.closing_or_closed, .Xchg, closing_now, .acq_rel);
+                if (closing_now and !closing_prev) {
+                    // A blocked handler cannot learn about the close from stream
+                    // data or EOF; wake it so it observes error.ConnectionClosed.
+                    st.data_sem.post(io);
                 }
-                continue;
-            }
-            if (!record_alive) continue;
-            while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
-            var flow_blocked = false;
-            for (st.send_streams.items) |*sq| {
-                if (sq.queue.items.len > 0 or sq.fin) {
-                    st.conn.sendOnStream(sq.id, sq.queue.items, sq.fin) catch |err| {
-                        if (err == error.FlowControlBlocked) {
-                            // Keep the queued bytes and retry once the peer
-                            // grants fresh MAX_STREAM_DATA credit (an inbound
-                            // datagram wakes the drive loop, which drains again).
-                            flow_blocked = true;
+                if (closing_now and st.handler_done) {
+                    if (closed_count < closed_handles.len) {
+                        closed_handles[closed_count] = st.handle;
+                        closed_count += 1;
+                    }
+                    continue;
+                }
+                if (!record_alive) continue;
+                while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
+                var flow_blocked = false;
+                for (st.send_streams.items) |*sq| {
+                    if (sq.queue.items.len > 0 or sq.fin) {
+                        st.conn.sendOnStream(sq.id, sq.queue.items, sq.fin) catch |err| {
+                            if (err == error.FlowControlBlocked) {
+                                // Keep the queued bytes and retry once the peer
+                                // grants fresh MAX_STREAM_DATA credit (an inbound
+                                // datagram wakes the drive loop, which drains again).
+                                flow_blocked = true;
+                                break;
+                            }
+                            sq.queue.clearRetainingCapacity();
+                            sq.fin = false;
                             break;
-                        }
+                        };
                         sq.queue.clearRetainingCapacity();
                         sq.fin = false;
-                        break;
-                    };
-                    sq.queue.clearRetainingCapacity();
-                    sq.fin = false;
-                }
-            }
-            for (st.stop_sendings.items) |req| {
-                st.conn.stopSending(req.id, req.code) catch {};
-            }
-            st.stop_sendings.clearRetainingCapacity();
-            if (st.uni_open_requested) {
-                st.next_uni_stream = st.conn.openUniStream() catch 0;
-                st.uni_open_requested = false;
-                st.uni_open_sem.post(self.io);
-            }
-            if (!flow_blocked and st.send_pending) {
-                st.send_pending = false;
-                _ = st.send_flush_id.rmw(.Add, 1, .release);
-                // Every stream flush waits on this connection-wide drain.
-                self.io.futexWake(u32, &st.send_flush_id.raw, std.math.maxInt(u32));
-            }
-            st.mutex.unlock();
-        }
-        for (closed_handles[0..closed_count]) |h| {
-            if (self.conns.fetchRemove(h)) |kv| {
-                kv.value.deinit(allocator);
-                allocator.destroy(kv.value);
-                log.info("connection {d} closed: state reclaimed", .{h});
-            }
-        }
-        self.mutex.unlock();
-        var out: [16]ServerEndpoint.DatagramPathResult = undefined;
-        const drained = self.server_ep.drainDatagramsAcrossRecordsWithRoutePathWithScratch(self.nowNanos(), .application, &out);
-        // Batch the drained datagrams: Linux sendmmsg amortizes the syscall
-        // across the batch (std.Io.Threaded netSend); macOS has no sendmmsg
-        // and its batching path is slower, so fall back to per-datagram sends.
-        var addrs: [16]std.Io.net.IpAddress = undefined;
-        var msgs: [16]std.Io.net.OutgoingMessage = undefined;
-        for (out[0..drained.datagrams_written], 0..) |o, i| {
-            addrs[i] = .{ .ip4 = .{ .bytes = o.path.remote.octets, .port = o.path.remote.port } };
-            msgs[i] = .{ .address = &addrs[i], .data_ptr = o.datagram.ptr, .data_len = o.datagram.len };
-        }
-        if (builtin.os.tag == .linux) {
-            self.socket.sendMany(io, msgs[0..drained.datagrams_written], .{}) catch {};
-        } else {
-            for (msgs[0..drained.datagrams_written]) |m| {
-                self.socket.send(io, m.address, m.data_ptr[0..m.data_len]) catch {};
-            }
-        }
-        for (out[0..drained.datagrams_written]) |o| {
-            allocator.free(o.datagram);
-        }
-    }
-
-    /// Wake the drive task: bump the futex word, then wake the waiter.
-    /// std.Build.WebServer uses the same pattern (notifyUpdate/update_id).
-    fn notifyDrive(self: *Server, io: std.Io) void {
-        _ = self.wake_id.rmw(.Add, 1, .release);
-        io.futexWake(u32, &self.wake_id.raw, 1);
-    }
-
-    /// Receive datagrams into the queue and wake the drive task. Mirrors the
-    /// official WebServer accept task: block on the socket, hand work off.
-    fn recvTask(self: *Server) std.Io.Cancelable!void {
-        const io = self.io;
-        const allocator = self.allocator;
-        var recv_buf: [max_datagram_size]u8 = undefined;
-        while (!@atomicLoad(bool, &self.stopping, .acquire)) {
-            const received = self.socket.receiveTimeout(io, &recv_buf, .none) catch |err| switch (err) {
-                error.Canceled => return,
-                else => {
-                    if (@atomicLoad(bool, &self.stopping, .acquire)) return;
-                    log.debug("recv task: receive: {}", .{err});
-                    continue;
-                },
-            };
-            const pooled_buf = self.datagram_pool.take();
-            const copy = if (pooled_buf) |pb| blk: {
-                @memcpy(pb[0..received.data.len], received.data);
-                break :blk pb[0..received.data.len];
-            } else allocator.dupe(u8, received.data) catch continue;
-            while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
-            self.datagram_queue.append(allocator, .{ .from = received.from, .data = copy, .pooled = pooled_buf != null }) catch {
-                self.queue_mutex.unlock();
-                if (pooled_buf != null) self.datagram_pool.release(copy) else allocator.free(copy);
-                continue;
-            };
-            self.queue_mutex.unlock();
-            self.notifyDrive(io);
-        }
-    }
-
-    /// Process every queued datagram in FIFO order and free its buffer.
-    fn drainQueuedDatagrams(self: *Server, io: std.Io, allocator: std.mem.Allocator) void {
-        while (true) {
-            while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
-            if (self.datagram_read_offset >= self.datagram_queue.items.len) {
-                self.datagram_queue.clearRetainingCapacity();
-                self.datagram_read_offset = 0;
-                self.queue_mutex.unlock();
-                return;
-            }
-            const qd = self.datagram_queue.items[self.datagram_read_offset];
-            self.datagram_read_offset += 1;
-            self.queue_mutex.unlock();
-            self.processDatagram(io, allocator, qd.from, qd.data);
-            if (qd.pooled) self.datagram_pool.release(qd.data) else allocator.free(qd.data);
-        }
-    }
-
-    fn drainSharedPunches(self: *Server, io: std.Io) void {
-        const coordinator = self.shared_punch_coordinator orelse return;
-        const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
-        while (true) switch (coordinator.next(now_ms)) {
-            .probe => |outbound| {
-                var destination = outbound.destination;
-                self.socket.send(io, &destination, &outbound.packet) catch {};
-            },
-            .failed => |failure| {
-                if (self.shared_punch_failure_handler) |handler| handler(failure);
-                _ = coordinator.remove(failure.attempt_id);
-            },
-            .validated => |attempt_id| self.retainSharedResponder(attempt_id),
-            else => return,
-        };
-    }
-
-    fn retainSharedResponder(self: *Server, attempt_id: quicz.connectivity.punch_wire.AttemptId) void {
-        const coordinator = self.shared_punch_coordinator orelse return;
-        var attempt = coordinator.takeValidated(attempt_id) catch return;
-        defer attempt.deinit();
-        if (self.punch_responder_registry) |responders| {
-            const lifetime_ms = std.math.mul(u32, attempt.punch.config.maximum_retry_ms, 2) catch return;
-            responders.register(quicz.connectivity.punch_responder.PunchResponder.init(
-                attempt.punch.key,
-                attempt.punch.attempt_id,
-                attempt.punch.local_nonce,
-                attempt.remote,
-                self.nowNanos(),
-                lifetime_ms,
-            ) catch return) catch {};
-        }
-    }
-
-    /// Route one datagram through the endpoint (accept or routed step) and
-    /// deliver stream data to per-connection queues.
-    fn processDatagram(self: *Server, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
-        if (self.stun_binding.receive(io, from, data)) return;
-        if (self.shared_punch_coordinator) |coordinator| {
-            const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
-            switch (coordinator.receive(from, now_ms, data)) {
-                .idle => {},
-                .acknowledgement => |outbound| {
-                    var destination = outbound.destination;
-                    self.socket.send(io, &destination, &outbound.packet) catch {};
-                    return;
-                },
-                .validated => |attempt_id| {
-                    self.retainSharedResponder(attempt_id);
-                    return;
-                },
-                .probe, .failed => return,
-            }
-        }
-        if (self.punch_responder_registry) |responders| {
-            switch (responders.handle(from, self.nowNanos(), data)) {
-                .not_punch => {},
-                .consumed => return,
-                .acknowledgement => |acknowledgement| {
-                    var destination = from;
-                    self.socket.send(io, &destination, &acknowledgement) catch {};
-                    return;
-                },
-            }
-        } else if (self.punch_responder) |responder| {
-            switch (responder.handle(from, self.nowNanos(), data)) {
-                .not_punch => {},
-                .consumed => return,
-                .acknowledgement => |acknowledgement| {
-                    var destination = from;
-                    self.socket.send(io, &destination, &acknowledgement) catch {};
-                    return;
-                },
-            }
-        }
-        const from_addr = endpoint.Udp4Address.init(from.ip4.bytes, from.ip4.port);
-        const local_addr = endpoint.Udp4Address.init(self.socket.address.ip4.bytes, self.socket.address.ip4.port);
-        const path = endpoint.Udp4Tuple{ .local = local_addr, .remote = from_addr };
-        const now = self.nowNanos();
-
-        var initial_out: [4]quicz.endpoint_types.EndpointPolledDatagramResult = undefined;
-        var handshake_out: [4]quicz.endpoint_types.EndpointPolledDatagramResult = undefined;
-        var installed_out: [16]ServerEndpoint.DatagramPathResult = undefined;
-        var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
-        var scratch: [8192]u8 = undefined;
-
-        const action = self.server_ep.feedDatagram(&scratch, path, data, &[_]u8{}, &[_]quic_packet.Version{ .v1, .v2 }) catch |e| {
-            log.err("drive: feedDatagram ({d} bytes): {}", .{ data.len, e });
-            return;
-        };
-        var dest = std.Io.net.IpAddress{ .ip4 = .{ .bytes = from_addr.octets, .port = from_addr.port } };
-
-        switch (action) {
-            .accept_initial => |initial_accept| {
-                const handle = self.next_handle;
-                self.next_handle += 1;
-                var server_scid: [8]u8 = undefined;
-                io.randomSecure(&server_scid) catch {};
-                const record = allocator.create(ServerRecord) catch |e| {
-                    log.err("drive: allocate ServerRecord: {}", .{e});
-                    return;
-                };
-                const cert_chain = [_][]const u8{self.cert_der};
-                record.* = .{
-                    .handle = handle,
-                    .transport = Tls13ServerTransport.init(allocator, .{
-                        .initial_max_data = 10_485_760,
-                        .initial_max_stream_data = 10_485_760,
-                        .initial_max_streams_bidi = 128,
-                        .initial_max_streams_uni = 128,
-                        .max_datagram_size = send_mtu,
-                        .max_idle_timeout_ms = self.max_idle_timeout_ms,
-                    }, .{
-                        .alpn = self.alpn,
-                        .cert_chain_der = &cert_chain,
-                        .private_key_bytes = self.private_key,
-                        .private_key_algorithm = self.private_key_algorithm,
-                        .prefer_chacha20 = self.prefer_chacha20,
-                    }) catch |e| {
-                        log.err("drive: Tls13ServerTransport.init: {}", .{e});
-                        allocator.destroy(record);
-                        return;
-                    },
-                };
-                record.transport.connection.validatePeerAddress() catch |e| {
-                    log.err("drive: validatePeerAddress: {}", .{e});
-                };
-                record.transport.setLocalInitialSourceConnectionId(&server_scid) catch |e| {
-                    log.err("drive: setLocalInitialSourceConnectionId: {}", .{e});
-                };
-                const initial_info = quicz.protection.peekProtectedLongPacketInfo(data) catch |e| {
-                    log.err("drive: peekProtectedLongPacketInfo: {}", .{e});
-                    record.transport.deinit();
-                    allocator.destroy(record);
-                    return;
-                };
-                record.transport.setOriginalDestinationConnectionId(initial_info.dcid) catch |e| {
-                    log.err("drive: setOriginalDestinationConnectionId: {}", .{e});
-                };
-                const accepted = self.server_ep.acceptInitialRecord(handle, record, now, initial_accept, &server_scid, data, .{}, &scratch, &initial_out, &handshake_out) catch |e| {
-                    log.err("drive: acceptInitialRecord: {}", .{e});
-                    record.transport.deinit();
-                    allocator.destroy(record);
-                    return;
-                };
-                const cs = allocator.create(ConnState) catch |e| {
-                    log.err("drive: allocate ConnState: {}", .{e});
-                    return;
-                };
-                cs.* = .{ .conn = record.transport.connectionRef(), .handle = handle, .peer = dest };
-                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-                self.conns.put(handle, cs) catch {};
-                self.pending_accept.append(allocator, handle) catch {};
-                self.mutex.unlock();
-                self.accept_sem.post(io);
-                log.info("drive: accepted conn {d}: initial_out={d} handshake={}", .{ handle, accepted.initial.drain.datagrams_written, accepted.handshake != null });
-                for (initial_out[0..accepted.initial.drain.datagrams_written]) |o| {
-                    self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send initial response: {}", .{e});
-                    allocator.free(o.datagram);
-                }
-                if (accepted.handshake) |hs| {
-                    for (handshake_out[0..hs.drain.datagrams_written]) |o| {
-                        self.socket.send(io, &dest, o.datagram) catch {};
-                        allocator.free(o.datagram);
                     }
                 }
-            },
-            .routed => {
-                // RFC 9000 §12.2: a datagram may coalesce long-header and
-                // short-header packets.  When the first long-header packet
-                // doesn't fill the datagram and the trailing byte is a short
-                // header, re-queue the trailing 1-RTT bytes for the next
-                // drive iteration and process only the long-header portion.
-                var effective_data = data;
-                if (data.len > 1 and (data[0] & 0x80) != 0) {
-                    const pi = quicz.protection.peekProtectedLongPacketInfo(data) catch null;
-                    if (pi) |pi_val| {
-                        // Only split Handshake-first coalesced datagrams with
-                        // a trailing short-header (1-RTT) packet.  Initial-first
-                        // coalesced datagrams are handled by the endpoint's
-                        // processInitialWithHandshakeKeys path; padding (0x00)
-                        // is excluded by the fixed-bit check.
-                        if (pi_val.packet_type == .handshake and
-                            pi_val.len > 0 and pi_val.len < data.len and
-                            (data[pi_val.len] & 0x80) == 0 and
-                            (data[pi_val.len] & 0x40) != 0)
-                        {
-                            const trailing = data[pi_val.len..];
-                            const tc = allocator.dupe(u8, trailing) catch null;
-                            if (tc) |copy| {
-                                while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
-                                self.datagram_queue.append(allocator, .{ .from = dest, .data = copy }) catch {
-                                    allocator.free(copy);
-                                };
-                                self.queue_mutex.unlock();
-                                effective_data = data[0..pi_val.len];
-                            }
-                        }
-                    }
+                for (st.stop_sendings.items) |req| {
+                    st.conn.stopSending(req.id, req.code) catch {};
                 }
-                // Detect packet type from first byte to select the correct key space.
-                const space: quicz.endpoint_types.EndpointInstalledKeyDatagramSpace = blk: {
-                    if (effective_data.len == 0) break :blk .application;
-                    if (effective_data[0] & 0x80 != 0) {
-                        break :blk switch ((effective_data[0] >> 4) & 0x03) {
-                            2 => .handshake,
-                            else => .application,
-                        };
-                    }
-                    break :blk .application;
-                };
-                const step = self.server_ep.receiveDatagramStepWithRoutePath(
-                    allocator,
-                    path,
-                    now,
-                    effective_data,
-                    &[_]u8{},
-                    &[_]quic_packet.Version{ .v1, .v2 },
-                    .{ .space = space, .out = &scratch, .unpredictable_prefix = &[_]u8{}, .supported_versions = &[_]quic_packet.Version{ .v1, .v2 } },
-                    &scratch,
-                    &[_]u8{},
-                    &initial_out,
-                    &handshake_out,
-                    &installed_out,
-                    space,
-                    &pending_out,
-                ) catch |e| {
-                    log.err("drive: receiveDatagramStep ({d} bytes, first 0x{x:0>2}): {}", .{ effective_data.len, effective_data[0], e });
-                    return;
-                };
-                switch (step.process) {
-                    .routed => |routed| switch (routed) {
-                        .installed_key => |ik| {
-                            for (installed_out[0..ik.drain.datagrams_written]) |o| {
-                                self.socket.send(io, &dest, o.datagram) catch {};
-                                allocator.free(o.datagram);
-                            }
-                            // Deliver received stream data to per-connection
-                            // queues via the endpoint's own records: the
-                            // routed connection is the record's connection.
-                            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-                            var rit = self.server_ep.records.records.valueIterator();
-                            while (rit.next()) |recp| {
-                                const rec = recp.*;
-                                const conn = rec.transport.connectionRef();
-                                const handle = rec.handle;
-                                const st = self.conns.get(handle) orelse continue;
-                                var stream_buf: [4096]u8 = undefined;
-                                var sid: u64 = 0;
-                                var pushed = false;
-                                // Poll every client-initiated stream (even sid):
-                                // bidirectional (0,4,8,...) and unidirectional
-                                // (2,6,10,...). Server-initiated (odd) sids are
-                                // send-only here and skipped.
-                                while (sid < 1024) : (sid += 1) {
-                                    if ((sid & 1) != 0) continue;
-                                    while (true) {
-                                        const n = conn.recvOnStream(sid, &stream_buf) catch break;
-                                        const len = n orelse break;
-                                        if (len == 0) break;
-                                        while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
-                                        var idx: ?usize = null;
-                                        for (st.recv_streams.items, 0..) |s, i| {
-                                            if (s.id == sid) {
-                                                idx = i;
-                                                break;
-                                            }
-                                        }
-                                        if (idx == null) {
-                                            st.recv_streams.append(allocator, .{ .id = sid }) catch {};
-                                            idx = st.recv_streams.items.len - 1;
-                                            st.pending_streams.append(allocator, sid) catch {};
-                                        }
-                                        st.recv_streams.items[idx.?].queue.appendSlice(allocator, stream_buf[0..len]) catch {};
-                                        pushed = true;
-                                        st.mutex.unlock();
-                                    }
-                                    // FIN received and all bytes drained from the
-                                    // connection: surface EOF on the stream queue.
-                                    if (conn.recvStreamFinished(sid) catch false) {
-                                        while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
-                                        var eof_idx: ?usize = null;
-                                        for (st.recv_streams.items, 0..) |s, i| {
-                                            if (s.id == sid) {
-                                                eof_idx = i;
-                                                break;
-                                            }
-                                        }
-                                        if (eof_idx == null) {
-                                            st.recv_streams.append(allocator, .{ .id = sid }) catch {};
-                                            eof_idx = st.recv_streams.items.len - 1;
-                                            st.pending_streams.append(allocator, sid) catch {};
-                                        }
-                                        st.recv_streams.items[eof_idx.?].eof = true;
-                                        pushed = true;
-                                        st.mutex.unlock();
-                                    }
-                                }
-                                if (pushed) st.data_sem.post(io);
-                            }
-                            self.mutex.unlock();
-                            self.drainOutgoing(io, allocator);
-                        },
-                        // Long-header packets on an accepted connection:
-                        // Initial-space CRYPTO continuations (ClientHello
-                        // spanning several Initials, e.g. post-quantum key
-                        // shares) and Handshake-space packets. Send the
-                        // drained Initial/Handshake responses.
-                        .long => |long_result| {
-                            switch (long_result) {
-                                .packet => |pkt| switch (pkt) {
-                                    .initial => |ip| {
-                                        for (initial_out[0..ip.initial.backend.backend.drain.datagrams_written]) |o| {
-                                            self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send long initial response: {}", .{e});
-                                            allocator.free(o.datagram);
-                                        }
-                                        if (ip.handshake) |hs| {
-                                            for (handshake_out[0..hs.backend.drain.datagrams_written]) |o| {
-                                                self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send long handshake response: {}", .{e});
-                                                allocator.free(o.datagram);
-                                            }
-                                        }
-                                    },
-                                    .handshake => |hs| {
-                                        for (handshake_out[0..hs.backend.backend.drain.datagrams_written]) |o| {
-                                            self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send routed handshake response: {}", .{e});
-                                            allocator.free(o.datagram);
-                                        }
-                                    },
-                                },
-                                .coalesced_initial_handshake => |ch| {
-                                    for (handshake_out[0..ch.backend.backend.drain.datagrams_written]) |o| {
-                                        self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send coalesced response: {}", .{e});
-                                        allocator.free(o.datagram);
-                                    }
-                                },
-                            }
-                            self.drainOutgoing(io, allocator);
-                        },
-                    },
-                    else => {},
+                st.stop_sendings.clearRetainingCapacity();
+                if (st.uni_open_requested) {
+                    st.next_uni_stream = st.conn.openUniStream() catch 0;
+                    st.uni_open_requested = false;
+                    st.uni_open_sem.post(self.io);
                 }
-                for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
-                    self.socket.send(io, &dest, o.datagram) catch {};
-                    allocator.free(o.datagram);
+                if (!flow_blocked and st.send_pending) {
+                    st.send_pending = false;
+                    _ = st.send_flush_id.rmw(.Add, 1, .release);
+                    // Every stream flush waits on this connection-wide drain.
+                    self.io.futexWake(u32, &st.send_flush_id.raw, std.math.maxInt(u32));
                 }
-            },
-            else => {},
-        }
-    }
-
-    /// Service lifecycle deadlines that came due and send the datagrams they
-    /// produce (PTO retransmits, closing/draining packets). Bounded per pass;
-    /// remaining work is picked up on the next drive iteration.
-    fn serviceDueDeadlines(self: *Server, io: std.Io, allocator: std.mem.Allocator) void {
-        var passes: usize = 0;
-        while (passes < 8) : (passes += 1) {
-            var out: [16]ServerEndpoint.DatagramPathResult = undefined;
-            const due = self.server_ep.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(self.nowNanos(), &out) catch |e| {
-                log.debug("drive: due deadline processing: {}", .{e});
-                return;
-            };
-            const result = due orelse return;
-            for (out[0..result.drain.datagrams_written]) |o| {
-                var dest = std.Io.net.IpAddress{ .ip4 = .{ .bytes = o.path.remote.octets, .port = o.path.remote.port } };
-                self.socket.send(io, &dest, o.datagram) catch {};
+                st.mutex.unlock();
+            }
+            for (closed_handles[0..closed_count]) |h| {
+                if (self.conns.fetchRemove(h)) |kv| {
+                    kv.value.deinit(allocator);
+                    allocator.destroy(kv.value);
+                    log.info("connection {d} closed: state reclaimed", .{h});
+                }
+            }
+            self.mutex.unlock();
+            var out: [16]RuntimeEndpoint.DatagramPathResult = undefined;
+            const drained = self.server_ep.drainDatagramsAcrossRecordsWithRoutePathWithScratch(self.nowNanos(), .application, &out);
+            // Batch the drained datagrams: Linux sendmmsg amortizes the syscall
+            // across the batch (std.Io.Threaded netSend); macOS has no sendmmsg
+            // and its batching path is slower, so fall back to per-datagram sends.
+            var addrs: [16]std.Io.net.IpAddress = undefined;
+            var msgs: [16]std.Io.net.OutgoingMessage = undefined;
+            for (out[0..drained.datagrams_written], 0..) |o, i| {
+                addrs[i] = Family.toIp(o.path.remote);
+                msgs[i] = .{ .address = &addrs[i], .data_ptr = o.datagram.ptr, .data_len = o.datagram.len };
+            }
+            if (builtin.os.tag == .linux) {
+                self.socket.sendMany(io, msgs[0..drained.datagrams_written], .{}) catch {};
+            } else {
+                for (msgs[0..drained.datagrams_written]) |m| {
+                    self.socket.send(io, m.address, m.data_ptr[0..m.data_len]) catch {};
+                }
+            }
+            for (out[0..drained.datagrams_written]) |o| {
                 allocator.free(o.datagram);
             }
         }
-    }
 
-    /// Whether a handler-queued send or a recv-task datagram still waits for
-    /// the drive task. Checked after the park snapshot to close the window
-    /// between draining and the snapshot (see drive()).
-    fn hasPendingWork(self: *Server) bool {
-        if (self.shared_punch_coordinator) |coordinator| {
-            const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
-            if (coordinator.nextDeadlineMs()) |deadline| if (deadline <= now_ms) return true;
+        /// Wake the drive task: bump the futex word, then wake the waiter.
+        /// std.Build.WebServer uses the same pattern (notifyUpdate/update_id).
+        fn notifyDrive(self: *ServerSelf, io: std.Io) void {
+            _ = self.wake_id.rmw(.Add, 1, .release);
+            io.futexWake(u32, &self.wake_id.raw, 1);
         }
-        while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
-        const datagrams_queued = self.datagram_read_offset < self.datagram_queue.items.len;
-        self.queue_mutex.unlock();
-        if (datagrams_queued) return true;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        var pending = false;
-        var it = self.conns.valueIterator();
-        while (it.next()) |csp| {
-            if (csp.*.send_pending or csp.*.close_requested or
-                (csp.*.handler_done and csp.*.closing_or_closed))
-            {
-                pending = true;
-                break;
+
+        /// Receive datagrams into the queue and wake the drive task. Mirrors the
+        /// official WebServer accept task: block on the socket, hand work off.
+        fn recvTask(self: *ServerSelf) std.Io.Cancelable!void {
+            const io = self.io;
+            const allocator = self.allocator;
+            var recv_buf: [max_datagram_size]u8 = undefined;
+            while (!@atomicLoad(bool, &self.stopping, .acquire)) {
+                const received = self.socket.receiveTimeout(io, &recv_buf, .none) catch |err| switch (err) {
+                    error.Canceled => return,
+                    else => {
+                        if (@atomicLoad(bool, &self.stopping, .acquire)) return;
+                        log.debug("recv task: receive: {}", .{err});
+                        continue;
+                    },
+                };
+                const pooled_buf = self.datagram_pool.take();
+                const copy = if (pooled_buf) |pb| blk: {
+                    @memcpy(pb[0..received.data.len], received.data);
+                    break :blk pb[0..received.data.len];
+                } else allocator.dupe(u8, received.data) catch continue;
+                while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+                self.datagram_queue.append(allocator, .{ .from = received.from, .data = copy, .pooled = pooled_buf != null }) catch {
+                    self.queue_mutex.unlock();
+                    if (pooled_buf != null) self.datagram_pool.release(copy) else allocator.free(copy);
+                    continue;
+                };
+                self.queue_mutex.unlock();
+                self.notifyDrive(io);
             }
         }
-        self.mutex.unlock();
-        return pending;
-    }
 
-    /// The connection driving task body: drain sends, process queued
-    /// datagrams, service due deadlines, then park on the wakeup futex until
-    /// the next event or lifecycle deadline.
-    pub fn drive(self: *Server) std.Io.Cancelable!void {
-        const allocator = self.allocator;
-        const io = self.io;
-        while (!@atomicLoad(bool, &self.stopping, .acquire)) {
-            self.drainOutgoing(io, allocator);
-            self.drainQueuedDatagrams(io, allocator);
-            self.drainSharedPunches(io);
-            self.serviceDueDeadlines(io, allocator);
-            // Park until a datagram arrives, a handler queues a send, stop()
-            // runs, or the next lifecycle deadline comes due. The snapshot is
-            // taken after draining, pairing with notifyDrive's bump: a
-            // notifier that already ran changed wake_id, so the wait returns
-            // immediately (std.Build.WebServer futexWaitTimeout pattern).
-            const snapshot = self.wake_id.load(.acquire);
-            // Re-check stopping after the snapshot: a stop() that ran before
-            // the snapshot already bumped wake_id (and its futexWake may have
-            // had no waiter yet), and one that runs after the snapshot
-            // changes wake_id so the compare cannot match. Without this
-            // check the drive could park forever past a stop request.
-            if (@atomicLoad(bool, &self.stopping, .acquire)) break;
-            // Re-check for work parked between this iteration's draining and
-            // the snapshot: its notifyDrive bump is already captured by the
-            // snapshot, so the park below would hold the work until the park
-            // timeout (up to the idle deadline). Work arriving after this
-            // check bumps wake_id past the snapshot, so the park still
-            // returns immediately.
-            if (self.hasPendingWork()) continue;
-            const timeout: std.Io.Timeout = timeout: {
-                var deadline_nanos: ?i64 = null;
-                if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
-                if (self.shared_punch_coordinator) |coordinator| if (coordinator.nextDeadlineMs()) |deadline_ms| {
-                    const nanos = std.math.mul(u64, deadline_ms, 1_000_000) catch std.math.maxInt(u64);
-                    const punch_nanos: i64 = @intCast(@min(nanos, std.math.maxInt(i64)));
-                    if (deadline_nanos == null or punch_nanos < deadline_nanos.?) deadline_nanos = punch_nanos;
-                };
-                break :timeout if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
-            };
-            io.futexWaitTimeout(u32, &self.wake_id.raw, snapshot, timeout) catch return;
+        /// Process every queued datagram in FIFO order and free its buffer.
+        fn drainQueuedDatagrams(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
+            while (true) {
+                while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+                if (self.datagram_read_offset >= self.datagram_queue.items.len) {
+                    self.datagram_queue.clearRetainingCapacity();
+                    self.datagram_read_offset = 0;
+                    self.queue_mutex.unlock();
+                    return;
+                }
+                const qd = self.datagram_queue.items[self.datagram_read_offset];
+                self.datagram_read_offset += 1;
+                self.queue_mutex.unlock();
+                self.processDatagram(io, allocator, qd.from, qd.data);
+                if (qd.pooled) self.datagram_pool.release(qd.data) else allocator.free(qd.data);
+            }
         }
-    }
 
-    /// Accept the next new connection (polls with std.time.sleep).
-    pub fn accept(self: *Server) !ServerConnection {
-        while (true) {
-            if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+        fn drainSharedPunches(self: *ServerSelf, io: std.Io) void {
+            const coordinator = self.shared_punch_coordinator orelse return;
+            const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+            while (true) switch (coordinator.next(now_ms)) {
+                .probe => |outbound| {
+                    var destination = outbound.destination;
+                    self.socket.send(io, &destination, &outbound.packet) catch {};
+                },
+                .failed => |failure| {
+                    if (self.shared_punch_failure_handler) |handler| handler(failure);
+                    _ = coordinator.remove(failure.attempt_id);
+                },
+                .validated => |attempt_id| self.retainSharedResponder(attempt_id),
+                else => return,
+            };
+        }
+
+        fn retainSharedResponder(self: *ServerSelf, attempt_id: quicz.connectivity.punch_wire.AttemptId) void {
+            const coordinator = self.shared_punch_coordinator orelse return;
+            var attempt = coordinator.takeValidated(attempt_id) catch return;
+            defer attempt.deinit();
+            if (self.punch_responder_registry) |responders| {
+                const lifetime_ms = std.math.mul(u32, attempt.punch.config.maximum_retry_ms, 2) catch return;
+                responders.register(quicz.connectivity.punch_responder.PunchResponder.init(
+                    attempt.punch.key,
+                    attempt.punch.attempt_id,
+                    attempt.punch.local_nonce,
+                    attempt.remote,
+                    self.nowNanos(),
+                    lifetime_ms,
+                ) catch return) catch {};
+            }
+        }
+
+        /// Route one datagram through the endpoint (accept or routed step) and
+        /// deliver stream data to per-connection queues.
+        fn processDatagram(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator, from: std.Io.net.IpAddress, data: []const u8) void {
+            if (self.stun_binding.receive(io, from, data)) return;
+            if (self.shared_punch_coordinator) |coordinator| {
+                const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+                switch (coordinator.receive(from, now_ms, data)) {
+                    .idle => {},
+                    .acknowledgement => |outbound| {
+                        var destination = outbound.destination;
+                        self.socket.send(io, &destination, &outbound.packet) catch {};
+                        return;
+                    },
+                    .validated => |attempt_id| {
+                        self.retainSharedResponder(attempt_id);
+                        return;
+                    },
+                    .probe, .failed => return,
+                }
+            }
+            if (self.punch_responder_registry) |responders| {
+                switch (responders.handle(from, self.nowNanos(), data)) {
+                    .not_punch => {},
+                    .consumed => return,
+                    .acknowledgement => |acknowledgement| {
+                        var destination = from;
+                        self.socket.send(io, &destination, &acknowledgement) catch {};
+                        return;
+                    },
+                }
+            } else if (self.punch_responder) |responder| {
+                switch (responder.handle(from, self.nowNanos(), data)) {
+                    .not_punch => {},
+                    .consumed => return,
+                    .acknowledgement => |acknowledgement| {
+                        var destination = from;
+                        self.socket.send(io, &destination, &acknowledgement) catch {};
+                        return;
+                    },
+                }
+            }
+            const from_addr = Family.fromIp(from) orelse return;
+            const local_addr = Family.fromIp(self.socket.address) orelse return;
+            const path = Path{ .local = local_addr, .remote = from_addr };
+            const now = self.nowNanos();
+
+            var initial_out: [4]quicz.endpoint_types.EndpointPolledDatagramResult = undefined;
+            var handshake_out: [4]quicz.endpoint_types.EndpointPolledDatagramResult = undefined;
+            var installed_out: [16]RuntimeEndpoint.DatagramPathResult = undefined;
+            var pending_out: [16]RuntimeEndpoint.DatagramPathResult = undefined;
+            var scratch: [8192]u8 = undefined;
+
+            const action = self.server_ep.feedDatagram(&scratch, path, data, &[_]u8{}, &[_]quic_packet.Version{ .v1, .v2 }) catch |e| {
+                log.err("drive: feedDatagram ({d} bytes): {}", .{ data.len, e });
+                return;
+            };
+            var dest = Family.toIp(from_addr);
+
+            switch (action) {
+                .accept_initial => |initial_accept| {
+                    const handle = self.next_handle;
+                    self.next_handle += 1;
+                    var server_scid: [8]u8 = undefined;
+                    io.randomSecure(&server_scid) catch {};
+                    const record = allocator.create(ServerRecord) catch |e| {
+                        log.err("drive: allocate ServerRecord: {}", .{e});
+                        return;
+                    };
+                    const cert_chain = [_][]const u8{self.cert_der};
+                    record.* = .{
+                        .handle = handle,
+                        .transport = Tls13ServerTransport.init(allocator, .{
+                            .initial_max_data = 10_485_760,
+                            .initial_max_stream_data = 10_485_760,
+                            .initial_max_streams_bidi = 128,
+                            .initial_max_streams_uni = 128,
+                            .max_datagram_size = datagram_mtu,
+                            .disable_active_migration = Path == endpoint.Udp6Tuple,
+                            .max_idle_timeout_ms = self.max_idle_timeout_ms,
+                        }, .{
+                            .alpn = self.alpn,
+                            .cert_chain_der = &cert_chain,
+                            .private_key_bytes = self.private_key,
+                            .private_key_algorithm = self.private_key_algorithm,
+                            .prefer_chacha20 = self.prefer_chacha20,
+                        }) catch |e| {
+                            log.err("drive: Tls13ServerTransport.init: {}", .{e});
+                            allocator.destroy(record);
+                            return;
+                        },
+                    };
+                    record.transport.connection.validatePeerAddress() catch |e| {
+                        log.err("drive: validatePeerAddress: {}", .{e});
+                    };
+                    record.transport.setLocalInitialSourceConnectionId(&server_scid) catch |e| {
+                        log.err("drive: setLocalInitialSourceConnectionId: {}", .{e});
+                    };
+                    const initial_info = quicz.protection.peekProtectedLongPacketInfo(data) catch |e| {
+                        log.err("drive: peekProtectedLongPacketInfo: {}", .{e});
+                        record.transport.deinit();
+                        allocator.destroy(record);
+                        return;
+                    };
+                    record.transport.setOriginalDestinationConnectionId(initial_info.dcid) catch |e| {
+                        log.err("drive: setOriginalDestinationConnectionId: {}", .{e});
+                    };
+                    const accepted = self.server_ep.acceptInitialRecord(handle, record, now, initial_accept, &server_scid, data, .{ .active_migration_disabled = Path == endpoint.Udp6Tuple }, &scratch, &initial_out, &handshake_out) catch |e| {
+                        log.err("drive: acceptInitialRecord: {}", .{e});
+                        record.transport.deinit();
+                        allocator.destroy(record);
+                        return;
+                    };
+                    const cs = allocator.create(ConnState) catch |e| {
+                        log.err("drive: allocate ConnState: {}", .{e});
+                        return;
+                    };
+                    cs.* = .{ .conn = record.transport.connectionRef(), .handle = handle, .peer = dest };
+                    while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                    self.conns.put(handle, cs) catch {};
+                    self.pending_accept.append(allocator, handle) catch {};
+                    self.mutex.unlock();
+                    self.accept_sem.post(io);
+                    log.info("drive: accepted conn {d}: initial_out={d} handshake={}", .{ handle, accepted.initial.drain.datagrams_written, accepted.handshake != null });
+                    for (initial_out[0..accepted.initial.drain.datagrams_written]) |o| {
+                        self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send initial response: {}", .{e});
+                        allocator.free(o.datagram);
+                    }
+                    if (accepted.handshake) |hs| {
+                        for (handshake_out[0..hs.drain.datagrams_written]) |o| {
+                            self.socket.send(io, &dest, o.datagram) catch {};
+                            allocator.free(o.datagram);
+                        }
+                    }
+                },
+                .routed => {
+                    // RFC 9000 §12.2: a datagram may coalesce long-header and
+                    // short-header packets.  When the first long-header packet
+                    // doesn't fill the datagram and the trailing byte is a short
+                    // header, re-queue the trailing 1-RTT bytes for the next
+                    // drive iteration and process only the long-header portion.
+                    var effective_data = data;
+                    if (data.len > 1 and (data[0] & 0x80) != 0) {
+                        const pi = quicz.protection.peekProtectedLongPacketInfo(data) catch null;
+                        if (pi) |pi_val| {
+                            // Only split Handshake-first coalesced datagrams with
+                            // a trailing short-header (1-RTT) packet.  Initial-first
+                            // coalesced datagrams are handled by the endpoint's
+                            // processInitialWithHandshakeKeys path; padding (0x00)
+                            // is excluded by the fixed-bit check.
+                            if (pi_val.packet_type == .handshake and
+                                pi_val.len > 0 and pi_val.len < data.len and
+                                (data[pi_val.len] & 0x80) == 0 and
+                                (data[pi_val.len] & 0x40) != 0)
+                            {
+                                const trailing = data[pi_val.len..];
+                                const tc = allocator.dupe(u8, trailing) catch null;
+                                if (tc) |copy| {
+                                    while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+                                    self.datagram_queue.append(allocator, .{ .from = dest, .data = copy }) catch {
+                                        allocator.free(copy);
+                                    };
+                                    self.queue_mutex.unlock();
+                                    effective_data = data[0..pi_val.len];
+                                }
+                            }
+                        }
+                    }
+                    // Detect packet type from first byte to select the correct key space.
+                    const space: quicz.endpoint_types.EndpointInstalledKeyDatagramSpace = blk: {
+                        if (effective_data.len == 0) break :blk .application;
+                        if (effective_data[0] & 0x80 != 0) {
+                            break :blk switch ((effective_data[0] >> 4) & 0x03) {
+                                2 => .handshake,
+                                else => .application,
+                            };
+                        }
+                        break :blk .application;
+                    };
+                    const step = self.server_ep.receiveDatagramStepWithRoutePath(
+                        allocator,
+                        path,
+                        now,
+                        effective_data,
+                        &[_]u8{},
+                        &[_]quic_packet.Version{ .v1, .v2 },
+                        .{ .space = space, .out = &scratch, .unpredictable_prefix = &[_]u8{}, .supported_versions = &[_]quic_packet.Version{ .v1, .v2 } },
+                        &scratch,
+                        &[_]u8{},
+                        &initial_out,
+                        &handshake_out,
+                        &installed_out,
+                        space,
+                        &pending_out,
+                    ) catch |e| {
+                        log.err("drive: receiveDatagramStep ({d} bytes, first 0x{x:0>2}): {}", .{ effective_data.len, effective_data[0], e });
+                        return;
+                    };
+                    switch (step.process) {
+                        .routed => |routed| switch (routed) {
+                            .installed_key => |ik| {
+                                for (installed_out[0..ik.drain.datagrams_written]) |o| {
+                                    self.socket.send(io, &dest, o.datagram) catch {};
+                                    allocator.free(o.datagram);
+                                }
+                                // Deliver received stream data to per-connection
+                                // queues via the endpoint's own records: the
+                                // routed connection is the record's connection.
+                                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                                var rit = self.server_ep.records.records.valueIterator();
+                                while (rit.next()) |recp| {
+                                    const rec = recp.*;
+                                    const conn = rec.transport.connectionRef();
+                                    const handle = rec.handle;
+                                    const st = self.conns.get(handle) orelse continue;
+                                    var stream_buf: [4096]u8 = undefined;
+                                    var sid: u64 = 0;
+                                    var pushed = false;
+                                    // Poll every client-initiated stream (even sid):
+                                    // bidirectional (0,4,8,...) and unidirectional
+                                    // (2,6,10,...). ServerSelf-initiated (odd) sids are
+                                    // send-only here and skipped.
+                                    while (sid < 1024) : (sid += 1) {
+                                        if ((sid & 1) != 0) continue;
+                                        while (true) {
+                                            const n = conn.recvOnStream(sid, &stream_buf) catch break;
+                                            const len = n orelse break;
+                                            if (len == 0) break;
+                                            while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
+                                            var idx: ?usize = null;
+                                            for (st.recv_streams.items, 0..) |s, i| {
+                                                if (s.id == sid) {
+                                                    idx = i;
+                                                    break;
+                                                }
+                                            }
+                                            if (idx == null) {
+                                                st.recv_streams.append(allocator, .{ .id = sid }) catch {};
+                                                idx = st.recv_streams.items.len - 1;
+                                                st.pending_streams.append(allocator, sid) catch {};
+                                            }
+                                            st.recv_streams.items[idx.?].queue.appendSlice(allocator, stream_buf[0..len]) catch {};
+                                            pushed = true;
+                                            st.mutex.unlock();
+                                        }
+                                        // FIN received and all bytes drained from the
+                                        // connection: surface EOF on the stream queue.
+                                        if (conn.recvStreamFinished(sid) catch false) {
+                                            while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
+                                            var eof_idx: ?usize = null;
+                                            for (st.recv_streams.items, 0..) |s, i| {
+                                                if (s.id == sid) {
+                                                    eof_idx = i;
+                                                    break;
+                                                }
+                                            }
+                                            if (eof_idx == null) {
+                                                st.recv_streams.append(allocator, .{ .id = sid }) catch {};
+                                                eof_idx = st.recv_streams.items.len - 1;
+                                                st.pending_streams.append(allocator, sid) catch {};
+                                            }
+                                            st.recv_streams.items[eof_idx.?].eof = true;
+                                            pushed = true;
+                                            st.mutex.unlock();
+                                        }
+                                    }
+                                    if (pushed) st.data_sem.post(io);
+                                }
+                                self.mutex.unlock();
+                                self.drainOutgoing(io, allocator);
+                            },
+                            // Long-header packets on an accepted connection:
+                            // Initial-space CRYPTO continuations (ClientHello
+                            // spanning several Initials, e.g. post-quantum key
+                            // shares) and Handshake-space packets. Send the
+                            // drained Initial/Handshake responses.
+                            .long => |long_result| {
+                                switch (long_result) {
+                                    .packet => |pkt| switch (pkt) {
+                                        .initial => |ip| {
+                                            for (initial_out[0..ip.initial.backend.backend.drain.datagrams_written]) |o| {
+                                                self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send long initial response: {}", .{e});
+                                                allocator.free(o.datagram);
+                                            }
+                                            if (ip.handshake) |hs| {
+                                                for (handshake_out[0..hs.backend.drain.datagrams_written]) |o| {
+                                                    self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send long handshake response: {}", .{e});
+                                                    allocator.free(o.datagram);
+                                                }
+                                            }
+                                        },
+                                        .handshake => |hs| {
+                                            for (handshake_out[0..hs.backend.backend.drain.datagrams_written]) |o| {
+                                                self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send routed handshake response: {}", .{e});
+                                                allocator.free(o.datagram);
+                                            }
+                                        },
+                                    },
+                                    .coalesced_initial_handshake => |ch| {
+                                        for (handshake_out[0..ch.backend.backend.drain.datagrams_written]) |o| {
+                                            self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send coalesced response: {}", .{e});
+                                            allocator.free(o.datagram);
+                                        }
+                                    },
+                                }
+                                self.drainOutgoing(io, allocator);
+                            },
+                        },
+                        else => {},
+                    }
+                    for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
+                        self.socket.send(io, &dest, o.datagram) catch {};
+                        allocator.free(o.datagram);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        /// Service lifecycle deadlines that came due and send the datagrams they
+        /// produce (PTO retransmits, closing/draining packets). Bounded per pass;
+        /// remaining work is picked up on the next drive iteration.
+        fn serviceDueDeadlines(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
+            var passes: usize = 0;
+            while (passes < 8) : (passes += 1) {
+                var out: [16]RuntimeEndpoint.DatagramPathResult = undefined;
+                const due = self.server_ep.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(self.nowNanos(), &out) catch |e| {
+                    log.debug("drive: due deadline processing: {}", .{e});
+                    return;
+                };
+                const result = due orelse return;
+                for (out[0..result.drain.datagrams_written]) |o| {
+                    var dest = Family.toIp(o.path.remote);
+                    self.socket.send(io, &dest, o.datagram) catch {};
+                    allocator.free(o.datagram);
+                }
+            }
+        }
+
+        /// Whether a handler-queued send or a recv-task datagram still waits for
+        /// the drive task. Checked after the park snapshot to close the window
+        /// between draining and the snapshot (see drive()).
+        fn hasPendingWork(self: *ServerSelf) bool {
+            if (self.shared_punch_coordinator) |coordinator| {
+                const now_ms: u64 = @intCast(@max(0, @divFloor(self.nowNanos(), 1_000_000)));
+                if (coordinator.nextDeadlineMs()) |deadline| if (deadline <= now_ms) return true;
+            }
+            while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+            const datagrams_queued = self.datagram_read_offset < self.datagram_queue.items.len;
+            self.queue_mutex.unlock();
+            if (datagrams_queued) return true;
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-            if (self.pending_accept.items.len > 0) {
-                const id = self.pending_accept.orderedRemove(0);
-                self.mutex.unlock();
-                return .{ .server = self, .id = id };
+            var pending = false;
+            var it = self.conns.valueIterator();
+            while (it.next()) |csp| {
+                if (csp.*.send_pending or csp.*.close_requested or
+                    (csp.*.handler_done and csp.*.closing_or_closed))
+                {
+                    pending = true;
+                    break;
+                }
             }
             self.mutex.unlock();
-            self.accept_sem.wait(self.io) catch return error.Canceled;
+            return pending;
         }
-    }
 
-    /// Accept the next stream with pending data on a connection.
-    pub fn acceptStreamId(self: *Server, conn_id: u64) !u64 {
-        while (true) {
+        /// The connection driving task body: drain sends, process queued
+        /// datagrams, service due deadlines, then park on the wakeup futex until
+        /// the next event or lifecycle deadline.
+        pub fn drive(self: *ServerSelf) std.Io.Cancelable!void {
+            const allocator = self.allocator;
+            const io = self.io;
+            while (!@atomicLoad(bool, &self.stopping, .acquire)) {
+                self.drainOutgoing(io, allocator);
+                self.drainQueuedDatagrams(io, allocator);
+                self.drainSharedPunches(io);
+                self.serviceDueDeadlines(io, allocator);
+                // Park until a datagram arrives, a handler queues a send, stop()
+                // runs, or the next lifecycle deadline comes due. The snapshot is
+                // taken after draining, pairing with notifyDrive's bump: a
+                // notifier that already ran changed wake_id, so the wait returns
+                // immediately (std.Build.WebServer futexWaitTimeout pattern).
+                const snapshot = self.wake_id.load(.acquire);
+                // Re-check stopping after the snapshot: a stop() that ran before
+                // the snapshot already bumped wake_id (and its futexWake may have
+                // had no waiter yet), and one that runs after the snapshot
+                // changes wake_id so the compare cannot match. Without this
+                // check the drive could park forever past a stop request.
+                if (@atomicLoad(bool, &self.stopping, .acquire)) break;
+                // Re-check for work parked between this iteration's draining and
+                // the snapshot: its notifyDrive bump is already captured by the
+                // snapshot, so the park below would hold the work until the park
+                // timeout (up to the idle deadline). Work arriving after this
+                // check bumps wake_id past the snapshot, so the park still
+                // returns immediately.
+                if (self.hasPendingWork()) continue;
+                const timeout: std.Io.Timeout = timeout: {
+                    var deadline_nanos: ?i64 = null;
+                    if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
+                    if (self.shared_punch_coordinator) |coordinator| if (coordinator.nextDeadlineMs()) |deadline_ms| {
+                        const nanos = std.math.mul(u64, deadline_ms, 1_000_000) catch std.math.maxInt(u64);
+                        const punch_nanos: i64 = @intCast(@min(nanos, std.math.maxInt(i64)));
+                        if (deadline_nanos == null or punch_nanos < deadline_nanos.?) deadline_nanos = punch_nanos;
+                    };
+                    break :timeout if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
+                };
+                io.futexWaitTimeout(u32, &self.wake_id.raw, snapshot, timeout) catch return;
+            }
+        }
+
+        /// Accept the next new connection (polls with std.time.sleep).
+        pub fn accept(self: *ServerSelf) !ServerSelf.ServerConnection {
+            while (true) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                if (self.pending_accept.items.len > 0) {
+                    const id = self.pending_accept.orderedRemove(0);
+                    self.mutex.unlock();
+                    return .{ .server = self, .id = id };
+                }
+                self.mutex.unlock();
+                self.accept_sem.wait(self.io) catch return error.Canceled;
+            }
+        }
+
+        /// Accept the next stream with pending data on a connection.
+        pub fn acceptStreamId(self: *ServerSelf, conn_id: u64) !u64 {
+            while (true) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                const cs = self.conns.get(conn_id) orelse {
+                    self.mutex.unlock();
+                    return error.NoConnection;
+                };
+                while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+                if (cs.pending_streams.items.len > 0) {
+                    const sid = cs.pending_streams.orderedRemove(0);
+                    cs.mutex.unlock();
+                    self.mutex.unlock();
+                    return sid;
+                }
+                if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
+                    cs.mutex.unlock();
+                    self.mutex.unlock();
+                    return error.ConnectionClosed;
+                }
+                cs.mutex.unlock();
+                self.mutex.unlock();
+                cs.data_sem.wait(self.io) catch return error.Canceled;
+            }
+        }
+
+        /// Receive stream data for one stream (polls its per-stream queue).
+        pub fn receiveStreamData(self: *ServerSelf, conn_id: u64, sid: u64, buf: []u8) !usize {
+            while (true) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                const cs = self.conns.get(conn_id) orelse {
+                    self.mutex.unlock();
+                    return error.NoConnection;
+                };
+                while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+                for (cs.recv_streams.items) |*s| {
+                    if (s.id != sid) continue;
+                    const available = s.queue.items[s.read_offset..];
+                    if (available.len > 0) {
+                        const n = @min(buf.len, available.len);
+                        @memcpy(buf[0..n], available[0..n]);
+                        s.read_offset += n;
+                        if (s.read_offset == s.queue.items.len) {
+                            s.queue.clearRetainingCapacity();
+                            s.read_offset = 0;
+                        }
+                        cs.mutex.unlock();
+                        self.mutex.unlock();
+                        return n;
+                    }
+                    if (s.eof) {
+                        cs.mutex.unlock();
+                        self.mutex.unlock();
+                        return 0;
+                    }
+                    break;
+                }
+                // No data and no FIN: a closing/closed connection will never
+                // deliver more on this stream.
+                if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
+                    cs.mutex.unlock();
+                    self.mutex.unlock();
+                    return error.ConnectionClosed;
+                }
+                cs.mutex.unlock();
+                self.mutex.unlock();
+                cs.data_sem.wait(self.io) catch return error.Canceled;
+            }
+        }
+
+        /// Non-blocking accept: pops one queued stream id, or returns `null` when
+        /// none is pending. The HTTP/3 driver drains this queue so per-stream
+        /// registrations do not accumulate, then parks on `waitStreamActivity`.
+        pub fn tryAcceptStreamId(self: *ServerSelf, conn_id: u64) !?u64 {
             if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
             const cs = self.conns.get(conn_id) orelse {
@@ -1468,13 +1582,15 @@ pub const Server = struct {
             }
             cs.mutex.unlock();
             self.mutex.unlock();
-            cs.data_sem.wait(self.io) catch return error.Canceled;
+            return null;
         }
-    }
 
-    /// Receive stream data for one stream (polls its per-stream queue).
-    pub fn receiveStreamData(self: *Server, conn_id: u64, sid: u64, buf: []u8) !usize {
-        while (true) {
+        /// Non-blocking receive for one stream. Returns `null` when the stream has
+        /// no data right now, `0` at EOF, otherwise the number of bytes copied.
+        /// Unlike `receiveStreamData` this never parks, so a caller that drives
+        /// several streams (e.g. the HTTP/3 layer) can interleave them and park
+        /// once on `waitStreamActivity`.
+        pub fn tryReceiveStreamData(self: *ServerSelf, conn_id: u64, sid: u64, buf: []u8) !?usize {
             if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
             const cs = self.conns.get(conn_id) orelse {
@@ -1482,6 +1598,7 @@ pub const Server = struct {
                 return error.NoConnection;
             };
             while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+            var result: ?usize = null;
             for (cs.recv_streams.items) |*s| {
                 if (s.id != sid) continue;
                 const available = s.queue.items[s.read_offset..];
@@ -1493,310 +1610,293 @@ pub const Server = struct {
                         s.queue.clearRetainingCapacity();
                         s.read_offset = 0;
                     }
-                    cs.mutex.unlock();
-                    self.mutex.unlock();
-                    return n;
-                }
-                if (s.eof) {
-                    cs.mutex.unlock();
-                    self.mutex.unlock();
-                    return 0;
+                    result = n;
+                } else if (s.eof) {
+                    result = 0;
                 }
                 break;
             }
-            // No data and no FIN: a closing/closed connection will never
-            // deliver more on this stream.
-            if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
+            cs.mutex.unlock();
+            self.mutex.unlock();
+            return result;
+        }
+
+        /// Snapshot the stream ids currently receiving data on a connection into
+        /// `out`; returns the count written. Used by drivers that need to poll
+        /// every active stream (HTTP/3 control / QPACK / request streams).
+        pub fn connStreamIds(self: *ServerSelf, conn_id: u64, out: []u64) usize {
+            var count: usize = 0;
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            const cs = self.conns.get(conn_id) orelse {
+                self.mutex.unlock();
+                return 0;
+            };
+            while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+            for (cs.recv_streams.items) |*s| {
+                if (count >= out.len) break;
+                out[count] = s.id;
+                count += 1;
+            }
+            cs.mutex.unlock();
+            self.mutex.unlock();
+            return count;
+        }
+
+        /// Park until any stream on a connection has new data / EOF, a new stream
+        /// arrives, or the connection closes. The HTTP/3 driver uses this between
+        /// non-blocking drains instead of blocking on one stream.
+        pub fn waitStreamActivity(self: *ServerSelf, conn_id: u64) !void {
+            while (true) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                const cs = self.conns.get(conn_id) orelse {
+                    self.mutex.unlock();
+                    return error.NoConnection;
+                };
+                while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+                var has_activity = false;
+                for (cs.recv_streams.items) |*s| {
+                    if (s.queue.items.len > s.read_offset or s.eof) {
+                        has_activity = true;
+                        break;
+                    }
+                }
+                if (cs.pending_streams.items.len > 0) has_activity = true;
+                if (has_activity) {
+                    cs.mutex.unlock();
+                    self.mutex.unlock();
+                    return;
+                }
+                if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
+                    cs.mutex.unlock();
+                    self.mutex.unlock();
+                    return error.ConnectionClosed;
+                }
                 cs.mutex.unlock();
                 self.mutex.unlock();
-                return error.ConnectionClosed;
+                cs.data_sem.wait(self.io) catch return error.Canceled;
             }
-            cs.mutex.unlock();
-            self.mutex.unlock();
-            cs.data_sem.wait(self.io) catch return error.Canceled;
         }
-    }
 
-    /// Non-blocking accept: pops one queued stream id, or returns `null` when
-    /// none is pending. The HTTP/3 driver drains this queue so per-stream
-    /// registrations do not accumulate, then parks on `waitStreamActivity`.
-    pub fn tryAcceptStreamId(self: *Server, conn_id: u64) !?u64 {
-        if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
-            self.mutex.unlock();
-            return error.NoConnection;
-        };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        if (cs.pending_streams.items.len > 0) {
-            const sid = cs.pending_streams.orderedRemove(0);
-            cs.mutex.unlock();
-            self.mutex.unlock();
-            return sid;
-        }
-        if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
-            cs.mutex.unlock();
-            self.mutex.unlock();
-            return error.ConnectionClosed;
-        }
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        return null;
-    }
-
-    /// Non-blocking receive for one stream. Returns `null` when the stream has
-    /// no data right now, `0` at EOF, otherwise the number of bytes copied.
-    /// Unlike `receiveStreamData` this never parks, so a caller that drives
-    /// several streams (e.g. the HTTP/3 layer) can interleave them and park
-    /// once on `waitStreamActivity`.
-    pub fn tryReceiveStreamData(self: *Server, conn_id: u64, sid: u64, buf: []u8) !?usize {
-        if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
-            self.mutex.unlock();
-            return error.NoConnection;
-        };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        var result: ?usize = null;
-        for (cs.recv_streams.items) |*s| {
-            if (s.id != sid) continue;
-            const available = s.queue.items[s.read_offset..];
-            if (available.len > 0) {
-                const n = @min(buf.len, available.len);
-                @memcpy(buf[0..n], available[0..n]);
-                s.read_offset += n;
-                if (s.read_offset == s.queue.items.len) {
-                    s.queue.clearRetainingCapacity();
-                    s.read_offset = 0;
-                }
-                result = n;
-            } else if (s.eof) {
-                result = 0;
+        /// Wait until the peer closes this connection or the transport reaches a
+        /// terminal state. Handlers use this to keep the UDP socket alive after
+        /// their final stream FIN has been flushed.
+        pub fn waitConnectionClosed(self: *ServerSelf, conn_id: u64) !void {
+            while (true) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                const cs = self.conns.get(conn_id) orelse {
+                    self.mutex.unlock();
+                    return;
+                };
+                while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+                const closed = @atomicLoad(bool, &cs.closing_or_closed, .acquire);
+                cs.mutex.unlock();
+                self.mutex.unlock();
+                if (closed) return;
+                cs.data_sem.wait(self.io) catch return error.Canceled;
             }
-            break;
         }
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        return result;
-    }
 
-    /// Snapshot the stream ids currently receiving data on a connection into
-    /// `out`; returns the count written. Used by drivers that need to poll
-    /// every active stream (HTTP/3 control / QPACK / request streams).
-    pub fn connStreamIds(self: *Server, conn_id: u64, out: []u64) usize {
-        var count: usize = 0;
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
-            self.mutex.unlock();
-            return 0;
-        };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        for (cs.recv_streams.items) |*s| {
-            if (count >= out.len) break;
-            out[count] = s.id;
-            count += 1;
-        }
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        return count;
-    }
-
-    /// Park until any stream on a connection has new data / EOF, a new stream
-    /// arrives, or the connection closes. The HTTP/3 driver uses this between
-    /// non-blocking drains instead of blocking on one stream.
-    pub fn waitStreamActivity(self: *Server, conn_id: u64) !void {
-        while (true) {
-            if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
+        /// Queue stream data to send (drive task drains and sends).
+        pub fn sendStreamData(self: *ServerSelf, conn_id: u64, stream_id: u64, data: []const u8, fin: bool) !void {
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
             const cs = self.conns.get(conn_id) orelse {
                 self.mutex.unlock();
                 return error.NoConnection;
             };
             while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-            var has_activity = false;
-            for (cs.recv_streams.items) |*s| {
-                if (s.queue.items.len > s.read_offset or s.eof) {
-                    has_activity = true;
+            var idx: ?usize = null;
+            for (cs.send_streams.items, 0..) |s, i| {
+                if (s.id == stream_id) {
+                    idx = i;
                     break;
                 }
             }
-            if (cs.pending_streams.items.len > 0) has_activity = true;
-            if (has_activity) {
-                cs.mutex.unlock();
-                self.mutex.unlock();
-                return;
+            if (idx == null) {
+                cs.send_streams.append(self.allocator, .{ .id = stream_id }) catch {};
+                idx = cs.send_streams.items.len - 1;
             }
-            if (@atomicLoad(bool, &cs.closing_or_closed, .acquire)) {
-                cs.mutex.unlock();
-                self.mutex.unlock();
-                return error.ConnectionClosed;
-            }
+            cs.send_streams.items[idx.?].queue.appendSlice(self.allocator, data) catch {};
+            if (fin) cs.send_streams.items[idx.?].fin = true;
+            const notify = !cs.send_pending;
+            cs.send_pending = true;
             cs.mutex.unlock();
             self.mutex.unlock();
-            cs.data_sem.wait(self.io) catch return error.Canceled;
+            if (notify) self.notifyDrive(self.io);
         }
-    }
 
-    /// Wait until the peer closes this connection or the transport reaches a
-    /// terminal state. Handlers use this to keep the UDP socket alive after
-    /// their final stream FIN has been flushed.
-    pub fn waitConnectionClosed(self: *Server, conn_id: u64) !void {
-        while (true) {
-            if (@atomicLoad(bool, &self.stopping, .acquire)) return error.Canceled;
-            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-            const cs = self.conns.get(conn_id) orelse {
+        /// Wait until the drive task has consumed all currently queued stream
+        /// bytes and FIN markers for this connection.
+        pub fn flushStreamData(self: *ServerSelf, conn_id: u64) !void {
+            while (true) {
+                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+                const cs = self.conns.get(conn_id) orelse {
+                    self.mutex.unlock();
+                    return error.NoConnection;
+                };
+                const snapshot = cs.send_flush_id.load(.acquire);
+                while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+                const pending = cs.send_pending;
+                cs.mutex.unlock();
                 self.mutex.unlock();
-                return;
-            };
-            while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-            const closed = @atomicLoad(bool, &cs.closing_or_closed, .acquire);
-            cs.mutex.unlock();
-            self.mutex.unlock();
-            if (closed) return;
-            cs.data_sem.wait(self.io) catch return error.Canceled;
-        }
-    }
-
-    /// Queue stream data to send (drive task drains and sends).
-    pub fn sendStreamData(self: *Server, conn_id: u64, stream_id: u64, data: []const u8, fin: bool) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
-            self.mutex.unlock();
-            return error.NoConnection;
-        };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        var idx: ?usize = null;
-        for (cs.send_streams.items, 0..) |s, i| {
-            if (s.id == stream_id) {
-                idx = i;
-                break;
+                if (!pending) return;
+                self.io.futexWait(u32, &cs.send_flush_id.raw, snapshot) catch return error.Canceled;
             }
         }
-        if (idx == null) {
-            cs.send_streams.append(self.allocator, .{ .id = stream_id }) catch {};
-            idx = cs.send_streams.items.len - 1;
-        }
-        cs.send_streams.items[idx.?].queue.appendSlice(self.allocator, data) catch {};
-        if (fin) cs.send_streams.items[idx.?].fin = true;
-        const notify = !cs.send_pending;
-        cs.send_pending = true;
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        if (notify) self.notifyDrive(self.io);
-    }
 
-    /// Wait until the drive task has consumed all currently queued stream
-    /// bytes and FIN markers for this connection.
-    pub fn flushStreamData(self: *Server, conn_id: u64) !void {
-        while (true) {
+        /// Queue a STOP_SENDING (RFC 9000 §3.5) for one stream; the drive task
+        /// sends it to the peer. Blocks the handler until the drive task drains it.
+        pub fn stopSendingRequest(self: *ServerSelf, conn_id: u64, stream_id: u64, code: u64) !void {
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
             const cs = self.conns.get(conn_id) orelse {
                 self.mutex.unlock();
                 return error.NoConnection;
             };
-            const snapshot = cs.send_flush_id.load(.acquire);
             while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-            const pending = cs.send_pending;
+            cs.stop_sendings.append(self.allocator, .{ .id = stream_id, .code = code }) catch {};
+            const notify = !cs.send_pending;
+            cs.send_pending = true;
             cs.mutex.unlock();
             self.mutex.unlock();
-            if (!pending) return;
-            self.io.futexWait(u32, &cs.send_flush_id.raw, snapshot) catch return error.Canceled;
+            if (notify) self.notifyDrive(self.io);
         }
-    }
 
-    /// Queue a STOP_SENDING (RFC 9000 §3.5) for one stream; the drive task
-    /// sends it to the peer. Blocks the handler until the drive task drains it.
-    pub fn stopSendingRequest(self: *Server, conn_id: u64, stream_id: u64, code: u64) !void {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
+        /// Open a server-initiated unidirectional stream. The drive task performs
+        /// the actual open (the transport is single-threaded) and posts a result;
+        /// this blocks the handler until the stream id is known.
+        pub fn openUniStreamRequest(self: *ServerSelf, conn_id: u64) !u64 {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            const cs = self.conns.get(conn_id) orelse {
+                self.mutex.unlock();
+                return error.NoConnection;
+            };
+            while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
+            cs.uni_open_requested = true;
+            const notify = !cs.send_pending;
+            cs.send_pending = true;
+            cs.mutex.unlock();
             self.mutex.unlock();
-            return error.NoConnection;
-        };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        cs.stop_sendings.append(self.allocator, .{ .id = stream_id, .code = code }) catch {};
-        const notify = !cs.send_pending;
-        cs.send_pending = true;
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        if (notify) self.notifyDrive(self.io);
-    }
+            if (notify) self.notifyDrive(self.io);
+            cs.uni_open_sem.wait(self.io) catch return error.Canceled;
+            return cs.next_uni_stream;
+        }
 
-    /// Open a server-initiated unidirectional stream. The drive task performs
-    /// the actual open (the transport is single-threaded) and posts a result;
-    /// this blocks the handler until the stream id is known.
-    pub fn openUniStreamRequest(self: *Server, conn_id: u64) !u64 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        const cs = self.conns.get(conn_id) orelse {
-            self.mutex.unlock();
-            return error.NoConnection;
+        pub const ServerConnection = struct {
+            server: *ServerSelf,
+            id: u64,
+
+            pub fn acceptStream(self: *ServerSelf.ServerConnection) !ServerSelf.Stream {
+                const sid = try self.server.acceptStreamId(self.id);
+                return .{ .server = self.server, .conn_id = self.id, .id = sid };
+            }
+
+            /// Open a server-initiated unidirectional stream (RFC 9000 §2.1).
+            pub fn openUniStream(self: *ServerSelf.ServerConnection) !ServerSelf.Stream {
+                const sid = try self.server.openUniStreamRequest(self.id);
+                return .{ .server = self.server, .conn_id = self.id, .id = sid };
+            }
+
+            pub fn waitClosed(self: *ServerSelf.ServerConnection) !void {
+                return self.server.waitConnectionClosed(self.id);
+            }
         };
-        while (!cs.mutex.tryLock()) std.atomic.spinLoopHint();
-        cs.uni_open_requested = true;
-        const notify = !cs.send_pending;
-        cs.send_pending = true;
-        cs.mutex.unlock();
-        self.mutex.unlock();
-        if (notify) self.notifyDrive(self.io);
-        cs.uni_open_sem.wait(self.io) catch return error.Canceled;
-        return cs.next_uni_stream;
-    }
-};
+
+        pub const Stream = struct {
+            server: *ServerSelf,
+            conn_id: u64,
+            id: u64,
+
+            /// True for a unidirectional stream (RFC 9000 §2.1 bit 1 set).
+            pub fn isUni(self: ServerSelf.Stream) bool {
+                return (self.id & 2) != 0;
+            }
+            /// True if the client initiated the stream (RFC 9000 §2.1 bit 0 clear).
+            pub fn isClientInitiated(self: ServerSelf.Stream) bool {
+                return (self.id & 1) == 0;
+            }
+
+            /// Read queued stream bytes. Returns 0 at EOF: the peer FIN arrived
+            /// and every stream byte was already consumed.
+            pub fn receive(self: *ServerSelf.Stream, buf: []u8) !usize {
+                return self.server.receiveStreamData(self.conn_id, self.id, buf);
+            }
+            pub fn send(self: *ServerSelf.Stream, data: []const u8, fin: bool) !void {
+                return self.server.sendStreamData(self.conn_id, self.id, data, fin);
+            }
+            pub fn flush(self: *ServerSelf.Stream) !void {
+                return self.server.flushStreamData(self.conn_id);
+            }
+            /// Ask the peer to STOP_SENDING this stream with `code` (RFC 9000 §3.5).
+            pub fn stopSending(self: *ServerSelf.Stream, code: u64) !void {
+                return self.server.stopSendingRequest(self.conn_id, self.id, code);
+            }
+        };
+    };
+}
 
 /// Per-connection handler callback (std.http model): serves one
 /// connection; `error.Canceled` terminates it during shutdown.
-pub const HandlerFn = *const fn (ServerConnection) std.Io.Cancelable!void;
+pub const HandlerFn = Server.HandlerFn;
 
 /// A server-side connection handle.
-pub const ServerConnection = struct {
-    server: *Server,
-    id: u64,
-
-    pub fn acceptStream(self: *ServerConnection) !Stream {
-        const sid = try self.server.acceptStreamId(self.id);
-        return .{ .server = self.server, .conn_id = self.id, .id = sid };
-    }
-
-    /// Open a server-initiated unidirectional stream (RFC 9000 §2.1).
-    pub fn openUniStream(self: *ServerConnection) !Stream {
-        const sid = try self.server.openUniStreamRequest(self.id);
-        return .{ .server = self.server, .conn_id = self.id, .id = sid };
-    }
-
-    pub fn waitClosed(self: *ServerConnection) !void {
-        return self.server.waitConnectionClosed(self.id);
-    }
-};
+pub const ServerConnection = Server.ServerConnection;
 
 /// A stream handle on a server connection (bidirectional or unidirectional;
 /// local or peer-initiated). `acceptStream` may return a peer (client)
 /// unidirectional stream; `openUniStream` creates a server one.
-pub const Stream = struct {
-    server: *Server,
-    conn_id: u64,
-    id: u64,
+pub const Stream = Server.Stream;
 
-    /// True for a unidirectional stream (RFC 9000 §2.1 bit 1 set).
-    pub fn isUni(self: Stream) bool {
-        return (self.id & 2) != 0;
-    }
-    /// True if the client initiated the stream (RFC 9000 §2.1 bit 0 clear).
-    pub fn isClientInitiated(self: Stream) bool {
-        return (self.id & 1) == 0;
-    }
+const IPv4Config = struct {
+    port: u16,
+    alpn: []const []const u8,
+    cert_der: []const u8,
+    private_key: []const u8,
+    private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm = .ecdsa_p256_sha256,
+    prefer_chacha20: bool = false,
+    /// Maximum connection idle time advertised to peers. Production
+    /// defaults to 30 seconds; focused runtime tests may lower it.
+    max_idle_timeout_ms: u64 = 30_000,
+    /// IPv4 address to bind. Defaults to loopback (127.0.0.1); set to
+    /// `.{0,0,0,0}` to listen on all interfaces (cross-host benchmarks).
+    bind_addr: ?[4]u8 = null,
+    /// Maximum concurrent connections accepted by this server. The
+    /// endpoint pre-allocates routing and scratch state for this many
+    /// connections, so set it to your expected peak + headroom.
+    max_connections: usize = 4096,
+    /// Optional authenticated probe handler retained after this runtime
+    /// takes ownership of a connectivity-validated UDP socket.
+    punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
+    /// Dynamic attempt responders for a Host-level shared endpoint. This
+    /// registry is borrowed, never cleared or deinitialized by Server.
+    punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
+    shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
+    shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
+};
 
-    /// Read queued stream bytes. Returns 0 at EOF: the peer FIN arrived
-    /// and every stream byte was already consumed.
-    pub fn receive(self: *Stream, buf: []u8) !usize {
-        return self.server.receiveStreamData(self.conn_id, self.id, buf);
-    }
-    pub fn send(self: *Stream, data: []const u8, fin: bool) !void {
-        return self.server.sendStreamData(self.conn_id, self.id, data, fin);
-    }
-    pub fn flush(self: *Stream) !void {
-        return self.server.flushStreamData(self.conn_id);
-    }
-    /// Ask the peer to STOP_SENDING this stream with `code` (RFC 9000 §3.5).
-    pub fn stopSending(self: *Stream, code: u64) !void {
-        return self.server.stopSendingRequest(self.conn_id, self.id, code);
-    }
+const IPv6Config = struct {
+    port: u16,
+    alpn: []const []const u8,
+    cert_der: []const u8,
+    private_key: []const u8,
+    private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm = .ecdsa_p256_sha256,
+    prefer_chacha20: bool = false,
+    /// Maximum connection idle time advertised to peers. Production
+    /// defaults to 30 seconds; focused runtime tests may lower it.
+    max_idle_timeout_ms: u64 = 30_000,
+    /// Explicit local IPv6 address. Defaults to loopback (::1).
+    bind_addr: ?[16]u8 = null,
+    bind_scope_id: u32 = 0,
+    /// Maximum concurrent connections accepted by this server. The
+    /// endpoint pre-allocates routing and scratch state for this many
+    /// connections, so set it to your expected peak + headroom.
+    max_connections: usize = 4096,
+    /// Optional authenticated probe handler retained after this runtime
+    /// takes ownership of a connectivity-validated UDP socket.
+    punch_responder: ?quicz.connectivity.punch_responder.PunchResponder = null,
+    /// Dynamic attempt responders for a Host-level shared endpoint. This
+    /// registry is borrowed, never cleared or deinitialized by Server.
+    punch_responder_registry: ?*quicz.connectivity.punch_responder.PunchResponderRegistry = null,
+    shared_punch_coordinator: ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator = null,
+    shared_punch_failure_handler: ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void = null,
 };

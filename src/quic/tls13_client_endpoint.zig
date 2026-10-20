@@ -18,205 +18,232 @@ const transport_types = @import("transport_types.zig");
 
 const Config = connection_config.Config;
 const Connection = connection_module.Connection;
-const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
 const Tls13ClientTransport = client_transport.Tls13ClientTransport;
 
 /// Owns one client transport and the lifecycle state for its UDP route.
-pub const Tls13ClientEndpoint = struct {
-    lifecycle: EndpointConnectionLifecycle,
-    transport: Tls13ClientTransport,
-    connection_id: u64,
-    path: endpoint.Udp4Tuple,
+pub const Tls13ClientEndpoint = Tls13ClientEndpointForTuple(endpoint.Udp4Tuple);
 
-    /// Create a client endpoint and register its stable Initial source CID.
-    pub fn init(
-        allocator: std.mem.Allocator,
+/// Build a client endpoint for one fixed UDP address family.
+pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
+    const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycleForTuple(Path);
+
+    return struct {
+        const Self = @This();
+        lifecycle: EndpointConnectionLifecycle,
+        transport: Tls13ClientTransport,
         connection_id: u64,
-        path: endpoint.Udp4Tuple,
-        route_options: endpoint.RouteOptions,
-        connection_config_value: Config,
-        tls_config: tls13.TlsConfig,
-        original_destination_connection_id: [8]u8,
-        local_source_connection_id: [8]u8,
-    ) !Tls13ClientEndpoint {
-        var transport = try Tls13ClientTransport.init(
-            allocator,
-            connection_config_value,
-            tls_config,
-            original_destination_connection_id,
-            local_source_connection_id,
-        );
-        errdefer transport.deinit();
+        path: Path,
 
-        var lifecycle = EndpointConnectionLifecycle.init(allocator);
-        errdefer lifecycle.deinit();
-        try lifecycle.registerConnectionId(
-            connection_id,
-            &local_source_connection_id,
-            path,
-            route_options,
-        );
-        return .{
-            .lifecycle = lifecycle,
-            .transport = transport,
-            .connection_id = connection_id,
-            .path = path,
-        };
-    }
+        /// Create a client endpoint and register its stable Initial source CID.
+        pub fn init(
+            allocator: std.mem.Allocator,
+            connection_id: u64,
+            path: Path,
+            route_options: endpoint.RouteOptions,
+            connection_config_value: Config,
+            tls_config: tls13.TlsConfig,
+            original_destination_connection_id: [8]u8,
+            local_source_connection_id: [8]u8,
+        ) !Self {
+            var transport = try Tls13ClientTransport.init(
+                allocator,
+                connection_config_value,
+                tls_config,
+                original_destination_connection_id,
+                local_source_connection_id,
+            );
+            errdefer transport.deinit();
 
-    /// Release the owned transport and endpoint lifecycle state.
-    pub fn deinit(self: *Tls13ClientEndpoint) void {
-        self.transport.deinit();
-        self.lifecycle.deinit();
-    }
-
-    /// Queue ClientHello and mirror the resulting recovery timer.
-    pub fn begin(self: *Tls13ClientEndpoint, now_nanos: i64, scratch: []u8) ![]u8 {
-        const datagram = try self.transport.begin(now_nanos, scratch);
-        errdefer self.transport.connection.allocator.free(datagram);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return datagram;
-    }
-
-    /// Queue ClientHello and return it with the committed UDP route.
-    pub fn beginWithRoutePath(self: *Tls13ClientEndpoint, now_nanos: i64, scratch: []u8) !ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        return .{
-            .datagram = try self.begin(now_nanos, scratch),
-            .path = path,
-        };
-    }
-
-    /// Route and process one peer datagram through the owned transport.
-    pub fn receive(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-    ) !ReceiveResult {
-        if (datagram.len == 0) return error.InvalidPacket;
-        if (!isVersionNegotiationDatagram(datagram) and (datagram[0] & 0x40) == 0) return error.InvalidPacket;
-        const route = try self.lifecycle.routeDatagram(self.path, datagram);
-        if (route.connection_id != self.connection_id) return error.InvalidPacket;
-        if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
-            if (self.transport.connection.processStatelessResetDatagram(now_nanos, datagram)) |sequence_number| {
-                try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-                return .{
-                    .route = route,
-                    .transport = .{},
-                    .stateless_reset_sequence_number = sequence_number,
-                };
-            }
-        }
-        const progress = try self.transport.receive(now_nanos, scratch, datagram);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return .{ .route = route, .transport = progress };
-    }
-
-    /// Route/process one peer datagram and pair any immediate outbound output
-    /// with the endpoint's committed UDP route.
-    pub fn receiveWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-    ) !ReceiveDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        const received = try self.receive(now_nanos, scratch, datagram);
-        return .{
-            .receive = received,
-            .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .next_deadline = self.nextDeadline(),
-        };
-    }
-
-    /// Route/process one peer datagram and surface close-on-frame-error output.
-    ///
-    /// This keeps the existing throwing receive path unchanged for callers that
-    /// only need success output, while giving socket loops one bounded step that
-    /// can send a protected CONNECTION_CLOSE after an authenticated 1-RTT frame
-    /// error.
-    pub fn receiveWithRoutePathOrClose(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-    ) !ReceiveOrCloseDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        const received = self.receive(now_nanos, scratch, datagram) catch |err| {
-            if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
+            var lifecycle = EndpointConnectionLifecycle.init(allocator);
+            errdefer lifecycle.deinit();
+            try lifecycle.registerConnectionId(
+                connection_id,
+                &local_source_connection_id,
+                path,
+                route_options,
+            );
             return .{
-                .receive_error = switch (err) {
-                    error.InvalidPacket => error.InvalidPacket,
-                    error.ConnectionClosed => error.ConnectionClosed,
-                    else => unreachable,
-                },
-                .outbound_application = if (err == error.InvalidPacket and self.transport.connection.connectionState() == .closing)
+                .lifecycle = lifecycle,
+                .transport = transport,
+                .connection_id = connection_id,
+                .path = path,
+            };
+        }
+
+        /// Release the owned transport and endpoint lifecycle state.
+        pub fn deinit(self: *Self) void {
+            self.transport.deinit();
+            self.lifecycle.deinit();
+        }
+
+        /// Queue ClientHello and mirror the resulting recovery timer.
+        pub fn begin(self: *Self, now_nanos: i64, scratch: []u8) ![]u8 {
+            const datagram = try self.transport.begin(now_nanos, scratch);
+            errdefer self.transport.connection.allocator.free(datagram);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return datagram;
+        }
+
+        /// Queue ClientHello and return it with the committed UDP route.
+        pub fn beginWithRoutePath(self: *Self, now_nanos: i64, scratch: []u8) !ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            return .{
+                .datagram = try self.begin(now_nanos, scratch),
+                .path = path,
+            };
+        }
+
+        /// Route and process one peer datagram through the owned transport.
+        pub fn receive(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+        ) !ReceiveResult {
+            if (datagram.len == 0) return error.InvalidPacket;
+            if (!isVersionNegotiationDatagram(datagram) and (datagram[0] & 0x40) == 0) return error.InvalidPacket;
+            const route = try self.lifecycle.routeDatagram(self.path, datagram);
+            if (route.connection_id != self.connection_id) return error.InvalidPacket;
+            if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
+                if (self.transport.connection.processStatelessResetDatagram(now_nanos, datagram)) |sequence_number| {
+                    try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+                    return .{
+                        .route = route,
+                        .transport = .{},
+                        .stateless_reset_sequence_number = sequence_number,
+                    };
+                }
+            }
+            const progress = try self.transport.receive(now_nanos, scratch, datagram);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return .{ .route = route, .transport = progress };
+        }
+
+        /// Route/process one peer datagram and pair any immediate outbound output
+        /// with the endpoint's committed UDP route.
+        pub fn receiveWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+        ) !ReceiveDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const received = try self.receive(now_nanos, scratch, datagram);
+            return .{
+                .receive = received,
+                .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Route/process one peer datagram and surface close-on-frame-error output.
+        ///
+        /// This keeps the existing throwing receive path unchanged for callers that
+        /// only need success output, while giving socket loops one bounded step that
+        /// can send a protected CONNECTION_CLOSE after an authenticated 1-RTT frame
+        /// error.
+        pub fn receiveWithRoutePathOrClose(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+        ) !ReceiveOrCloseDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const received = self.receive(now_nanos, scratch, datagram) catch |err| {
+                if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
+                return .{
+                    .receive_error = switch (err) {
+                        error.InvalidPacket => error.InvalidPacket,
+                        error.ConnectionClosed => error.ConnectionClosed,
+                        else => unreachable,
+                    },
+                    .outbound_application = if (err == error.InvalidPacket and self.transport.connection.connectionState() == .closing)
+                        try self.pollApplicationDatagramWithRoutePath(now_nanos)
+                    else
+                        null,
+                    .next_deadline = self.nextDeadline(),
+                };
+            };
+            return .{
+                .receive = received,
+                .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .outbound_application = if (received.transport.application_processed)
                     try self.pollApplicationDatagramWithRoutePath(now_nanos)
                 else
                     null,
                 .next_deadline = self.nextDeadline(),
             };
-        };
-        return .{
-            .receive = received,
-            .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .outbound_application = if (received.transport.application_processed)
-                try self.pollApplicationDatagramWithRoutePath(now_nanos)
-            else
-                null,
-            .next_deadline = self.nextDeadline(),
-        };
-    }
+        }
 
-    /// Route/process one peer datagram and drain route-bound close output.
-    ///
-    /// This bounded variant is for socket loops that can send more than one
-    /// queued datagram after a receive-side frame error. Non-closing invalid
-    /// inputs still preserve queued application output for normal polling.
-    pub fn receiveWithRoutePathOrCloseAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-        out: []ApplicationDatagramPathResult,
-    ) !ReceiveOrCloseDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
-            .drain = .{ .first_route_error = error.UnknownConnectionId },
-            .next_deadline = self.nextDeadline(),
-        };
-        const path = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
-            .drain = .{ .first_route_error = err },
-            .next_deadline = self.nextDeadline(),
-        };
-        const received = self.receive(now_nanos, scratch, datagram) catch |err| {
-            if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
-            var result = ReceiveOrCloseDatagramPathDrainResult{
-                .receive_error = switch (err) {
-                    error.InvalidPacket => error.InvalidPacket,
-                    error.ConnectionClosed => error.ConnectionClosed,
-                    else => unreachable,
-                },
+        /// Route/process one peer datagram and drain route-bound close output.
+        ///
+        /// This bounded variant is for socket loops that can send more than one
+        /// queued datagram after a receive-side frame error. Non-closing invalid
+        /// inputs still preserve queued application output for normal polling.
+        pub fn receiveWithRoutePathOrCloseAndDrainDatagrams(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+            out: []ApplicationDatagramPathResult,
+        ) !ReceiveOrCloseDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
+                .drain = .{ .first_route_error = error.UnknownConnectionId },
                 .next_deadline = self.nextDeadline(),
             };
-            if (err == error.InvalidPacket and self.transport.connection.connectionState() == .closing) {
+            const path = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
+                .drain = .{ .first_route_error = err },
+                .next_deadline = self.nextDeadline(),
+            };
+            const received = self.receive(now_nanos, scratch, datagram) catch |err| {
+                if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
+                var result = ReceiveOrCloseDatagramPathDrainResult{
+                    .receive_error = switch (err) {
+                        error.InvalidPacket => error.InvalidPacket,
+                        error.ConnectionClosed => error.ConnectionClosed,
+                        else => unreachable,
+                    },
+                    .next_deadline = self.nextDeadline(),
+                };
+                if (err == error.InvalidPacket and self.transport.connection.connectionState() == .closing) {
+                    result.drain = if (out.len == 0)
+                        .{ .first_error = error.BufferTooSmall }
+                    else
+                        try self.drainApplicationDatagramsWithRoutePath(now_nanos, out);
+                    result.next_deadline = self.nextDeadline();
+                }
+                return result;
+            };
+            var result = ReceiveOrCloseDatagramPathDrainResult{
+                .receive = received,
+                .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else null,
+                .next_deadline = self.nextDeadline(),
+            };
+            if (received.transport.application_processed) {
                 result.drain = if (out.len == 0)
                     .{ .first_error = error.BufferTooSmall }
                 else
@@ -224,766 +251,746 @@ pub const Tls13ClientEndpoint = struct {
                 result.next_deadline = self.nextDeadline();
             }
             return result;
-        };
-        var result = ReceiveOrCloseDatagramPathDrainResult{
-            .receive = received,
-            .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else null,
-            .next_deadline = self.nextDeadline(),
-        };
-        if (received.transport.application_processed) {
-            result.drain = if (out.len == 0)
-                .{ .first_error = error.BufferTooSmall }
-            else
-                try self.drainApplicationDatagramsWithRoutePath(now_nanos, out);
-            result.next_deadline = self.nextDeadline();
         }
-        return result;
-    }
 
-    /// Run one bounded client receive step and service one due deadline.
-    pub fn receiveDatagramStepWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-        receive_out: []ApplicationDatagramPathResult,
-        due_out: []ApplicationDatagramPathResult,
-    ) !DatagramStepPathResult {
-        const selected_deadline = self.nextDeadline();
-        const received = try self.receiveWithRoutePathOrCloseAndDrainDatagrams(
-            now_nanos,
-            scratch,
-            datagram,
-            receive_out,
-        );
-        if (due_out.len == 0) {
-            if (self.nextDeadline()) |deadline| {
-                if (deadline == .recovery and deadline.deadline() <= now_nanos) {
-                    return .{
-                        .receive = received,
-                        .due = .{
-                            .deadline = deadline,
-                            .drain = .{ .first_error = error.BufferTooSmall },
+        /// Run one bounded client receive step and service one due deadline.
+        pub fn receiveDatagramStepWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+            receive_out: []ApplicationDatagramPathResult,
+            due_out: []ApplicationDatagramPathResult,
+        ) !DatagramStepPathResult {
+            const selected_deadline = self.nextDeadline();
+            const received = try self.receiveWithRoutePathOrCloseAndDrainDatagrams(
+                now_nanos,
+                scratch,
+                datagram,
+                receive_out,
+            );
+            if (due_out.len == 0) {
+                if (self.nextDeadline()) |deadline| {
+                    if (deadline == .recovery and deadline.deadline() <= now_nanos) {
+                        return .{
+                            .receive = received,
+                            .due = .{
+                                .deadline = deadline,
+                                .drain = .{ .first_error = error.BufferTooSmall },
+                                .next_deadline = self.nextDeadline(),
+                            },
                             .next_deadline = self.nextDeadline(),
-                        },
-                        .next_deadline = self.nextDeadline(),
-                    };
+                        };
+                    }
                 }
             }
-        }
-        var due = try self.serviceDueDeadlineAndDrainDatagramsWithRoutePath(now_nanos, due_out);
-        if (due == null) {
-            if (selected_deadline) |deadline| {
-                if (deadline.deadline() <= now_nanos) {
-                    switch (deadline) {
-                        .idle_timeout, .close_timeout => {
-                            if (self.transport.connection.connectionState() == .closed) {
-                                _ = self.lifecycle.retireConnection(self.connection_id);
+            var due = try self.serviceDueDeadlineAndDrainDatagramsWithRoutePath(now_nanos, due_out);
+            if (due == null) {
+                if (selected_deadline) |deadline| {
+                    if (deadline.deadline() <= now_nanos) {
+                        switch (deadline) {
+                            .idle_timeout, .close_timeout => {
+                                if (self.transport.connection.connectionState() == .closed) {
+                                    _ = self.lifecycle.retireConnection(self.connection_id);
+                                    due = .{
+                                        .deadline = deadline,
+                                        .next_deadline = self.nextDeadline(),
+                                    };
+                                }
+                            },
+                            .key_discard => {
                                 due = .{
                                     .deadline = deadline,
                                     .next_deadline = self.nextDeadline(),
                                 };
-                            }
-                        },
-                        .key_discard => {
-                            due = .{
-                                .deadline = deadline,
-                                .next_deadline = self.nextDeadline(),
-                            };
-                        },
-                        .recovery => {},
+                            },
+                            .recovery => {},
+                        }
                     }
                 }
             }
-        }
-        return .{
-            .receive = received,
-            .due = due,
-            .next_deadline = self.nextDeadline(),
-        };
-    }
-
-    /// Move the client's registered UDP route after caller-selected migration.
-    pub fn updatePath(self: *Tls13ClientEndpoint, new_path: endpoint.Udp4Tuple) endpoint.RouteError!endpoint.RouteResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const updated = try self.lifecycle.updateRoutePathAndResetSpinBit(
-            local_source_connection_id,
-            self.path,
-            new_path,
-            &self.transport.connection,
-        );
-        self.path = new_path;
-        return updated;
-    }
-
-    /// Poll one protected application datagram and refresh recovery scheduling.
-    pub fn pollApplicationDatagram(self: *Tls13ClientEndpoint, now_nanos: i64) !?[]u8 {
-        const datagram = try self.transport.pollApplicationDatagram(now_nanos);
-        errdefer if (datagram) |bytes| self.transport.connection.allocator.free(bytes);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return datagram;
-    }
-
-    /// Poll one protected application datagram with its committed UDP route.
-    pub fn pollApplicationDatagramWithRoutePath(self: *Tls13ClientEndpoint, now_nanos: i64) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
-        };
-    }
-
-    /// Drain protected application datagrams with the committed UDP route.
-    ///
-    /// Each initialized output slot owns its datagram. If `first_error` is set,
-    /// the caller still owns the first `datagrams_written` entries.
-    pub fn drainApplicationDatagramsWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !ApplicationDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        var result = ApplicationDatagramPathDrainResult{};
-        while (result.datagrams_written < out.len) {
-            const datagram = self.pollApplicationDatagram(now_nanos) catch |err| {
-                result.first_error = err;
-                return result;
+            return .{
+                .receive = received,
+                .due = due,
+                .next_deadline = self.nextDeadline(),
             };
-            out[result.datagrams_written] = if (datagram) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else return result;
-            result.datagrams_written += 1;
         }
-        return result;
-    }
 
-    /// Select the next client transport lifecycle deadline.
-    pub fn nextDeadline(self: *const Tls13ClientEndpoint) ?client_transport.ClientTransportDeadline {
-        return self.transport.nextDeadline();
-    }
-
-    /// Service one due client deadline and keep endpoint lifecycle state in sync.
-    pub fn serviceDueDeadline(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-    ) !?client_transport.ClientTransportDeadline {
-        const deadline = self.transport.nextDeadline() orelse return null;
-        if (deadline.deadline() > now_nanos) return null;
-
-        switch (deadline) {
-            .idle_timeout => {
-                _ = try self.lifecycle.checkIdleTimeoutsAndRetireConnection(
-                    self.connection_id,
-                    &self.transport.connection,
-                    now_nanos,
-                );
-            },
-            .close_timeout => {
-                _ = try self.lifecycle.checkCloseTimeoutsAndRetireConnection(
-                    self.connection_id,
-                    &self.transport.connection,
-                    now_nanos,
-                );
-            },
-            .recovery, .key_discard => {
-                _ = try self.transport.serviceDueDeadline(now_nanos);
-                try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-            },
-        }
-        return deadline;
-    }
-
-    /// Service one due client deadline and return route-bound recovery output.
-    ///
-    /// Recovery output may be an Initial, Handshake, or 1-RTT Application
-    /// datagram, depending on the due packet number space.
-    pub fn serviceDueDeadlineAndPollDatagramWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-    ) !?DueDeadlineDatagramPathResult {
-        const deadline = self.nextDeadline() orelse return null;
-        if (deadline.deadline() > now_nanos) return null;
-        if (deadline == .recovery) {
+        /// Move the client's registered UDP route after caller-selected migration.
+        pub fn updatePath(self: *Self, new_path: Path) endpoint.RouteError!endpoint.RouteResult {
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const updated = try self.lifecycle.updateRoutePathAndResetSpinBit(
+                local_source_connection_id,
+                self.path,
+                new_path,
+                &self.transport.connection,
+            );
+            self.path = new_path;
+            return updated;
         }
-        const serviced = (try self.serviceDueDeadline(now_nanos)) orelse return null;
-        const datagram = switch (serviced) {
-            .recovery => |recovery| try self.pollRecoveryDatagramWithRoutePath(recovery, now_nanos),
-            .idle_timeout, .close_timeout, .key_discard => null,
-        };
-        return .{
-            .deadline = serviced,
-            .datagram = datagram,
-            .next_deadline = self.nextDeadline(),
-        };
-    }
 
-    /// Service one due client deadline and drain route-bound recovery output.
-    ///
-    /// The deadline is serviced once. Recovery output is bounded by `out.len`;
-    /// initialized slots own their datagrams even when `drain.first_error` is set.
-    pub fn serviceDueDeadlineAndDrainDatagramsWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !?DueDeadlineDatagramPathDrainResult {
-        const deadline = self.nextDeadline() orelse return null;
-        if (deadline.deadline() > now_nanos) return null;
-        if (deadline == .recovery) {
-            if (out.len == 0) return error.BufferTooSmall;
-            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
-                .deadline = deadline,
-                .drain = .{ .first_route_error = error.UnknownConnectionId },
-                .next_deadline = self.nextDeadline(),
-            };
-            _ = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
-                .deadline = deadline,
-                .drain = .{ .first_route_error = err },
-                .next_deadline = self.nextDeadline(),
+        /// Poll one protected application datagram and refresh recovery scheduling.
+        pub fn pollApplicationDatagram(self: *Self, now_nanos: i64) !?[]u8 {
+            const datagram = try self.transport.pollApplicationDatagram(now_nanos);
+            errdefer if (datagram) |bytes| self.transport.connection.allocator.free(bytes);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return datagram;
+        }
+
+        /// Poll one protected application datagram with its committed UDP route.
+        pub fn pollApplicationDatagramWithRoutePath(self: *Self, now_nanos: i64) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
             };
         }
-        const serviced = (try self.serviceDueDeadline(now_nanos)) orelse return null;
-        if (serviced != .recovery) {
+
+        /// Drain protected application datagrams with the committed UDP route.
+        ///
+        /// Each initialized output slot owns its datagram. If `first_error` is set,
+        /// the caller still owns the first `datagrams_written` entries.
+        pub fn drainApplicationDatagramsWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !ApplicationDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            var result = ApplicationDatagramPathDrainResult{};
+            while (result.datagrams_written < out.len) {
+                const datagram = self.pollApplicationDatagram(now_nanos) catch |err| {
+                    result.first_error = err;
+                    return result;
+                };
+                out[result.datagrams_written] = if (datagram) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else return result;
+                result.datagrams_written += 1;
+            }
+            return result;
+        }
+
+        /// Select the next client transport lifecycle deadline.
+        pub fn nextDeadline(self: *const Self) ?client_transport.ClientTransportDeadline {
+            return self.transport.nextDeadline();
+        }
+
+        /// Service one due client deadline and keep endpoint lifecycle state in sync.
+        pub fn serviceDueDeadline(
+            self: *Self,
+            now_nanos: i64,
+        ) !?client_transport.ClientTransportDeadline {
+            const deadline = self.transport.nextDeadline() orelse return null;
+            if (deadline.deadline() > now_nanos) return null;
+
+            switch (deadline) {
+                .idle_timeout => {
+                    _ = try self.lifecycle.checkIdleTimeoutsAndRetireConnection(
+                        self.connection_id,
+                        &self.transport.connection,
+                        now_nanos,
+                    );
+                },
+                .close_timeout => {
+                    _ = try self.lifecycle.checkCloseTimeoutsAndRetireConnection(
+                        self.connection_id,
+                        &self.transport.connection,
+                        now_nanos,
+                    );
+                },
+                .recovery, .key_discard => {
+                    _ = try self.transport.serviceDueDeadline(now_nanos);
+                    try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+                },
+            }
+            return deadline;
+        }
+
+        /// Service one due client deadline and return route-bound recovery output.
+        ///
+        /// Recovery output may be an Initial, Handshake, or 1-RTT Application
+        /// datagram, depending on the due packet number space.
+        pub fn serviceDueDeadlineAndPollDatagramWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+        ) !?DueDeadlineDatagramPathResult {
+            const deadline = self.nextDeadline() orelse return null;
+            if (deadline.deadline() > now_nanos) return null;
+            if (deadline == .recovery) {
+                const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+                _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            }
+            const serviced = (try self.serviceDueDeadline(now_nanos)) orelse return null;
+            const datagram = switch (serviced) {
+                .recovery => |recovery| try self.pollRecoveryDatagramWithRoutePath(recovery, now_nanos),
+                .idle_timeout, .close_timeout, .key_discard => null,
+            };
             return .{
                 .deadline = serviced,
+                .datagram = datagram,
                 .next_deadline = self.nextDeadline(),
             };
         }
 
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        var drain = ApplicationDatagramPathDrainResult{};
-        while (drain.datagrams_written < out.len) {
-            const datagram = self.transport.pollRecoveryDatagram(serviced.recovery, now_nanos) catch |err| {
-                drain.first_error = err;
-                return .{
-                    .deadline = serviced,
-                    .drain = drain,
+        /// Service one due client deadline and drain route-bound recovery output.
+        ///
+        /// The deadline is serviced once. Recovery output is bounded by `out.len`;
+        /// initialized slots own their datagrams even when `drain.first_error` is set.
+        pub fn serviceDueDeadlineAndDrainDatagramsWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !?DueDeadlineDatagramPathDrainResult {
+            const deadline = self.nextDeadline() orelse return null;
+            if (deadline.deadline() > now_nanos) return null;
+            if (deadline == .recovery) {
+                if (out.len == 0) return error.BufferTooSmall;
+                const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
+                    .deadline = deadline,
+                    .drain = .{ .first_route_error = error.UnknownConnectionId },
                     .next_deadline = self.nextDeadline(),
                 };
+                _ = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
+                    .deadline = deadline,
+                    .drain = .{ .first_route_error = err },
+                    .next_deadline = self.nextDeadline(),
+                };
+            }
+            const serviced = (try self.serviceDueDeadline(now_nanos)) orelse return null;
+            if (serviced != .recovery) {
+                return .{
+                    .deadline = serviced,
+                    .next_deadline = self.nextDeadline(),
+                };
+            }
+
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            var drain = ApplicationDatagramPathDrainResult{};
+            while (drain.datagrams_written < out.len) {
+                const datagram = self.transport.pollRecoveryDatagram(serviced.recovery, now_nanos) catch |err| {
+                    drain.first_error = err;
+                    return .{
+                        .deadline = serviced,
+                        .drain = drain,
+                        .next_deadline = self.nextDeadline(),
+                    };
+                };
+                out[drain.datagrams_written] = if (datagram) |bytes| .{
+                    .datagram = bytes,
+                    .path = path,
+                } else break;
+                drain.datagrams_written += 1;
+            }
+            self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection) catch |err| {
+                drain.first_error = err;
             };
-            out[drain.datagrams_written] = if (datagram) |bytes| .{
-                .datagram = bytes,
-                .path = path,
-            } else break;
-            drain.datagrams_written += 1;
+            return .{
+                .deadline = serviced,
+                .drain = drain,
+                .next_deadline = self.nextDeadline(),
+            };
         }
-        self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection) catch |err| {
-            drain.first_error = err;
-        };
-        return .{
-            .deadline = serviced,
-            .drain = drain,
-            .next_deadline = self.nextDeadline(),
-        };
-    }
 
-    fn pollRecoveryDatagramWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        recovery: transport_types.LossDetectionTimerDeadline,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        const datagram = (try self.transport.pollRecoveryDatagram(recovery, now_nanos)) orelse return null;
-        errdefer self.transport.connection.allocator.free(datagram);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return .{
-            .datagram = datagram,
-            .path = path,
-        };
-    }
-
-    /// Return whether TLS and QUIC have reached confirmed 1-RTT state.
-    pub fn handshakeConfirmed(self: *const Tls13ClientEndpoint) bool {
-        return self.transport.handshakeConfirmed();
-    }
-
-    /// Return the selected configuration for a fresh post-VN client attempt.
-    pub fn versionNegotiationFollowupConfig(self: *const Tls13ClientEndpoint) !Config {
-        return self.transport.versionNegotiationFollowupConfig();
-    }
-
-    /// Process Version Negotiation and install the follow-up Initial route.
-    ///
-    /// A valid Version Negotiation packet supersedes this client attempt. The
-    /// owned lifecycle retires the old route and recovery timer, then registers
-    /// the caller-provided follow-up Initial Source CID for the next attempt.
-    /// The current transport remains the validated old attempt; callers create
-    /// the follow-up transport from `version_negotiation.followup_config`.
-    pub fn processVersionNegotiationFollowupRoute(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        datagram: []const u8,
-        followup_connection_id: u64,
-        followup_local_initial_source_connection_id: []const u8,
-        route_options: endpoint.ClientInitialRouteOptions,
-    ) !?endpoint_lifecycle.EndpointVersionNegotiationFollowupResult {
-        return self.lifecycle.processVersionNegotiationFollowupDatagram(
-            self.connection_id,
-            followup_connection_id,
-            &self.transport.connection,
-            now_nanos,
-            &self.transport.original_destination_connection_id,
-            &self.transport.local_source_connection_id,
-            followup_local_initial_source_connection_id,
-            self.path,
-            datagram,
-            route_options,
-        );
-    }
-
-    /// Process Version Negotiation, replace the owned transport, and emit the
-    /// first follow-up Initial with its committed UDP route.
-    ///
-    /// This is the endpoint-owned restart path after an incompatible but valid
-    /// Version Negotiation packet. The old attempt validates the VN packet; the
-    /// lifecycle retires its route/timer and registers the follow-up Initial
-    /// Source CID; then this endpoint installs a fresh client transport for the
-    /// selected version and queues its first ClientHello Initial.
-    pub fn processVersionNegotiationRestartWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        now_nanos: i64,
-        scratch: []u8,
-        datagram: []const u8,
-        followup_connection_id: u64,
-        followup_local_initial_source_connection_id: [8]u8,
-        route_options: endpoint.ClientInitialRouteOptions,
-        tls_config: tls13.TlsConfig,
-    ) !?VersionNegotiationRestartResult {
-        const followup = (try self.processVersionNegotiationFollowupRoute(
-            now_nanos,
-            datagram,
-            followup_connection_id,
-            &followup_local_initial_source_connection_id,
-            route_options,
-        )) orelse return null;
-        errdefer _ = self.lifecycle.retireConnection(followup_connection_id);
-
-        var followup_transport = try Tls13ClientTransport.init(
-            self.transport.allocator,
-            followup.version_negotiation.followup_config,
-            tls_config,
-            self.transport.original_destination_connection_id,
-            followup_local_initial_source_connection_id,
-        );
-        errdefer followup_transport.deinit();
-
-        const path = try self.lifecycle.currentRoutePath(&followup_local_initial_source_connection_id);
-        const initial_datagram = try followup_transport.begin(now_nanos, scratch);
-        errdefer followup_transport.connection.allocator.free(initial_datagram);
-        try self.lifecycle.armRecoveryTimerFromConnection(followup_connection_id, &followup_transport.connection);
-
-        self.transport.deinit();
-        self.transport = followup_transport;
-        self.connection_id = followup_connection_id;
-        self.path = path;
-        return .{
-            .followup = followup,
-            .initial = .{
-                .datagram = initial_datagram,
+        fn pollRecoveryDatagramWithRoutePath(
+            self: *Self,
+            recovery: transport_types.LossDetectionTimerDeadline,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const datagram = (try self.transport.pollRecoveryDatagram(recovery, now_nanos)) orelse return null;
+            errdefer self.transport.connection.allocator.free(datagram);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return .{
+                .datagram = datagram,
                 .path = path,
-            },
+            };
+        }
+
+        /// Return whether TLS and QUIC have reached confirmed 1-RTT state.
+        pub fn handshakeConfirmed(self: *const Self) bool {
+            return self.transport.handshakeConfirmed();
+        }
+
+        /// Return the selected configuration for a fresh post-VN client attempt.
+        pub fn versionNegotiationFollowupConfig(self: *const Self) !Config {
+            return self.transport.versionNegotiationFollowupConfig();
+        }
+
+        /// Process Version Negotiation and install the follow-up Initial route.
+        ///
+        /// A valid Version Negotiation packet supersedes this client attempt. The
+        /// owned lifecycle retires the old route and recovery timer, then registers
+        /// the caller-provided follow-up Initial Source CID for the next attempt.
+        /// The current transport remains the validated old attempt; callers create
+        /// the follow-up transport from `version_negotiation.followup_config`.
+        pub fn processVersionNegotiationFollowupRoute(
+            self: *Self,
+            now_nanos: i64,
+            datagram: []const u8,
+            followup_connection_id: u64,
+            followup_local_initial_source_connection_id: []const u8,
+            route_options: endpoint.ClientInitialRouteOptions,
+        ) !?endpoint_lifecycle.EndpointVersionNegotiationFollowupResult {
+            return self.lifecycle.processVersionNegotiationFollowupDatagram(
+                self.connection_id,
+                followup_connection_id,
+                &self.transport.connection,
+                now_nanos,
+                &self.transport.original_destination_connection_id,
+                &self.transport.local_source_connection_id,
+                followup_local_initial_source_connection_id,
+                self.path,
+                datagram,
+                route_options,
+            );
+        }
+
+        /// Process Version Negotiation, replace the owned transport, and emit the
+        /// first follow-up Initial with its committed UDP route.
+        ///
+        /// This is the endpoint-owned restart path after an incompatible but valid
+        /// Version Negotiation packet. The old attempt validates the VN packet; the
+        /// lifecycle retires its route/timer and registers the follow-up Initial
+        /// Source CID; then this endpoint installs a fresh client transport for the
+        /// selected version and queues its first ClientHello Initial.
+        pub fn processVersionNegotiationRestartWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+            followup_connection_id: u64,
+            followup_local_initial_source_connection_id: [8]u8,
+            route_options: endpoint.ClientInitialRouteOptions,
+            tls_config: tls13.TlsConfig,
+        ) !?VersionNegotiationRestartResult {
+            const followup = (try self.processVersionNegotiationFollowupRoute(
+                now_nanos,
+                datagram,
+                followup_connection_id,
+                &followup_local_initial_source_connection_id,
+                route_options,
+            )) orelse return null;
+            errdefer _ = self.lifecycle.retireConnection(followup_connection_id);
+
+            var followup_transport = try Tls13ClientTransport.init(
+                self.transport.allocator,
+                followup.version_negotiation.followup_config,
+                tls_config,
+                self.transport.original_destination_connection_id,
+                followup_local_initial_source_connection_id,
+            );
+            errdefer followup_transport.deinit();
+
+            const path = try self.lifecycle.currentRoutePath(&followup_local_initial_source_connection_id);
+            const initial_datagram = try followup_transport.begin(now_nanos, scratch);
+            errdefer followup_transport.connection.allocator.free(initial_datagram);
+            try self.lifecycle.armRecoveryTimerFromConnection(followup_connection_id, &followup_transport.connection);
+
+            self.transport.deinit();
+            self.transport = followup_transport;
+            self.connection_id = followup_connection_id;
+            self.path = path;
+            return .{
+                .followup = followup,
+                .initial = .{
+                    .datagram = initial_datagram,
+                    .path = path,
+                },
+            };
+        }
+
+        /// Open a locally initiated bidirectional stream.
+        pub fn openStream(self: *Self) !u64 {
+            return self.transport.openStream();
+        }
+
+        /// Open a locally initiated unidirectional stream.
+        pub fn openUniStream(self: *Self) !u64 {
+            return self.transport.openUniStream();
+        }
+
+        /// Queue FIN-terminated or open stream bytes.
+        pub fn sendStream(self: *Self, stream_id: u64, data: []const u8, fin: bool) !void {
+            try self.transport.sendStream(stream_id, data, fin);
+        }
+
+        /// Queue stream bytes and poll one datagram with the committed route.
+        ///
+        /// The route is resolved before mutating stream state, so a missing
+        /// endpoint route does not leave application data queued on the transport.
+        pub fn sendStreamWithRoutePath(
+            self: *Self,
+            stream_id: u64,
+            data: []const u8,
+            fin: bool,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            try self.transport.sendStream(stream_id, data, fin);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
+        /// Queue stream bytes and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn sendStreamWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            stream_id: u64,
+            data: []const u8,
+            fin: bool,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !ApplicationControlDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            if (out.len == 0) return error.BufferTooSmall;
+            try self.transport.sendStream(stream_id, data, fin);
+            return .{
+                .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Abort a locally writable stream and queue a RESET_STREAM frame.
+        pub fn resetStream(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+        ) !void {
+            try self.transport.resetStream(stream_id, application_error_code);
+        }
+
+        /// Queue RESET_STREAM and poll one datagram with the committed route.
+        pub fn resetStreamWithRoutePath(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            try self.transport.resetStream(stream_id, application_error_code);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
+        /// Queue RESET_STREAM and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn resetStreamWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !ApplicationControlDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            if (out.len == 0) return error.BufferTooSmall;
+            try self.transport.resetStream(stream_id, application_error_code);
+            return .{
+                .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Ask the peer to stop sending on a receive-capable stream.
+        pub fn stopSending(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+        ) !void {
+            try self.transport.stopSending(stream_id, application_error_code);
+        }
+
+        /// Queue STOP_SENDING and poll one datagram with the committed route.
+        pub fn stopSendingWithRoutePath(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            try self.transport.stopSending(stream_id, application_error_code);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
+        /// Queue STOP_SENDING and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn stopSendingWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            stream_id: u64,
+            application_error_code: u64,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !ApplicationControlDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            if (out.len == 0) return error.BufferTooSmall;
+            try self.transport.stopSending(stream_id, application_error_code);
+            return .{
+                .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Read received bytes from one application stream.
+        pub fn recvStream(self: *Self, stream_id: u64, out: []u8) !?usize {
+            return self.transport.recvStream(stream_id, out);
+        }
+
+        /// Return whether one application stream has received FIN.
+        pub fn streamFinished(self: *const Self, stream_id: u64) !bool {
+            return self.transport.streamFinished(stream_id);
+        }
+
+        /// Return the count of sent packets tracked for ACK-driven recovery in one space.
+        pub fn sentPacketCount(self: *const Self, space: connection_module.PacketNumberSpace) usize {
+            return self.transport.connection.sentPacketCount(space);
+        }
+
+        /// Return the bytes in flight for congestion control in one space.
+        pub fn bytesInFlight(self: *const Self, space: connection_module.PacketNumberSpace) usize {
+            return self.transport.connection.bytesInFlight(space);
+        }
+
+        /// Return the smoothed RTT estimate in milliseconds for one space.
+        pub fn smoothedRtt(self: *const Self, space: connection_module.PacketNumberSpace) u64 {
+            return self.transport.connection.smoothedRtt(space);
+        }
+
+        /// Queue a protected application CONNECTION_CLOSE and poll it for UDP send.
+        pub fn close(
+            self: *Self,
+            application_error_code: u64,
+            frame_type: u64,
+            reason: []const u8,
+            now_nanos: i64,
+        ) !?[]u8 {
+            const datagram = try self.transport.close(application_error_code, frame_type, reason, now_nanos);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return datagram;
+        }
+
+        /// Queue a protected APPLICATION_CLOSE and poll it for UDP send.
+        pub fn closeApplication(
+            self: *Self,
+            application_error_code: u64,
+            reason: []const u8,
+            now_nanos: i64,
+        ) !?[]u8 {
+            const datagram = try self.transport.closeApplication(application_error_code, reason, now_nanos);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return datagram;
+        }
+
+        /// Queue a protected application CONNECTION_CLOSE and return it with route.
+        pub fn closeWithRoutePath(
+            self: *Self,
+            application_error_code: u64,
+            frame_type: u64,
+            reason: []const u8,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
+        /// Queue a protected APPLICATION_CLOSE and return it with route.
+        pub fn closeApplicationWithRoutePath(
+            self: *Self,
+            application_error_code: u64,
+            reason: []const u8,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            try self.transport.connection.closeApplication(application_error_code, reason);
+            const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
+        /// Queue a protected application CONNECTION_CLOSE and drain route-bound output.
+        pub fn closeWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            application_error_code: u64,
+            frame_type: u64,
+            reason: []const u8,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !CloseDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            if (out.len == 0) return error.BufferTooSmall;
+            try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+            return .{
+                .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Queue a protected APPLICATION_CLOSE and drain route-bound output.
+        pub fn closeApplicationWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            application_error_code: u64,
+            reason: []const u8,
+            now_nanos: i64,
+            out: []ApplicationDatagramPathResult,
+        ) !CloseDatagramPathDrainResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            if (out.len == 0) return error.BufferTooSmall;
+            try self.transport.connection.closeApplication(application_error_code, reason);
+            return .{
+                .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
+                .next_deadline = self.nextDeadline(),
+            };
+        }
+
+        /// Return the active close deadline after `close()` has queued a close.
+        pub fn closeDeadline(self: *const Self) ?i64 {
+            return self.transport.closeDeadline();
+        }
+
+        /// Retire the registered route after the close deadline has elapsed.
+        pub fn retireAtCloseDeadline(self: *Self, now_nanos: i64) !?endpoint_lifecycle.EndpointConnectionRetireResult {
+            return self.lifecycle.checkCloseTimeoutsAndRetireConnection(
+                self.connection_id,
+                &self.transport.connection,
+                now_nanos,
+            );
+        }
+
+        /// Routed receive output from the owned client transport.
+        pub const ReceiveResult = struct {
+            route: endpoint.RouteResult,
+            transport: Tls13ClientTransport.ReceiveResult,
+            stateless_reset_sequence_number: ?u64 = null,
         };
-    }
 
-    /// Open a locally initiated bidirectional stream.
-    pub fn openStream(self: *Tls13ClientEndpoint) !u64 {
-        return self.transport.openStream();
-    }
-
-    /// Open a locally initiated unidirectional stream.
-    pub fn openUniStream(self: *Tls13ClientEndpoint) !u64 {
-        return self.transport.openUniStream();
-    }
-
-    /// Queue FIN-terminated or open stream bytes.
-    pub fn sendStream(self: *Tls13ClientEndpoint, stream_id: u64, data: []const u8, fin: bool) !void {
-        try self.transport.sendStream(stream_id, data, fin);
-    }
-
-    /// Queue stream bytes and poll one datagram with the committed route.
-    ///
-    /// The route is resolved before mutating stream state, so a missing
-    /// endpoint route does not leave application data queued on the transport.
-    pub fn sendStreamWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        data: []const u8,
-        fin: bool,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        try self.transport.sendStream(stream_id, data, fin);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
+        /// Client receive result with immediate outbound datagrams paired to route.
+        pub const ReceiveDatagramPathResult = struct {
+            receive: ReceiveResult,
+            outbound_initial: ?ApplicationDatagramPathResult = null,
+            outbound_handshake: ?ApplicationDatagramPathResult = null,
+            /// Next client-visible deadline after receive processing and immediate output.
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Queue stream bytes and drain protected datagrams with the committed route.
-    ///
-    /// The route and output capacity are checked before mutating stream state.
-    pub fn sendStreamWithRoutePathAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        data: []const u8,
-        fin: bool,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !ApplicationControlDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        if (out.len == 0) return error.BufferTooSmall;
-        try self.transport.sendStream(stream_id, data, fin);
-        return .{
-            .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
-            .next_deadline = self.nextDeadline(),
+        /// Client receive result that can carry close-on-frame-error output.
+        pub const ReceiveOrCloseDatagramPathResult = struct {
+            receive: ?ReceiveResult = null,
+            receive_error: ?transport_types.Error = null,
+            outbound_initial: ?ApplicationDatagramPathResult = null,
+            outbound_handshake: ?ApplicationDatagramPathResult = null,
+            outbound_application: ?ApplicationDatagramPathResult = null,
+            /// Next client-visible deadline after receive or close-on-error output.
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Abort a locally writable stream and queue a RESET_STREAM frame.
-    pub fn resetStream(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-    ) !void {
-        try self.transport.resetStream(stream_id, application_error_code);
-    }
-
-    /// Queue RESET_STREAM and poll one datagram with the committed route.
-    pub fn resetStreamWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        try self.transport.resetStream(stream_id, application_error_code);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
+        /// Client receive result that can drain close-on-frame-error output.
+        pub const ReceiveOrCloseDatagramPathDrainResult = struct {
+            receive: ?ReceiveResult = null,
+            receive_error: ?transport_types.Error = null,
+            outbound_initial: ?ApplicationDatagramPathResult = null,
+            outbound_handshake: ?ApplicationDatagramPathResult = null,
+            drain: ApplicationDatagramPathDrainResult = .{},
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Queue RESET_STREAM and drain protected datagrams with the committed route.
-    ///
-    /// The route and output capacity are checked before mutating stream state.
-    pub fn resetStreamWithRoutePathAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !ApplicationControlDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        if (out.len == 0) return error.BufferTooSmall;
-        try self.transport.resetStream(stream_id, application_error_code);
-        return .{
-            .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
-            .next_deadline = self.nextDeadline(),
+        /// One client socket-loop receive step with bounded output and due work.
+        pub const DatagramStepPathResult = struct {
+            /// Route/process result for the received datagram.
+            receive: ReceiveOrCloseDatagramPathDrainResult,
+            /// Due deadline serviced after receive, if any was ready.
+            due: ?DueDeadlineDatagramPathDrainResult = null,
+            /// Next client-visible deadline after receive, drain, and due work.
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Ask the peer to stop sending on a receive-capable stream.
-    pub fn stopSending(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-    ) !void {
-        try self.transport.stopSending(stream_id, application_error_code);
-    }
-
-    /// Queue STOP_SENDING and poll one datagram with the committed route.
-    pub fn stopSendingWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        try self.transport.stopSending(stream_id, application_error_code);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
+        /// Client close result with bounded route-bound output.
+        pub const CloseDatagramPathDrainResult = struct {
+            drain: ApplicationDatagramPathDrainResult = .{},
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Queue STOP_SENDING and drain protected datagrams with the committed route.
-    ///
-    /// The route and output capacity are checked before mutating stream state.
-    pub fn stopSendingWithRoutePathAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        stream_id: u64,
-        application_error_code: u64,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !ApplicationControlDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        if (out.len == 0) return error.BufferTooSmall;
-        try self.transport.stopSending(stream_id, application_error_code);
-        return .{
-            .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
-            .next_deadline = self.nextDeadline(),
+        /// Application stream/control result with bounded route-bound output.
+        pub const ApplicationControlDatagramPathDrainResult = struct {
+            drain: ApplicationDatagramPathDrainResult = .{},
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Read received bytes from one application stream.
-    pub fn recvStream(self: *Tls13ClientEndpoint, stream_id: u64, out: []u8) !?usize {
-        return self.transport.recvStream(stream_id, out);
-    }
-
-    /// Return whether one application stream has received FIN.
-    pub fn streamFinished(self: *const Tls13ClientEndpoint, stream_id: u64) !bool {
-        return self.transport.streamFinished(stream_id);
-    }
-
-    /// Return the count of sent packets tracked for ACK-driven recovery in one space.
-    pub fn sentPacketCount(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) usize {
-        return self.transport.connection.sentPacketCount(space);
-    }
-
-    /// Return the bytes in flight for congestion control in one space.
-    pub fn bytesInFlight(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) usize {
-        return self.transport.connection.bytesInFlight(space);
-    }
-
-    /// Return the smoothed RTT estimate in milliseconds for one space.
-    pub fn smoothedRtt(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) u64 {
-        return self.transport.connection.smoothedRtt(space);
-    }
-
-    /// Queue a protected application CONNECTION_CLOSE and poll it for UDP send.
-    pub fn close(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        frame_type: u64,
-        reason: []const u8,
-        now_nanos: i64,
-    ) !?[]u8 {
-        const datagram = try self.transport.close(application_error_code, frame_type, reason, now_nanos);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return datagram;
-    }
-
-    /// Queue a protected APPLICATION_CLOSE and poll it for UDP send.
-    pub fn closeApplication(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        reason: []const u8,
-        now_nanos: i64,
-    ) !?[]u8 {
-        const datagram = try self.transport.closeApplication(application_error_code, reason, now_nanos);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return datagram;
-    }
-
-    /// Queue a protected application CONNECTION_CLOSE and return it with route.
-    pub fn closeWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        frame_type: u64,
-        reason: []const u8,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
+        /// Client endpoint application datagram paired with the committed route.
+        pub const ApplicationDatagramPathResult = struct {
+            datagram: []u8,
+            path: Path,
         };
-    }
 
-    /// Queue a protected APPLICATION_CLOSE and return it with route.
-    pub fn closeApplicationWithRoutePath(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        reason: []const u8,
-        now_nanos: i64,
-    ) !?ApplicationDatagramPathResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        try self.transport.connection.closeApplication(application_error_code, reason);
-        const datagram = (try self.pollApplicationDatagram(now_nanos)) orelse return null;
-        return .{
-            .datagram = datagram,
-            .path = path,
+        /// Error set returned while polling client application datagrams.
+        pub const ApplicationDatagramPollError = @typeInfo(@typeInfo(@TypeOf(pollApplicationDatagram)).@"fn".return_type.?).error_union.error_set;
+
+        /// Result from draining client application datagrams into caller-owned slots.
+        pub const ApplicationDatagramPathDrainResult = struct {
+            /// Number of initialized entries written to the caller-provided output slice.
+            datagrams_written: usize = 0,
+            /// First polling error observed after any earlier entries were written.
+            first_error: ?ApplicationDatagramPollError = null,
+            /// First route lookup error observed before servicing due recovery.
+            first_route_error: ?endpoint.RouteError = null,
         };
-    }
 
-    /// Queue a protected application CONNECTION_CLOSE and drain route-bound output.
-    pub fn closeWithRoutePathAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        frame_type: u64,
-        reason: []const u8,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !CloseDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        if (out.len == 0) return error.BufferTooSmall;
-        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
-        return .{
-            .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
-            .next_deadline = self.nextDeadline(),
+        /// Client Version Negotiation restart result.
+        pub const VersionNegotiationRestartResult = struct {
+            followup: endpoint_lifecycle.EndpointVersionNegotiationFollowupResult,
+            initial: ApplicationDatagramPathResult,
         };
-    }
 
-    /// Queue a protected APPLICATION_CLOSE and drain route-bound output.
-    pub fn closeApplicationWithRoutePathAndDrainDatagrams(
-        self: *Tls13ClientEndpoint,
-        application_error_code: u64,
-        reason: []const u8,
-        now_nanos: i64,
-        out: []ApplicationDatagramPathResult,
-    ) !CloseDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
-        if (out.len == 0) return error.BufferTooSmall;
-        try self.transport.connection.closeApplication(application_error_code, reason);
-        return .{
-            .drain = try self.drainApplicationDatagramsWithRoutePath(now_nanos, out),
-            .next_deadline = self.nextDeadline(),
+        /// Client due-deadline result with optional route-bound recovery output.
+        pub const DueDeadlineDatagramPathResult = struct {
+            deadline: client_transport.ClientTransportDeadline,
+            /// Protected datagram for the due recovery packet number space.
+            datagram: ?ApplicationDatagramPathResult = null,
+            /// Next client-visible deadline after due work and optional output poll.
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
         };
-    }
 
-    /// Return the active close deadline after `close()` has queued a close.
-    pub fn closeDeadline(self: *const Tls13ClientEndpoint) ?i64 {
-        return self.transport.closeDeadline();
-    }
-
-    /// Retire the registered route after the close deadline has elapsed.
-    pub fn retireAtCloseDeadline(self: *Tls13ClientEndpoint, now_nanos: i64) !?endpoint_lifecycle.EndpointConnectionRetireResult {
-        return self.lifecycle.checkCloseTimeoutsAndRetireConnection(
-            self.connection_id,
-            &self.transport.connection,
-            now_nanos,
-        );
-    }
-
-    /// Routed receive output from the owned client transport.
-    pub const ReceiveResult = struct {
-        route: endpoint.RouteResult,
-        transport: Tls13ClientTransport.ReceiveResult,
-        stateless_reset_sequence_number: ?u64 = null,
+        /// Client due-deadline result with bounded route-bound recovery output.
+        pub const DueDeadlineDatagramPathDrainResult = struct {
+            deadline: client_transport.ClientTransportDeadline,
+            drain: ApplicationDatagramPathDrainResult = .{},
+            next_deadline: ?client_transport.ClientTransportDeadline = null,
+        };
     };
-
-    /// Client receive result with immediate outbound datagrams paired to route.
-    pub const ReceiveDatagramPathResult = struct {
-        receive: ReceiveResult,
-        outbound_initial: ?ApplicationDatagramPathResult = null,
-        outbound_handshake: ?ApplicationDatagramPathResult = null,
-        /// Next client-visible deadline after receive processing and immediate output.
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Client receive result that can carry close-on-frame-error output.
-    pub const ReceiveOrCloseDatagramPathResult = struct {
-        receive: ?ReceiveResult = null,
-        receive_error: ?transport_types.Error = null,
-        outbound_initial: ?ApplicationDatagramPathResult = null,
-        outbound_handshake: ?ApplicationDatagramPathResult = null,
-        outbound_application: ?ApplicationDatagramPathResult = null,
-        /// Next client-visible deadline after receive or close-on-error output.
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Client receive result that can drain close-on-frame-error output.
-    pub const ReceiveOrCloseDatagramPathDrainResult = struct {
-        receive: ?ReceiveResult = null,
-        receive_error: ?transport_types.Error = null,
-        outbound_initial: ?ApplicationDatagramPathResult = null,
-        outbound_handshake: ?ApplicationDatagramPathResult = null,
-        drain: ApplicationDatagramPathDrainResult = .{},
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// One client socket-loop receive step with bounded output and due work.
-    pub const DatagramStepPathResult = struct {
-        /// Route/process result for the received datagram.
-        receive: ReceiveOrCloseDatagramPathDrainResult,
-        /// Due deadline serviced after receive, if any was ready.
-        due: ?DueDeadlineDatagramPathDrainResult = null,
-        /// Next client-visible deadline after receive, drain, and due work.
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Client close result with bounded route-bound output.
-    pub const CloseDatagramPathDrainResult = struct {
-        drain: ApplicationDatagramPathDrainResult = .{},
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Application stream/control result with bounded route-bound output.
-    pub const ApplicationControlDatagramPathDrainResult = struct {
-        drain: ApplicationDatagramPathDrainResult = .{},
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Client endpoint application datagram paired with the committed route.
-    pub const ApplicationDatagramPathResult = struct {
-        datagram: []u8,
-        path: endpoint.Udp4Tuple,
-    };
-
-    /// Error set returned while polling client application datagrams.
-    pub const ApplicationDatagramPollError = @typeInfo(@typeInfo(@TypeOf(pollApplicationDatagram)).@"fn".return_type.?).error_union.error_set;
-
-    /// Result from draining client application datagrams into caller-owned slots.
-    pub const ApplicationDatagramPathDrainResult = struct {
-        /// Number of initialized entries written to the caller-provided output slice.
-        datagrams_written: usize = 0,
-        /// First polling error observed after any earlier entries were written.
-        first_error: ?ApplicationDatagramPollError = null,
-        /// First route lookup error observed before servicing due recovery.
-        first_route_error: ?endpoint.RouteError = null,
-    };
-
-    /// Client Version Negotiation restart result.
-    pub const VersionNegotiationRestartResult = struct {
-        followup: endpoint_lifecycle.EndpointVersionNegotiationFollowupResult,
-        initial: ApplicationDatagramPathResult,
-    };
-
-    /// Client due-deadline result with optional route-bound recovery output.
-    pub const DueDeadlineDatagramPathResult = struct {
-        deadline: client_transport.ClientTransportDeadline,
-        /// Protected datagram for the due recovery packet number space.
-        datagram: ?ApplicationDatagramPathResult = null,
-        /// Next client-visible deadline after due work and optional output poll.
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-
-    /// Client due-deadline result with bounded route-bound recovery output.
-    pub const DueDeadlineDatagramPathDrainResult = struct {
-        deadline: client_transport.ClientTransportDeadline,
-        drain: ApplicationDatagramPathDrainResult = .{},
-        next_deadline: ?client_transport.ClientTransportDeadline = null,
-    };
-};
+}
 
 fn isVersionNegotiationDatagram(datagram: []const u8) bool {
     return datagram.len >= 5 and (datagram[0] & 0x80) != 0 and
@@ -992,6 +999,50 @@ fn isVersionNegotiationDatagram(datagram: []const u8) bool {
 
 const duration_mod = @import("../time/duration.zig");
 const ms = duration_mod.ns_per_ms;
+
+test "Tls13ClientEndpoint retains exact IPv4 source types" {
+    try std.testing.expect(Tls13ClientEndpoint == Tls13ClientEndpointForTuple(endpoint.Udp4Tuple));
+    try std.testing.expect(@TypeOf(@as(Tls13ClientEndpoint, undefined).path.remote.octets) == [4]u8);
+    try std.testing.expect(@TypeOf(@as(Tls13ClientEndpoint, undefined).lifecycle) == endpoint_lifecycle.EndpointConnectionLifecycle);
+    try std.testing.expect(@TypeOf(@as(Tls13ClientEndpoint.ApplicationDatagramPathResult, undefined).path) == endpoint.Udp4Tuple);
+}
+
+test "Tls13ClientEndpoint IPv6 Initial retains complete committed route" {
+    const Client = Tls13ClientEndpointForTuple(endpoint.Udp6Tuple);
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp6Tuple{
+        .local = endpoint.Udp6Address.init(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 4444, 3),
+        .remote = endpoint.Udp6Address.init(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 4433, 3),
+    };
+    var client = try Client.init(
+        std.testing.allocator,
+        15,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var committed_path = path;
+    committed_path.local.port = 5444;
+    committed_path.local.scope_id = 4;
+    committed_path.remote.scope_id = 4;
+    _ = try client.updatePath(committed_path);
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.beginWithRoutePath(1, &scratch);
+    defer std.testing.allocator.free(initial.datagram);
+    try std.testing.expect(initial.path.eql(committed_path));
+    try std.testing.expect(client.path.eql(committed_path));
+    try std.testing.expect((try client.lifecycle.currentRoutePath(&client_scid)).eql(committed_path));
+    try std.testing.expect(initial.datagram.len >= 1200);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+}
+
 test "Tls13ClientEndpoint registers its client route before begin" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };

@@ -72,14 +72,7 @@ pub const EndpointIssuedConnectionIdResult = struct {
 };
 
 /// Endpoint result after accepting and processing a protected client Initial.
-pub const EndpointAcceptedProtectedInitialResult = struct {
-    /// Endpoint accept metadata borrowed from the triggering datagram.
-    initial_accept: endpoint.InitialAcceptResult,
-    /// Routes installed after packet authentication succeeds.
-    accepted_routes: endpoint.AcceptedInitialRouteResult,
-    /// Number of protected long packets processed from the datagram.
-    processed_packets: usize,
-};
+pub const EndpointAcceptedProtectedInitialResult = ForTuple(endpoint.Udp4Tuple).EndpointAcceptedProtectedInitialResult;
 
 /// Endpoint result after routing and processing protected long packets.
 pub const EndpointProtectedLongDatagramResult = struct {
@@ -540,231 +533,64 @@ pub const EndpointDueWorkCryptoBackendDatagramDrainResult = struct {
 };
 
 /// Result from feeding one socket datagram through installed-key receive paths.
-pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
-    /// Datagram was routed to and processed by the caller-owned connection.
-    routed: endpoint.RouteResult,
-    /// Datagram is a supported-version Initial for a new server connection.
-    accept_initial: endpoint.InitialAcceptResult,
-    /// Caller should send this Version Negotiation datagram on the same UDP path.
-    version_negotiation: []const u8,
-    /// Caller should send this stateless reset datagram on the same UDP path.
-    stateless_reset: []const u8,
-    /// Datagram should be dropped without connection delivery.
-    dropped,
-};
+pub const EndpointFeedInstalledKeyDatagramResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedInstalledKeyDatagramResult;
 
 /// Result from feeding one socket datagram and optionally committing path migration.
-pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Route after endpoint path update, present only when validation completed.
-    updated_route: ?endpoint.RouteResult = null,
-    /// Whether a PATH_CHALLENGE was queued for a changed path.
-    path_challenge_queued: bool = false,
-    /// UDP tuple selected for immediate path-validation-related output.
-    selected_output_path: ?endpoint.Udp4Tuple = null,
-};
+pub const EndpointFeedInstalledKeyPathUpdateResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedInstalledKeyPathUpdateResult;
 
 /// Result from feeding with path update, then polling installed-key output.
-pub const EndpointFeedPathUpdateDatagramPollResult = struct {
-    /// Receive, path-validation, and route-update result.
-    feed: EndpointFeedInstalledKeyPathUpdateResult,
-    /// Feed error surfaced as data after a close-propagating receive path.
-    feed_error: ?EndpointProtectedDatagramError = null,
-    /// Protected datagram emitted after receive processing, if any.
-    datagram: ?EndpointPolledDatagramResult = null,
-    /// UDP tuple selected for `datagram`.
-    ///
-    /// Path-validation probes use the candidate tuple; other output uses the
-    /// current committed route.
-    output_path: ?endpoint.Udp4Tuple = null,
-    /// Next endpoint-visible deadline for the selected connection after feed and poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPathUpdateDatagramPollResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPathUpdateDatagramPollResult;
 
 /// Result from feeding one installed-key datagram, then selecting a wakeup.
-pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Next endpoint-visible deadline after receive processing.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedInstalledKeyDatagramNextDeadlineResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, then selecting a wakeup.
-pub const EndpointFeedPendingWorkNextDeadlineResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Next endpoint-visible deadline after receive and pending work.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkNextDeadlineResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkNextDeadlineResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, then polling output.
-pub const EndpointFeedPendingWorkDatagramPollResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Installed-key output emitted after receive and pending work, if any.
-    datagram: ?EndpointPolledDatagramResult = null,
-    /// Next endpoint-visible deadline after receive, pending work, and optional output poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkDatagramPollResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkDatagramPollResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, then draining output.
-pub const EndpointFeedPendingWorkDatagramDrainResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Bounded output drain after receive and pending work.
-    drain: EndpointDatagramDrainResult,
-    /// Next endpoint-visible deadline after receive, pending work, and output drain.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkDatagramDrainResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkDatagramDrainResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, driving backend, then selecting a wakeup.
-pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Backend drive progress when `feed` routed and pending work kept connections live.
-    backend: ?EndpointCryptoBackendDriveSweepResult = null,
-    /// Next endpoint-visible deadline after receive, pending work, and optional backend progress.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkCryptoBackendNextDeadlineResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, driving backend, then polling output.
-pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Backend drive and output result when `feed` routed and pending work kept connections live.
-    backend: ?EndpointCryptoBackendDriveDatagramResult = null,
-    /// Next endpoint-visible deadline after receive, pending work, backend progress, and output poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkCryptoBackendDatagramResult;
 
 /// Result from feeding one installed-key datagram, processing pending work, driving backend, then draining output.
-pub const EndpointFeedPendingWorkCryptoBackendDatagramDrainResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Pending-work actions applied after receive processing.
-    pending_work: EndpointPendingWorkSweepResult,
-    /// Backend drive and bounded output drain when `feed` routed and pending work kept connections live.
-    backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
-    /// Next endpoint-visible deadline after receive, pending work, backend progress, and output drain.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedPendingWorkCryptoBackendDatagramDrainResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedPendingWorkCryptoBackendDatagramDrainResult;
 
 /// Result from feeding one installed-key datagram, then polling output.
-pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Protected datagram emitted after receive processing, if any.
-    datagram: ?EndpointPolledDatagramResult = null,
-    /// Next endpoint-visible deadline after receive processing and output poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedInstalledKeyDatagramPollResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedInstalledKeyDatagramPollResult;
 
 /// Result from feeding one installed-key datagram, then draining output.
-pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Bounded output drain when `feed` routed to a connection.
-    drain: ?EndpointDatagramDrainResult = null,
-    /// Next endpoint-visible deadline after receive processing and output drain.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedInstalledKeyDatagramDrainResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedInstalledKeyDatagramDrainResult;
 
 /// Result from feeding one installed-key datagram, then driving backend and selecting a wakeup.
-pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Backend drive and deadline selection result when `feed` routed to a connection.
-    backend: ?EndpointCryptoBackendDriveNextDeadlineResult = null,
-};
+pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedCryptoBackendDriveNextDeadlineResult;
 
 /// Result from feeding one installed-key datagram, then driving backend output.
-pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Backend drive and output result when `feed` routed to a connection.
-    backend: ?EndpointCryptoBackendDriveDatagramResult = null,
-    /// Next endpoint-visible deadline after receive, backend progress, and output poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedCryptoBackendDriveDatagramResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedCryptoBackendDriveDatagramResult;
 
 /// Result from feeding one installed-key datagram, then draining backend output.
-pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = struct {
-    /// Receive classification and processing result.
-    feed: EndpointFeedInstalledKeyDatagramResult,
-    /// Backend drive and bounded output drain when `feed` routed to a connection.
-    backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
-    /// Next endpoint-visible deadline after receive, backend progress, and output drain.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = ForTuple(endpoint.Udp4Tuple).EndpointFeedCryptoBackendDriveDatagramDrainResult;
 
 /// Endpoint result after accepting a protected Initial and emitting a response.
-pub const EndpointAcceptedProtectedInitialResponseResult = struct {
-    /// Authentication, packet processing, and route installation result.
-    accepted_initial: EndpointAcceptedProtectedInitialResult,
-    /// Caller-keyed protected server Initial response datagram.
-    ///
-    /// The caller owns these bytes and must free them with the same allocator
-    /// used by `connection`.
-    response_datagram: []u8,
-};
+pub const EndpointAcceptedProtectedInitialResponseResult = ForTuple(endpoint.Udp4Tuple).EndpointAcceptedProtectedInitialResponseResult;
 
 /// Endpoint result after accepting a protected Initial and selecting a wakeup deadline.
-pub const EndpointAcceptedInitialCryptoBackendNextDeadlineResult = struct {
-    /// Authentication, packet processing, and route installation result.
-    accepted_initial: EndpointAcceptedProtectedInitialResult,
-    /// Initial-space backend progress after consuming received client CRYPTO.
-    backend: CryptoBackendProgress,
-    /// Next endpoint-visible deadline after backend progress has been applied.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointAcceptedInitialCryptoBackendNextDeadlineResult = ForTuple(endpoint.Udp4Tuple).EndpointAcceptedInitialCryptoBackendNextDeadlineResult;
 
 /// Endpoint result after accepting a protected Initial and driving a TLS backend.
-pub const EndpointAcceptedInitialCryptoBackendDatagramResult = struct {
-    /// Authentication, packet processing, and route installation result.
-    accepted_initial: EndpointAcceptedProtectedInitialResult,
-    /// Initial-space backend progress after consuming received client CRYPTO.
-    backend: CryptoBackendProgress,
-    /// Protected server Initial datagram emitted from backend-produced CRYPTO.
-    ///
-    /// The caller owns these bytes and must free them with the same allocator
-    /// used by `connection`.
-    response_datagram: ?[]u8 = null,
-    /// Next endpoint-visible deadline after accepted Initial backend progress and output poll.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointAcceptedInitialCryptoBackendDatagramResult = ForTuple(endpoint.Udp4Tuple).EndpointAcceptedInitialCryptoBackendDatagramResult;
 
 /// Endpoint result after accepting a protected Initial and draining TLS output.
-pub const EndpointAcceptedInitialCryptoBackendDatagramDrainResult = struct {
-    /// Authentication, packet processing, and route installation result.
-    accepted_initial: EndpointAcceptedProtectedInitialResult,
-    /// Initial-space backend progress after consuming received client CRYPTO.
-    backend: CryptoBackendProgress,
-    /// Bounded protected server Initial output drain result.
-    drain: EndpointDatagramDrainResult,
-    /// Next endpoint-visible deadline after accepted Initial backend progress and output drain.
-    next_deadline: ?EndpointConnectionDeadline = null,
-};
+pub const EndpointAcceptedInitialCryptoBackendDatagramDrainResult = ForTuple(endpoint.Udp4Tuple).EndpointAcceptedInitialCryptoBackendDatagramDrainResult;
 
 /// Endpoint result after accepting a Retry follow-up protected Initial.
-pub const EndpointRetryProtectedInitialResult = struct {
-    /// Endpoint route selected by the Retry Source CID.
-    route: endpoint.RouteResult,
-    /// Initial accept metadata borrowed from the follow-up datagram.
-    initial_accept: endpoint.InitialAcceptResult,
-    /// Authenticated Retry token metadata returned by endpoint policy.
-    token_validation: EndpointAddressValidationResult,
-};
+pub const EndpointRetryProtectedInitialResult = ForTuple(endpoint.Udp4Tuple).EndpointRetryProtectedInitialResult;
 
 /// Endpoint result after validating an address token for one connection.
 pub const EndpointAddressValidationResult = struct {
@@ -773,3 +599,235 @@ pub const EndpointAddressValidationResult = struct {
     /// Current aggregate recovery timer after address validation unblocks sends.
     recovery_timer: ?LossDetectionTimerDeadline,
 };
+
+/// Select address-dependent endpoint results without changing legacy IPv4 types.
+pub fn ForTuple(comptime Path: type) type {
+    return struct {
+        const Results = @This();
+
+        pub const EndpointAcceptedProtectedInitialResult = struct {
+            /// Endpoint accept metadata borrowed from the triggering datagram.
+            initial_accept: endpoint.ForTuple(Path).InitialAcceptResult,
+            /// Routes installed after packet authentication succeeds.
+            accepted_routes: endpoint.AcceptedInitialRouteResult,
+            /// Number of protected long packets processed from the datagram.
+            processed_packets: usize,
+        };
+
+        pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
+            /// Datagram was routed to and processed by the caller-owned connection.
+            routed: endpoint.RouteResult,
+            /// Datagram is a supported-version Initial for a new server connection.
+            accept_initial: endpoint.ForTuple(Path).InitialAcceptResult,
+            /// Caller should send this Version Negotiation datagram on the same UDP path.
+            version_negotiation: []const u8,
+            /// Caller should send this stateless reset datagram on the same UDP path.
+            stateless_reset: []const u8,
+            /// Datagram should be dropped without connection delivery.
+            dropped,
+        };
+
+        pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Route after endpoint path update, present only when validation completed.
+            updated_route: ?endpoint.RouteResult = null,
+            /// Whether a PATH_CHALLENGE was queued for a changed path.
+            path_challenge_queued: bool = false,
+            /// UDP tuple selected for immediate path-validation-related output.
+            selected_output_path: ?Path = null,
+        };
+
+        pub const EndpointFeedPathUpdateDatagramPollResult = struct {
+            /// Receive, path-validation, and route-update result.
+            feed: Results.EndpointFeedInstalledKeyPathUpdateResult,
+            /// Feed error surfaced as data after a close-propagating receive path.
+            feed_error: ?EndpointProtectedDatagramError = null,
+            /// Protected datagram emitted after receive processing, if any.
+            datagram: ?EndpointPolledDatagramResult = null,
+            /// UDP tuple selected for `datagram`.
+            ///
+            /// Path-validation probes use the candidate tuple; other output uses the
+            /// current committed route.
+            output_path: ?Path = null,
+            /// Next endpoint-visible deadline for the selected connection after feed and poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Next endpoint-visible deadline after receive processing.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkNextDeadlineResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Next endpoint-visible deadline after receive and pending work.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkDatagramPollResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Installed-key output emitted after receive and pending work, if any.
+            datagram: ?EndpointPolledDatagramResult = null,
+            /// Next endpoint-visible deadline after receive, pending work, and optional output poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkDatagramDrainResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Bounded output drain after receive and pending work.
+            drain: EndpointDatagramDrainResult,
+            /// Next endpoint-visible deadline after receive, pending work, and output drain.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Backend drive progress when `feed` routed and pending work kept connections live.
+            backend: ?EndpointCryptoBackendDriveSweepResult = null,
+            /// Next endpoint-visible deadline after receive, pending work, and optional backend progress.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Backend drive and output result when `feed` routed and pending work kept connections live.
+            backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+            /// Next endpoint-visible deadline after receive, pending work, backend progress, and output poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedPendingWorkCryptoBackendDatagramDrainResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: EndpointPendingWorkSweepResult,
+            /// Backend drive and bounded output drain when `feed` routed and pending work kept connections live.
+            backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+            /// Next endpoint-visible deadline after receive, pending work, backend progress, and output drain.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Protected datagram emitted after receive processing, if any.
+            datagram: ?EndpointPolledDatagramResult = null,
+            /// Next endpoint-visible deadline after receive processing and output poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Bounded output drain when `feed` routed to a connection.
+            drain: ?EndpointDatagramDrainResult = null,
+            /// Next endpoint-visible deadline after receive processing and output drain.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Backend drive and deadline selection result when `feed` routed to a connection.
+            backend: ?EndpointCryptoBackendDriveNextDeadlineResult = null,
+        };
+
+        pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Backend drive and output result when `feed` routed to a connection.
+            backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+            /// Next endpoint-visible deadline after receive, backend progress, and output poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = struct {
+            /// Receive classification and processing result.
+            feed: Results.EndpointFeedInstalledKeyDatagramResult,
+            /// Backend drive and bounded output drain when `feed` routed to a connection.
+            backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+            /// Next endpoint-visible deadline after receive, backend progress, and output drain.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointAcceptedProtectedInitialResponseResult = struct {
+            /// Authentication, packet processing, and route installation result.
+            accepted_initial: Results.EndpointAcceptedProtectedInitialResult,
+            /// Caller-keyed protected server Initial response datagram.
+            ///
+            /// The caller owns these bytes and must free them with the same allocator
+            /// used by `connection`.
+            response_datagram: []u8,
+        };
+
+        pub const EndpointAcceptedInitialCryptoBackendNextDeadlineResult = struct {
+            /// Authentication, packet processing, and route installation result.
+            accepted_initial: Results.EndpointAcceptedProtectedInitialResult,
+            /// Initial-space backend progress after consuming received client CRYPTO.
+            backend: CryptoBackendProgress,
+            /// Next endpoint-visible deadline after backend progress has been applied.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointAcceptedInitialCryptoBackendDatagramResult = struct {
+            /// Authentication, packet processing, and route installation result.
+            accepted_initial: Results.EndpointAcceptedProtectedInitialResult,
+            /// Initial-space backend progress after consuming received client CRYPTO.
+            backend: CryptoBackendProgress,
+            /// Protected server Initial datagram emitted from backend-produced CRYPTO.
+            ///
+            /// The caller owns these bytes and must free them with the same allocator
+            /// used by `connection`.
+            response_datagram: ?[]u8 = null,
+            /// Next endpoint-visible deadline after accepted Initial backend progress and output poll.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointAcceptedInitialCryptoBackendDatagramDrainResult = struct {
+            /// Authentication, packet processing, and route installation result.
+            accepted_initial: Results.EndpointAcceptedProtectedInitialResult,
+            /// Initial-space backend progress after consuming received client CRYPTO.
+            backend: CryptoBackendProgress,
+            /// Bounded protected server Initial output drain result.
+            drain: EndpointDatagramDrainResult,
+            /// Next endpoint-visible deadline after accepted Initial backend progress and output drain.
+            next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        pub const EndpointRetryProtectedInitialResult = struct {
+            /// Endpoint route selected by the Retry Source CID.
+            route: endpoint.RouteResult,
+            /// Initial accept metadata borrowed from the follow-up datagram.
+            initial_accept: endpoint.ForTuple(Path).InitialAcceptResult,
+            /// Authenticated Retry token metadata returned by endpoint policy.
+            token_validation: EndpointAddressValidationResult,
+        };
+    };
+}
+
+test "endpoint result factories preserve legacy IPv4 field types" {
+    const std = @import("std");
+    const Legacy = ForTuple(endpoint.Udp4Tuple);
+    try std.testing.expect(Legacy.EndpointAcceptedProtectedInitialResult == EndpointAcceptedProtectedInitialResult);
+    try std.testing.expect(Legacy.EndpointFeedInstalledKeyPathUpdateResult == EndpointFeedInstalledKeyPathUpdateResult);
+    try std.testing.expect(@TypeOf(@as(EndpointFeedPathUpdateDatagramPollResult, undefined).output_path) == ?endpoint.Udp4Tuple);
+    try std.testing.expect(@TypeOf(@as(EndpointAcceptedProtectedInitialResult, undefined).initial_accept) == endpoint.InitialAcceptResult);
+}
