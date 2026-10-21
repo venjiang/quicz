@@ -152,6 +152,10 @@ int32_t quicz_mobile_client_connect_timeout(
     quicz_mobile_client *client,
     uint32_t timeout_ms
 );
+
+/* Returns a static error name after handshake failure, or NULL when no failure
+ * is available. Keep the client valid during this call. Do not free the string. */
+const char *quicz_mobile_client_handshake_error(quicz_mobile_client *client);
 int32_t quicz_mobile_client_bound_ipv4(
     quicz_mobile_client *client,
     quicz_mobile_ipv4_endpoint *endpoint_out

@@ -525,6 +525,13 @@ pub fn ClientForTuple(comptime Path: type) type {
             }
         }
 
+        /// Read the error published by the handshake driver. The caller must
+        /// retain this client's lifetime while reading the diagnostic.
+        pub fn handshakeError(self: *const Self) ?anyerror {
+            if (self.handshake_state.load(.acquire) != handshake_failed) return null;
+            return self.handshake_error orelse error.HandshakeFailed;
+        }
+
         /// Return how many UDP datagrams arrived since init. Lets diagnostics
         /// distinguish "UDP path unreachable" from "UDP works but the QUIC or TLS
         /// handshake failed" after a failed connect().

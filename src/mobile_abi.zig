@@ -431,6 +431,16 @@ pub export fn quicz_mobile_client_connect_timeout(
     return code(.ok);
 }
 
+pub export fn quicz_mobile_client_handshake_error(handle: ?*anyopaque) callconv(.c) ?[*:0]const u8 {
+    const client = clientFromHandle(handle) orelse return null;
+    switch (client.*) {
+        inline else => |state| {
+            const failure = state.client.handshakeError() orelse return null;
+            return @errorName(failure).ptr;
+        },
+    }
+}
+
 pub export fn quicz_mobile_client_bound_ipv4(
     handle: ?*anyopaque,
     endpoint_out: ?*Ipv4Endpoint,
@@ -844,10 +854,13 @@ test "mobile client connect timeout bounds a silent UDP peer" {
     var client: ?*anyopaque = null;
     try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
     defer quicz_mobile_client_destroy(client);
+    try std.testing.expect(quicz_mobile_client_handshake_error(null) == null);
+    try std.testing.expect(quicz_mobile_client_handshake_error(client) == null);
     try std.testing.expectEqual(
         code(.connection_timed_out),
         quicz_mobile_client_connect_timeout(client, 10),
     );
+    try std.testing.expect(quicz_mobile_client_handshake_error(client) == null);
 }
 
 test "mobile IPv4 handshake ignores a STUN packet from another sender" {
@@ -911,6 +924,7 @@ test "mobile IPv4 handshake ignores a STUN packet from another sender" {
     });
     try std.testing.expectEqual(code(.connection_timed_out), wait.result);
     try std.testing.expect(wait.elapsed_ms >= 2_900);
+    try std.testing.expect(quicz_mobile_client_handshake_error(handle) == null);
 }
 
 test "mobile punch diagnostics retain silent peer counters on failure" {
@@ -1288,7 +1302,7 @@ test "mobile IPv6 timeout keeps its socket until explicit destruction" {
     defer rebound.close(io);
 }
 
-fn rejectUnrelatedMobileCA(comptime ipv6: bool) !void {
+fn checkMobileHandshakeError(comptime ipv6: bool, trusted: bool) !void {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -1312,7 +1326,7 @@ fn rejectUnrelatedMobileCA(comptime ipv6: bool) !void {
     try server.start();
     var wrong_ca_storage: [1024]u8 = undefined;
     const wrong_ca = try quicz.tls_pem.decodeBlock(@embedFile("quic/testdata/quicz-client-ca.pem"), "CERTIFICATE", &wrong_ca_storage);
-    const config6 = testClient6Config(wrong_ca, server.localPort());
+    const config6 = testClient6Config(if (trusted) certificate else wrong_ca, server.localPort());
     var handle: ?*anyopaque = null;
     if (ipv6) {
         try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_ipv6(&config6, &handle));
@@ -1332,15 +1346,27 @@ fn rejectUnrelatedMobileCA(comptime ipv6: bool) !void {
         try std.testing.expectEqual(code(.ok), quicz_mobile_client_create(&config4, &handle));
     }
     defer quicz_mobile_client_destroy(handle);
-    try std.testing.expectEqual(code(.connection_failed), quicz_mobile_client_connect_timeout(handle, 2_000));
+    try std.testing.expect(quicz_mobile_client_handshake_error(handle) == null);
+    const result = quicz_mobile_client_connect_timeout(handle, 2_000);
+    try std.testing.expectEqual(if (trusted) code(.ok) else code(.connection_failed), result);
+    const name = if (quicz_mobile_client_handshake_error(handle)) |value| std.mem.span(value) else "<null>";
+    std.debug.print("handshake error getter: ipv6={} trusted={} result={d} name={s}\n", .{ ipv6, trusted, result, name });
+    if (trusted) {
+        try std.testing.expect(quicz_mobile_client_handshake_error(handle) == null);
+    } else {
+        try std.testing.expectEqualStrings("CryptoError", name);
+        try std.testing.expectEqualStrings("CryptoError", std.mem.span(quicz_mobile_client_handshake_error(handle).?));
+    }
 }
 
 test "mobile IPv4 verified constructor rejects an unrelated CA" {
-    try rejectUnrelatedMobileCA(false);
+    try checkMobileHandshakeError(false, false);
+    try checkMobileHandshakeError(false, true);
 }
 
 test "mobile IPv6 verified constructor rejects an unrelated CA" {
-    try rejectUnrelatedMobileCA(true);
+    try checkMobileHandshakeError(true, false);
+    try checkMobileHandshakeError(true, true);
 }
 
 fn legacyCapabilitySwitch(capability: Capability) u8 {
