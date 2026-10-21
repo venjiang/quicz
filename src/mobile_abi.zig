@@ -222,7 +222,7 @@ fn MobileStateForTuple(comptime Path: type) type {
             var completions: [2]Completion = undefined;
             var select = std.Io.Select(Completion).init(self.threaded.io(), &completions);
             defer select.cancelDiscard();
-            try select.concurrent(.closed, std.Io.Event.wait, .{ &self.close_event, self.threaded.io() });
+            try select.concurrent(.closed, waitForClientClose, .{ &self.close_event, self.threaded.io() });
             try select.concurrent(.punch, runCancelablePunch, .{ self.threaded.io(), self.client.socket, remote, attempt });
             const completion = try select.await();
             // Join the socket reader before diagnostics or responder handoff.
@@ -272,6 +272,19 @@ fn runCancelablePunch(io: std.Io, socket: std.Io.net.Socket, remote: std.Io.net.
         std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous, null);
     };
     try quicz.connectivity.punch_driver.runUntilValidated(io, socket, remote, attempt);
+}
+
+fn waitForClientClose(event: *std.Io.Event, io: std.Io) std.Io.Cancelable!void {
+    if (comptime !builtin.os.tag.isDarwin()) return event.wait(io);
+    // Bound the owned wait so natural completion can join on Darwin even when
+    // a signal does not interrupt its futex. Close still wakes the event at once.
+    while (true) {
+        event.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(50) } }) catch |err| switch (err) {
+            error.Timeout => continue,
+            error.Canceled => return error.Canceled,
+        };
+        return;
+    }
 }
 
 const mobile_client_creation_stack_size = 8 * 1024 * 1024;
@@ -1283,4 +1296,108 @@ test "mobile Zig capability callers retain their exhaustive legacy switch" {
     try std.testing.expectEqual(@as(u8, 0), legacyCapabilitySwitch(.stream));
     try std.testing.expectEqual(@as(u8, 6), legacyCapabilitySwitch(.hole_punch));
     try std.testing.expectEqual(@as(u64, 128), native_ipv6_capability_bit);
+}
+
+fn maskedCallerNaturalRetry(comptime ipv6: bool) !void {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const io = std.testing.io;
+    const local: std.Io.net.IpAddress = if (ipv6) .{ .ip6 = .loopback(0) } else .{ .ip4 = .loopback(0) };
+    const silent = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer silent.close(io);
+    var ca_storage: [1024]u8 = undefined;
+    const ca_der = try quicz.tls_pem.decodeBlock(@embedFile("quic/testdata/quicz-echo-ca.pem"), "CERTIFICATE", &ca_storage);
+    const config6 = testClient6Config(ca_der, silent.address.getPort());
+    const config4: ClientConfig = .{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = silent.address.getPort(),
+        .allow_migration = 0,
+        .reserved = 0,
+        .server_name = config6.server_name,
+        .server_name_length = config6.server_name_length,
+        .alpn = config6.alpn,
+        .alpn_length = config6.alpn_length,
+        .ca_certificate_der = config6.ca_certificate_der,
+        .ca_certificate_der_length = config6.ca_certificate_der_length,
+    };
+    var blocked = std.posix.sigemptyset();
+    std.posix.sigaddset(&blocked, .IO);
+    var previous: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous);
+    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous, null);
+    var expected_mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.SETMASK, null, &expected_mask);
+    try std.testing.expect(std.posix.sigismember(&expected_mask, .IO));
+    var handle: ?*anyopaque = null;
+    const created = if (ipv6) quicz_mobile_client_create_ipv6(&config6, &handle) else quicz_mobile_client_create(&config4, &handle);
+    try std.testing.expectEqual(code(.ok), created);
+    defer {
+        quicz_mobile_client_destroy(handle);
+    }
+    const Observer = struct {
+        socket: std.Io.net.Socket,
+        received: usize = 0,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const deadline = std.Io.Timestamp.now(std.testing.io, .awake).addDuration(.fromSeconds(4));
+            var packet: [256]u8 = undefined;
+            while (self.received < 5) {
+                const incoming = self.socket.receiveTimeout(std.testing.io, &packet, .{ .deadline = .{ .clock = .awake, .raw = deadline } }) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+                if (incoming.data.len != quicz.connectivity.punch_wire.packet_length) {
+                    self.failure = error.InvalidProbeLength;
+                    return;
+                }
+                self.received += 1;
+            }
+        }
+    };
+    var observer: Observer = .{ .socket = silent };
+    const observer_thread = try std.Thread.spawn(.{}, Observer.run, .{&observer});
+    var observer_joined = false;
+    defer if (!observer_joined) observer_thread.join();
+    var punch4: PunchConfig = .{
+        .remote = .{ .address = .{ 127, 0, 0, 1 }, .port = silent.address.getPort() },
+        .key = @splat(0x42),
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0xa1),
+        .initial_retry_ms = 100,
+        .maximum_retry_ms = 1_000,
+        .max_attempts = 5,
+        .reserved = @splat(0),
+    };
+    var punch6 = testPunch6Config(config6.remote);
+    punch6.initial_retry_ms = punch4.initial_retry_ms;
+    punch6.maximum_retry_ms = punch4.maximum_retry_ms;
+    punch6.max_attempts = punch4.max_attempts;
+    var diagnostics: PunchDiagnostics = .{};
+    const started = std.Io.Timestamp.now(io, .awake);
+    // No close call or incoming reply can release the separate close waiter.
+    const result = if (ipv6)
+        quicz_mobile_client_punch_ipv6_with_diagnostics(handle, &punch6, &diagnostics)
+    else
+        quicz_mobile_client_punch_ipv4_with_diagnostics(handle, &punch4, &diagnostics);
+    const elapsed = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+    observer_thread.join();
+    observer_joined = true;
+    try std.testing.expectEqual(@as(usize, 5), observer.received);
+    try std.testing.expectEqual(@as(?anyerror, null), observer.failure);
+    try std.testing.expectEqual(code(.punch_failed), result);
+    try std.testing.expectEqual(@intFromEnum(PunchOutcome.retry_exhausted), diagnostics.outcome);
+    try std.testing.expectEqual(@as(u32, 5), diagnostics.probes_sent);
+    try std.testing.expectEqual(@as(u32, 0), diagnostics.datagrams_received);
+    try std.testing.expect(elapsed >= 2_500 and elapsed < 3_500);
+    var actual_mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.SETMASK, null, &actual_mask);
+    try std.testing.expectEqualDeep(expected_mask, actual_mask);
+}
+
+test "mobile IPv4 masked caller returns after natural punch retry exhaustion" {
+    try maskedCallerNaturalRetry(false);
+}
+
+test "mobile IPv6 masked caller returns after natural punch retry exhaustion" {
+    try maskedCallerNaturalRetry(true);
 }
