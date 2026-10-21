@@ -9,7 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const quicz = @import("quicz");
 
-const Client = quicz.runtime.client.Client;
+const Client = quicz.runtime.client.ClientForTupleWithDatagramLimit(quicz.endpoint.Udp4Tuple, 1200);
 
 // iOS does not export the dyld stack-introspection symbol used by Zig's
 // default Mach-O panic renderer. The ABI returns explicit status codes for
@@ -854,6 +854,11 @@ test "mobile client connect timeout bounds a silent UDP peer" {
     var client: ?*anyopaque = null;
     try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &client));
     defer quicz_mobile_client_destroy(client);
+    const connection = &stateFromHandle(quicz.endpoint.Udp4Tuple, client).?.client.client.transport.connection;
+    const advertised_limit = connection.localTransportParameters().max_udp_payload_size;
+    std.debug.print("mobile IPv4 UDP budget: configured={d} advertised={d}\n", .{ connection.config.max_datagram_size, advertised_limit });
+    try std.testing.expectEqual(@as(u16, 1200), connection.config.max_datagram_size);
+    try std.testing.expectEqual(@as(u64, 1200), advertised_limit);
     try std.testing.expect(quicz_mobile_client_handshake_error(null) == null);
     try std.testing.expect(quicz_mobile_client_handshake_error(client) == null);
     try std.testing.expectEqual(

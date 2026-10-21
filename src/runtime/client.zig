@@ -181,9 +181,17 @@ pub const IPv6Client = ClientForTuple(endpoint.Udp6Tuple);
 
 /// Build the shared streaming client for one UDP address family.
 pub fn ClientForTuple(comptime Path: type) type {
+    return ClientForTupleWithDatagramLimit(Path, if (Path == endpoint.Udp6Tuple) 1200 else @intCast(send_mtu));
+}
+
+/// Build a client with a smaller UDP payload limit without changing Config.
+/// The limit must be at least 1200 and cannot exceed this family's default.
+pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_limit: u16) type {
     const Family = @import("udp_address.zig").ForTuple(Path);
     const TlsEndpoint = @import("../quic/tls13_client_endpoint.zig").Tls13ClientEndpointForTuple(Path);
-    const datagram_mtu = if (Path == endpoint.Udp6Tuple) 1200 else send_mtu;
+    const default_datagram_limit = if (Path == endpoint.Udp6Tuple) 1200 else send_mtu;
+    if (datagram_limit < 1200 or datagram_limit > default_datagram_limit)
+        @compileError("UDP payload limit must be between 1200 and the address family's default");
     return struct {
         const Self = @This();
 
@@ -327,7 +335,7 @@ pub fn ClientForTuple(comptime Path: type) type {
                     .initial_max_stream_data = 10_485_760,
                     .initial_max_streams_bidi = 128,
                     .initial_max_streams_uni = 128,
-                    .max_datagram_size = datagram_mtu,
+                    .max_datagram_size = datagram_limit,
                     .chosen_version = config.version,
                     .available_versions = available_versions,
                 },
@@ -1300,6 +1308,40 @@ pub fn ClientForTuple(comptime Path: type) type {
             self.data_sem.post(self.io);
         }
     };
+}
+
+test "runtime client datagram limits preserve legacy configuration and defaults" {
+    const LimitedClient = ClientForTupleWithDatagramLimit(endpoint.Udp4Tuple, 1200);
+    try std.testing.expect(Client == ClientForTuple(endpoint.Udp4Tuple));
+    try std.testing.expect(IPv6Client == ClientForTupleWithDatagramLimit(endpoint.Udp6Tuple, 1200));
+    try std.testing.expect(LimitedClient.Config == Client.Config);
+    try std.testing.expectEqual(@as(usize, 10), std.meta.fields(Client.Config).len);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    const config: Client.Config = .{ .server_port = peer.address.getPort(), .alpn = &.{} };
+    var legacy = try Client.init(std.testing.allocator, io, config);
+    defer legacy.deinit();
+    var limited = try LimitedClient.init(std.testing.allocator, io, config);
+    defer limited.deinit();
+    const address6 = std.Io.net.IpAddress{ .ip6 = .loopback(0) };
+    const peer6 = try address6.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer6.close(io);
+    var ipv6 = try IPv6Client.init(std.testing.allocator, io, .{
+        .server_port = peer6.address.getPort(),
+        .bind_addr = .loopback(0),
+        .alpn = &.{},
+    });
+    defer ipv6.deinit();
+    try std.testing.expectEqual(@as(u16, 1350), legacy.client.transport.connection.config.max_datagram_size);
+    try std.testing.expectEqual(@as(u64, 1350), legacy.client.transport.connection.localTransportParameters().max_udp_payload_size);
+    try std.testing.expectEqual(@as(u16, 1200), limited.client.transport.connection.config.max_datagram_size);
+    try std.testing.expectEqual(@as(u64, 1200), limited.client.transport.connection.localTransportParameters().max_udp_payload_size);
+    try std.testing.expectEqual(@as(u16, 1200), ipv6.client.transport.connection.config.max_datagram_size);
+    try std.testing.expectEqual(@as(u64, 1200), ipv6.client.transport.connection.localTransportParameters().max_udp_payload_size);
 }
 
 const IPv4Config = struct {
