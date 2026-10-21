@@ -2220,6 +2220,13 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run quicz unit tests");
+    const runtime_metrics_tests = b.addTest(.{ .root_module = quicz_mod, .filters = &.{
+        "metrics snapshot",           "connection drain",                   "idle retirement",
+        "runtime verifies localhost", "listeners share pending and active", "IPv6 reader cancellation",
+        "legacy runtime fields",
+    } });
+    b.step("test-runtime-metrics", "Verify metrics across runtime connection retirement")
+        .dependOn(&b.addRunArtifact(runtime_metrics_tests).step);
     const peer_punch_tests = b.addTest(.{ .root_module = quicz_mod, .filters = &.{"peer learning"} });
     b.step("test-peer-punch", "Verify authenticated IPv4 peer learning on loopback")
         .dependOn(&b.addRunArtifact(peer_punch_tests).step);

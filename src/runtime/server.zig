@@ -526,10 +526,9 @@ const ConnState = struct {
     /// Set by a handler; the drive task alone changes the QUIC connection.
     close_requested: bool = false,
     close_error_code: u64 = 0,
-    /// Cached `conn.isClosingOrClosed()`, refreshed by the drive task while
-    /// the endpoint record is alive. The endpoint reclaims records of closed
-    /// connections during deadline queries; after that the connection pointer
-    /// must not be dereferenced, so reclamation relies on this cache.
+    /// Published by the drive task after its final endpoint operation. Endpoint
+    /// retirement can destroy the borrowed connection before this runtime state;
+    /// handlers therefore observe closure through this cache alone.
     closing_or_closed: bool = false,
     /// Set while this connection has queued send data the drive task has
     /// not flushed yet; used to coalesce drive wakeups in sendStreamData.
@@ -633,6 +632,164 @@ test "connection drain releases every concurrent stream flush" {
     try server.flushStreamData(1);
 }
 
+fn metricsSnapshotAfterEndpointRetirement(
+    comptime Runtime: type,
+    comptime retirement: enum { deadline_query, due_deadline },
+) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var server = try Runtime.init(allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 1,
+    });
+    defer server.deinit();
+    const record = try allocator.create(ServerRecord);
+    {
+        errdefer allocator.destroy(record);
+        record.* = .{ .handle = 1, .transport = try Tls13ServerTransport.init(allocator, .{}, .{}) };
+        errdefer record.deinit();
+        try server.server_ep.records.adopt(1, record);
+    }
+    const connection = try allocator.create(ConnState);
+    connection.* = .{ .handle = 1, .conn = record.connectionRef(), .peer = server.socket.address };
+    {
+        errdefer allocator.destroy(connection);
+        try server.conns.put(1, connection);
+    }
+    try connection.conn.validatePeerAddress();
+    try connection.conn.confirmHandshake();
+    const stream_id = try connection.conn.openStream();
+    try server.sendStreamData(1, stream_id, "metrics", true);
+    server.drainOutgoing(io, allocator);
+    _ = try server.server_ep.nextDeadlineWithScratch();
+    server.publishConnectionState();
+    try std.testing.expectEqual(@as(usize, 1), server.metricsSnapshot().active_connections);
+    try std.testing.expectEqual(@as(u64, 7), server.metricsSnapshot().stream_bytes_sent);
+
+    try connection.conn.closeApplication(0, "");
+    var scratch: [send_mtu]u8 = undefined;
+    _ = (try connection.conn.pollTx(0, &scratch)) orelse return error.TestUnexpectedResult;
+    const deadline = connection.conn.closeDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), server.server_ep.records.count());
+    switch (retirement) {
+        .deadline_query => {
+            try std.testing.expectError(error.ConnectionClosed, connection.conn.pollTx(deadline, &scratch));
+            try std.testing.expectEqual(.closed, connection.conn.connectionState());
+            // The real deadline query destroys an already-closed owned record.
+            _ = try server.server_ep.nextDeadlineWithScratch();
+        },
+        .due_deadline => {
+            // The real due-deadline path closes and destroys its owned record.
+            const due = (try server.server_ep.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(deadline, &.{})) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expect(due.pending_work.close_retired != null);
+            try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+            _ = try server.server_ep.nextDeadlineWithScratch();
+        },
+    }
+    try std.testing.expectEqual(@as(usize, 0), server.server_ep.records.count());
+    try std.testing.expect(server.conns.get(1) == connection);
+    try std.testing.expect(!connection.handler_done);
+    try std.testing.expect(!connection.closing_or_closed);
+
+    // No object is poisoned or reused. A snapshot must not dereference the
+    // connection pointer after its actual endpoint-owned record was destroyed.
+    // Values remain from the last publication until the drive publishes again.
+    try std.testing.expectEqual(@as(usize, 1), server.metricsSnapshot().active_connections);
+    connection.send_pending = true;
+    server.publishConnectionState();
+    const snapshot = server.metricsSnapshot();
+    try std.testing.expectEqual(@as(usize, 0), snapshot.active_connections);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.stream_bytes_sent);
+    try std.testing.expect(connection.closing_or_closed);
+    try std.testing.expectEqual(@as(usize, 1), connection.data_sem.permits);
+    try server.waitConnectionClosed(1);
+    try connection.data_sem.wait(io);
+    try std.testing.expectEqual(@as(usize, 0), connection.data_sem.permits);
+    server.publishConnectionState();
+    try std.testing.expectEqual(@as(usize, 0), connection.data_sem.permits);
+    // Retired sends remain pending rather than claiming a successful flush,
+    // but cannot keep the drive task spinning without executable work.
+    try std.testing.expect(connection.send_pending);
+    try std.testing.expect(!server.hasPendingWork());
+    try std.testing.expect(server.conns.get(1) == connection);
+    server.releaseConnection(1);
+    try std.testing.expect(server.hasPendingWork());
+    server.publishConnectionState();
+    try std.testing.expectEqual(@as(usize, 0), server.conns.count());
+    try std.testing.expect(!server.hasPendingWork());
+}
+
+test "metrics snapshot survives IPv6 endpoint record retirement before handler release" {
+    try metricsSnapshotAfterEndpointRetirement(IPv6Server, .deadline_query);
+}
+
+test "metrics snapshot survives IPv4 endpoint record retirement before handler release" {
+    try metricsSnapshotAfterEndpointRetirement(Server, .deadline_query);
+}
+
+test "metrics snapshot publishes IPv4 due-deadline closure before parking" {
+    try metricsSnapshotAfterEndpointRetirement(Server, .due_deadline);
+}
+
+test "metrics snapshot publishes IPv6 due-deadline closure before parking" {
+    try metricsSnapshotAfterEndpointRetirement(IPv6Server, .due_deadline);
+}
+
+test "metrics snapshot publication schedules every retired state beyond one reclaim batch" {
+    inline for (.{ Server, IPv6Server }) |Runtime| {
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+        var server = try Runtime.init(allocator, io, .{
+            .port = 0,
+            .alpn = &.{},
+            .cert_der = &.{},
+            .private_key = &.{},
+            .max_connections = 65,
+        });
+        defer server.deinit();
+        for (0..65) |index| {
+            const handle = index + 1;
+            const record = try allocator.create(ServerRecord);
+            {
+                errdefer allocator.destroy(record);
+                record.* = .{ .handle = handle, .transport = try Tls13ServerTransport.init(allocator, .{}, .{}) };
+                errdefer record.deinit();
+                const conn = record.connectionRef();
+                try conn.validatePeerAddress();
+                try conn.confirmHandshake();
+                try conn.closeApplication(0, "");
+                var scratch: [send_mtu]u8 = undefined;
+                _ = (try conn.pollTx(0, &scratch)) orelse return error.TestUnexpectedResult;
+                const deadline = conn.closeDeadline() orelse return error.TestUnexpectedResult;
+                try std.testing.expectError(error.ConnectionClosed, conn.pollTx(deadline, &scratch));
+                try server.server_ep.records.adopt(handle, record);
+            }
+            const connection = try allocator.create(ConnState);
+            errdefer allocator.destroy(connection);
+            connection.* = .{
+                .handle = handle,
+                .conn = record.connectionRef(),
+                .peer = server.socket.address,
+                .handler_done = true,
+            };
+            try server.conns.put(handle, connection);
+        }
+        _ = try server.server_ep.nextDeadlineWithScratch();
+        try std.testing.expectEqual(@as(usize, 0), server.server_ep.records.count());
+        server.publishConnectionState();
+        try std.testing.expectEqual(@as(usize, 1), server.conns.count());
+        try std.testing.expect(server.hasPendingWork());
+        try std.testing.expectEqual(@as(usize, 0), server.metricsSnapshot().active_connections);
+        server.publishConnectionState();
+        try std.testing.expectEqual(@as(usize, 0), server.conns.count());
+        try std.testing.expect(!server.hasPendingWork());
+    }
+}
+
 /// Async streaming QUIC server (multi-connection, std.http model).
 pub const Server = ServerForTuple(endpoint.Udp4Tuple);
 /// Native IPv6 server with an explicitly bound source socket.
@@ -672,6 +829,19 @@ pub fn ServerForTuple(comptime Path: type) type {
 
         mutex: std.atomic.Mutex = .unlocked,
         conns: std.AutoHashMap(u64, *ConnState),
+        /// Owned values from the latest drive publication; readers never borrow
+        /// an endpoint record or its connection.
+        cached_metrics: Metrics = .{
+            .active_connections = 0,
+            .stream_bytes_sent = 0,
+            .stream_bytes_received = 0,
+            .total_bytes_in_flight = 0,
+            .smoothed_rtt_us = 0,
+            .rttvar_us = 0,
+            .congestion_window = 0,
+            .packets_lost = 0,
+            .packets_retransmitted = 0,
+        },
         pending_accept: std.ArrayList(u64) = .empty,
         /// Posted by the drive task when a new connection is accepted.
         accept_sem: std.Io.Semaphore = .{ .permits = 0 },
@@ -812,10 +982,8 @@ pub fn ServerForTuple(comptime Path: type) type {
             self.notifyDrive(self.io);
         }
 
-        /// Aggregate metrics across all active connections (for a monitoring
-        /// endpoint pooled over the lifetime of the server). Reads are lock-serialized
-        /// with the drive task's conns traversal; per-connection stats are best-effort
-        /// snapshots that may straddle an in-flight update.
+        /// Aggregate metrics across active connections at the latest drive
+        /// publication. Later endpoint changes appear in the next publication.
         pub const Metrics = struct {
             active_connections: usize,
             stream_bytes_sent: u64,
@@ -828,8 +996,16 @@ pub fn ServerForTuple(comptime Path: type) type {
             packets_retransmitted: u64,
         };
 
-        /// Return an aggregate metrics snapshot across all live connections.
+        /// Return the latest drive-owned aggregate without borrowing a connection.
         pub fn metricsSnapshot(self: *ServerSelf) Metrics {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            defer self.mutex.unlock();
+            return self.cached_metrics;
+        }
+
+        /// Publish after every endpoint operation in this drive iteration,
+        /// including deadline selection, which may destroy closed records.
+        fn publishConnectionState(self: *ServerSelf) void {
             var m: Metrics = .{
                 .active_connections = 0,
                 .stream_bytes_sent = 0,
@@ -842,11 +1018,24 @@ pub fn ServerForTuple(comptime Path: type) type {
                 .packets_retransmitted = 0,
             };
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            defer self.mutex.unlock();
+            var closed_handles: [64]u64 = undefined;
+            var closed_count: usize = 0;
             var it = self.conns.valueIterator();
             while (it.next()) |csp| {
                 const st = csp.*;
-                if (st.conn.isClosingOrClosed()) continue;
-                const cs = st.conn.connectionStats();
+                const record = self.server_ep.records.get(st.handle);
+                const closing_now = if (record) |live| live.connectionRef().isClosingOrClosed() else true;
+                const closing_prev = @atomicRmw(bool, &st.closing_or_closed, .Xchg, closing_now, .acq_rel);
+                if (closing_now and !closing_prev) st.data_sem.post(self.io);
+                if (closing_now) {
+                    if (st.handler_done and closed_count < closed_handles.len) {
+                        closed_handles[closed_count] = st.handle;
+                        closed_count += 1;
+                    }
+                    continue;
+                }
+                const cs = record.?.connectionRef().connectionStats();
                 m.active_connections += 1;
                 m.stream_bytes_sent += cs.stream_bytes_sent;
                 m.stream_bytes_received += cs.stream_bytes_received;
@@ -857,8 +1046,14 @@ pub fn ServerForTuple(comptime Path: type) type {
                 m.packets_lost += cs.packets_lost;
                 m.packets_retransmitted += cs.packets_retransmitted;
             }
-            self.mutex.unlock();
-            return m;
+            for (closed_handles[0..closed_count]) |handle| {
+                if (self.conns.fetchRemove(handle)) |removed| {
+                    removed.value.deinit(self.allocator);
+                    self.allocator.destroy(removed.value);
+                    log.info("connection {d} closed: state reclaimed", .{handle});
+                }
+            }
+            self.cached_metrics = m;
         }
 
         /// Start the server (if not already started) and spawn the serve task,
@@ -998,15 +1193,13 @@ pub fn ServerForTuple(comptime Path: type) type {
         /// Drain queued stream sends and emit outgoing datagrams.
         fn drainOutgoing(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-            var closed_handles: [64]u64 = undefined;
-            var closed_count: usize = 0;
             var cit = self.conns.valueIterator();
             while (cit.next()) |csp| {
                 const st = csp.*;
                 // The endpoint reclaims records of closed connections during
                 // deadline queries; only dereference the connection while its
-                // record is alive. The cached close state keeps this ConnState
-                // reclaimable after the record is gone.
+                // record is alive. Runtime closure is published after the final
+                // endpoint operation rather than from this outgoing pass.
                 const record_alive = self.server_ep.records.get(st.handle) != null;
                 if (st.close_requested) {
                     st.close_requested = false;
@@ -1016,19 +1209,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                     }
                 }
                 const closing_now = if (record_alive) st.conn.isClosingOrClosed() else true;
-                const closing_prev = @atomicRmw(bool, &st.closing_or_closed, .Xchg, closing_now, .acq_rel);
-                if (closing_now and !closing_prev) {
-                    // A blocked handler cannot learn about the close from stream
-                    // data or EOF; wake it so it observes error.ConnectionClosed.
-                    st.data_sem.post(io);
-                }
-                if (closing_now and st.handler_done) {
-                    if (closed_count < closed_handles.len) {
-                        closed_handles[closed_count] = st.handle;
-                        closed_count += 1;
-                    }
-                    continue;
-                }
+                if (closing_now and st.handler_done) continue;
                 if (!record_alive) continue;
                 while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
                 var flow_blocked = false;
@@ -1066,13 +1247,6 @@ pub fn ServerForTuple(comptime Path: type) type {
                     self.io.futexWake(u32, &st.send_flush_id.raw, std.math.maxInt(u32));
                 }
                 st.mutex.unlock();
-            }
-            for (closed_handles[0..closed_count]) |h| {
-                if (self.conns.fetchRemove(h)) |kv| {
-                    kv.value.deinit(allocator);
-                    allocator.destroy(kv.value);
-                    log.info("connection {d} closed: state reclaimed", .{h});
-                }
             }
             self.mutex.unlock();
             var out: [16]RuntimeEndpoint.DatagramPathResult = undefined;
@@ -1554,8 +1728,9 @@ pub fn ServerForTuple(comptime Path: type) type {
             var pending = false;
             var it = self.conns.valueIterator();
             while (it.next()) |csp| {
-                if (csp.*.send_pending or csp.*.close_requested or
-                    (csp.*.handler_done and csp.*.closing_or_closed))
+                const closing = @atomicLoad(bool, &csp.*.closing_or_closed, .acquire);
+                if ((!closing and (csp.*.send_pending or csp.*.close_requested)) or
+                    (csp.*.handler_done and closing))
                 {
                     pending = true;
                     break;
@@ -1588,13 +1763,6 @@ pub fn ServerForTuple(comptime Path: type) type {
                 // changes wake_id so the compare cannot match. Without this
                 // check the drive could park forever past a stop request.
                 if (@atomicLoad(bool, &self.stopping, .acquire)) break;
-                // Re-check for work parked between this iteration's draining and
-                // the snapshot: its notifyDrive bump is already captured by the
-                // snapshot, so the park below would hold the work until the park
-                // timeout (up to the idle deadline). Work arriving after this
-                // check bumps wake_id past the snapshot, so the park still
-                // returns immediately.
-                if (self.hasPendingWork()) continue;
                 const timeout: std.Io.Timeout = timeout: {
                     var deadline_nanos: ?i64 = null;
                     if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
@@ -1605,6 +1773,11 @@ pub fn ServerForTuple(comptime Path: type) type {
                     };
                     break :timeout if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
                 };
+                self.publishConnectionState();
+                // Re-check work whose notifyDrive bump was captured by the
+                // snapshot. Publication may also wake a handler that releases
+                // its state; work arriving later changes wake_id before parking.
+                if (self.hasPendingWork()) continue;
                 io.futexWaitTimeout(u32, &self.wake_id.raw, snapshot, timeout) catch return;
             }
         }
