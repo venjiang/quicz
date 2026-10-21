@@ -419,6 +419,8 @@ fn ServerEndpointForTuple(comptime Path: type) type {
 
 /// Datagram received by the recv task, waiting for the drive task.
 const queued_datagram_pool_size = 16;
+/// Return to deadlines and connection-state publication after this many inputs.
+const receive_batch_size = 64;
 
 /// Reusable receive buffers: the recv task takes a buffer from the pool
 /// instead of allocating per datagram, and the drive task returns it. Falls
@@ -787,6 +789,366 @@ test "metrics snapshot publication schedules every retired state beyond one recl
         server.publishConnectionState();
         try std.testing.expectEqual(@as(usize, 0), server.conns.count());
         try std.testing.expect(!server.hasPendingWork());
+    }
+}
+
+fn metricsSnapshotDuringSustainedReceive(comptime Runtime: type) !void {
+    const allocator = std.testing.allocator;
+    const base_io = std.testing.io;
+    const protection = quicz.protection;
+    const Path = if (Runtime == Server) endpoint.Udp4Tuple else endpoint.Udp6Tuple;
+    const Family = @import("udp_address.zig").ForTuple(Path);
+    const peer_secret: [protection.traffic_secret_len]u8 = @splat(0x51);
+    const local_secret: [protection.traffic_secret_len]u8 = @splat(0x52);
+    const peer_bind: std.Io.net.IpAddress = if (Runtime == Server) .{ .ip4 = .loopback(0) } else .{ .ip6 = .loopback(0) };
+    const closing_peer = try peer_bind.bind(base_io, .{ .mode = .dgram, .protocol = .udp });
+    defer closing_peer.close(base_io);
+    const busy_peer_socket = try peer_bind.bind(base_io, .{ .mode = .dgram, .protocol = .udp });
+    defer busy_peer_socket.close(base_io);
+    const Harness = struct {
+        var active: ?*@This() = null;
+        const maximum_packets = 4096;
+        server: *Runtime,
+        closing: *ConnState,
+        peer: std.Io.net.IpAddress,
+        destination_cid: [8]u8,
+        underlying_now: @FieldType(std.Io.VTable, "now"),
+        underlying_wait: @FieldType(std.Io.VTable, "futexWait"),
+        produced: usize = 0,
+        closure_observed_after: ?usize = null,
+        received_close: bool = false,
+        failure: ?anyerror = null,
+        enabled: bool = false,
+        in_now: bool = false,
+
+        fn observe(self: *@This()) void {
+            if (self.server.server_ep.records.get(1)) |record| {
+                if (record.connectionRef().isClosingOrClosed()) self.received_close = true;
+            }
+            if (self.closing.closing_or_closed and self.closure_observed_after == null)
+                self.closure_observed_after = self.produced;
+        }
+
+        fn enqueue(self: *@This()) !void {
+            const packet_number = self.produced;
+            // Every added packet has valid AEAD, a fresh packet number, and a
+            // routed PING frame. This is sustained useful input, not a UDP flood.
+            const datagram = try protection.protectShortPacketAes128(allocator, .{
+                .dcid = &self.destination_cid,
+                .spin_bit = false,
+                .key_phase = false,
+                .packet_number = packet_number,
+            }, .{ .len = 4, .truncated_packet_number = @intCast(packet_number) }, protection.deriveAes128PacketProtectionKeys(peer_secret), &.{0x01});
+            errdefer allocator.free(datagram);
+            try self.server.datagram_queue.append(allocator, .{ .from = self.peer, .data = datagram });
+            self.produced += 1;
+        }
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self = active.?;
+            if (self.enabled and !self.in_now) {
+                self.in_now = true;
+                defer self.in_now = false;
+                self.observe();
+                if (self.closure_observed_after == null and self.produced < maximum_packets)
+                    self.enqueue() catch |err| {
+                        self.failure = err;
+                    };
+            }
+            return self.underlying_now(context, clock);
+        }
+
+        fn wait(context: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            const self = active.?;
+            if (ptr == &self.server.wake_id.raw) {
+                self.observe();
+                return error.Canceled;
+            }
+            return self.underlying_wait(context, ptr, expected, timeout);
+        }
+    };
+    var vtable = base_io.vtable.*;
+    var server = try Runtime.init(allocator, .{ .userdata = base_io.userdata, .vtable = &vtable }, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 2,
+    });
+    defer server.deinit();
+    var closing: *ConnState = undefined;
+    var busy_peer: std.Io.net.IpAddress = undefined;
+    var busy_cid: [8]u8 = undefined;
+    for (1..3) |handle| {
+        const tag: u8 = @intCast(handle);
+        const cid: [8]u8 = @splat(tag);
+        const peer_cid: [8]u8 = @splat(tag + 0x10);
+        const peer = if (handle == 1) closing_peer.address else busy_peer_socket.address;
+        const record = try allocator.create(ServerRecord);
+        {
+            errdefer allocator.destroy(record);
+            record.* = .{ .handle = handle, .transport = try Tls13ServerTransport.init(allocator, .{}, .{}) };
+            errdefer record.deinit();
+            try record.transport.setOriginalDestinationConnectionId(&cid);
+            try record.transport.setLocalInitialSourceConnectionId(&cid);
+            try record.transport.setPeerInitialSourceConnectionId(&peer_cid);
+            try record.connectionRef().installOneRttTrafficSecrets(.{ .local = local_secret, .peer = peer_secret });
+            try record.connectionRef().validatePeerAddress();
+            try record.connectionRef().confirmHandshake();
+            try server.server_ep.records.adopt(handle, record);
+        }
+        const path = Path{ .local = Family.fromIp(server.socket.address).?, .remote = Family.fromIp(peer).? };
+        try server.server_ep.lifecycle.registerConnectionId(handle, &cid, path, .{});
+        const state = try allocator.create(ConnState);
+        state.* = .{ .handle = handle, .conn = record.connectionRef(), .peer = peer };
+        {
+            errdefer allocator.destroy(state);
+            try server.conns.put(handle, state);
+        }
+        if (handle == 1) {
+            closing = state;
+            // A real protected APPLICATION_CLOSE, with no test-side mutation
+            // of either the connection's close state or its published cache.
+            const datagram = try protection.protectShortPacketAes128(allocator, .{
+                .dcid = &cid,
+                .spin_bit = false,
+                .key_phase = false,
+                .packet_number = 0,
+            }, .{ .len = 4, .truncated_packet_number = 0 }, protection.deriveAes128PacketProtectionKeys(peer_secret), &.{ 0x1d, 0x00, 0x00 });
+            errdefer allocator.free(datagram);
+            try server.datagram_queue.append(allocator, .{ .from = peer, .data = datagram });
+        } else {
+            busy_peer = peer;
+            busy_cid = cid;
+        }
+    }
+    server.publishConnectionState();
+    try std.testing.expectEqual(@as(usize, 2), server.metricsSnapshot().active_connections);
+    var harness: Harness = .{
+        .server = &server,
+        .closing = closing,
+        .peer = busy_peer,
+        .destination_cid = busy_cid,
+        .underlying_now = vtable.now,
+        .underlying_wait = vtable.futexWait,
+    };
+    Harness.active = &harness;
+    defer {
+        vtable.now = harness.underlying_now;
+        vtable.futexWait = harness.underlying_wait;
+        Harness.active = null;
+    }
+    vtable.now = Harness.now;
+    vtable.futexWait = Harness.wait;
+    harness.enabled = true;
+    try server.drive();
+    harness.enabled = false;
+    try std.testing.expectEqual(@as(?anyerror, null), harness.failure);
+    try std.testing.expect(harness.received_close);
+    const publication = harness.closure_observed_after orelse return error.TestUnexpectedResult;
+    const busy = server.server_ep.records.get(2) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(harness.produced > 0);
+    try std.testing.expectEqual(@as(u64, @intCast(harness.produced)), busy.connectionRef().next_peer_packet_number);
+    // The cap only prevents an unbounded red test. Correct code publishes
+    // closure while the deterministic packet producer can still supply input.
+    try std.testing.expect(publication < Harness.maximum_packets);
+    try std.testing.expectEqual(@as(usize, 1), server.metricsSnapshot().active_connections);
+    try std.testing.expect(closing.closing_or_closed);
+    try std.testing.expectEqual(@as(usize, 1), closing.data_sem.permits);
+    try server.waitConnectionClosed(1);
+}
+
+test "metrics snapshot publishes IPv4 closure during sustained valid receive" {
+    try metricsSnapshotDuringSustainedReceive(Server);
+}
+
+test "metrics snapshot publishes IPv6 closure during sustained valid receive" {
+    try metricsSnapshotDuringSustainedReceive(IPv6Server);
+}
+
+fn enqueueReceiveTestDatagram(server: anytype, marker: u8, pooled: bool) !void {
+    const allocator = std.testing.allocator;
+    const buffer = if (pooled)
+        (server.datagram_pool.take() orelse return error.TestUnexpectedResult)[0..2]
+    else
+        try allocator.alloc(u8, 2);
+    errdefer if (pooled) server.datagram_pool.release(buffer) else allocator.free(buffer);
+    // A cleared QUIC fixed bit is discarded without a route or a response.
+    buffer[0] = 0;
+    buffer[1] = marker;
+    while (!server.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer server.queue_mutex.unlock();
+    try server.datagram_queue.append(allocator, .{ .from = server.socket.address, .data = buffer, .pooled = pooled });
+}
+
+test "metrics snapshot receive batches preserve FIFO compaction and buffer ownership" {
+    inline for (.{ Server, IPv6Server }) |Runtime| {
+        for ([_]usize{ 0, 64, 129 }) |queued| {
+            const allocator = std.testing.allocator;
+            const io = std.testing.io;
+            var server = try Runtime.init(allocator, io, .{
+                .port = 0,
+                .alpn = &.{},
+                .cert_der = &.{},
+                .private_key = &.{},
+                .max_connections = 1,
+            });
+            defer server.deinit();
+            for (0..queued) |index| try enqueueReceiveTestDatagram(&server, @intCast(index), index < queued_datagram_pool_size);
+            server.drainQueuedDatagrams(io, allocator);
+            for (server.datagram_pool.free) |available| try std.testing.expect(available);
+            if (queued <= 64) {
+                try std.testing.expectEqual(@as(usize, 0), server.datagram_queue.items.len);
+                try std.testing.expectEqual(@as(usize, 0), server.datagram_read_offset);
+                try std.testing.expect(!server.hasPendingWork());
+                continue;
+            }
+            // The first prefix is smaller than the live suffix; no copy yet.
+            try std.testing.expectEqual(@as(usize, 64), server.datagram_read_offset);
+            try std.testing.expectEqual(@as(usize, 129), server.datagram_queue.items.len);
+            for (server.datagram_queue.items[server.datagram_read_offset..], 64..) |datagram, marker|
+                try std.testing.expectEqual(@as(u8, @intCast(marker)), datagram.data[1]);
+            try std.testing.expect(server.hasPendingWork());
+            // Reuse a released pool buffer while unread heap buffers remain.
+            // A later pass must not release a consumed descriptor a second time.
+            const held = server.datagram_pool.take() orelse return error.TestUnexpectedResult;
+            defer server.datagram_pool.release(held);
+            server.drainQueuedDatagrams(io, allocator);
+            try std.testing.expectEqual(@as(usize, 0), server.datagram_read_offset);
+            try std.testing.expectEqual(@as(usize, 1), server.datagram_queue.items.len);
+            try std.testing.expectEqual(@as(u8, 128), server.datagram_queue.items[0].data[1]);
+            try std.testing.expect(server.hasPendingWork());
+            server.drainQueuedDatagrams(io, allocator);
+            try std.testing.expectEqual(@as(usize, 0), server.datagram_queue.items.len);
+            try std.testing.expectEqual(@as(usize, 0), server.datagram_read_offset);
+            try std.testing.expect(!server.datagram_pool.free[0]);
+            try std.testing.expect(!server.hasPendingWork());
+        }
+    }
+}
+
+test "metrics snapshot receive batches retain appends during processing and stop with an owned suffix" {
+    inline for (.{ Server, IPv6Server }) |Runtime| {
+        const Harness = struct {
+            var active: ?*@This() = null;
+            server: *Runtime,
+            underlying_now: @FieldType(std.Io.VTable, "now"),
+            stop_first: bool,
+            enabled: bool = false,
+            markers: [65]u8 = undefined,
+            seen: usize = 0,
+            failure: ?anyerror = null,
+
+            fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+                const self = active.?;
+                if (self.enabled) {
+                    const datagram = self.server.datagram_queue.items[self.server.datagram_read_offset - 1];
+                    if (self.seen < self.markers.len) self.markers[self.seen] = datagram.data[1] else self.failure = error.TestUnexpectedResult;
+                    self.seen += 1;
+                    if (self.seen == 1) {
+                        if (self.stop_first) {
+                            self.server.stop();
+                        } else {
+                            enqueueReceiveTestDatagram(self.server, 64, false) catch |err| {
+                                self.failure = err;
+                            };
+                        }
+                    }
+                }
+                return self.underlying_now(context, clock);
+            }
+        };
+        for ([_]bool{ false, true }) |stop_first| {
+            const allocator = std.testing.allocator;
+            const base_io = std.testing.io;
+            var vtable = base_io.vtable.*;
+            const io: std.Io = .{ .userdata = base_io.userdata, .vtable = &vtable };
+            var server = try Runtime.init(allocator, io, .{
+                .port = 0,
+                .alpn = &.{},
+                .cert_der = &.{},
+                .private_key = &.{},
+                .max_connections = 1,
+            });
+            defer server.deinit();
+            for (0..64) |index| try enqueueReceiveTestDatagram(&server, @intCast(index), index < queued_datagram_pool_size);
+            var harness: Harness = .{ .server = &server, .underlying_now = vtable.now, .stop_first = stop_first };
+            Harness.active = &harness;
+            defer {
+                vtable.now = harness.underlying_now;
+                Harness.active = null;
+            }
+            vtable.now = Harness.now;
+            harness.enabled = true;
+            server.drainQueuedDatagrams(io, allocator);
+            harness.enabled = false;
+            try std.testing.expectEqual(@as(?anyerror, null), harness.failure);
+            if (stop_first) {
+                try std.testing.expectEqual(@as(usize, 1), harness.seen);
+                try std.testing.expectEqual(@as(usize, 1), server.datagram_read_offset);
+                try std.testing.expectEqual(@as(usize, 64), server.datagram_queue.items.len);
+                try std.testing.expect(server.datagram_pool.free[0]);
+                try std.testing.expect(!server.datagram_pool.free[1]);
+                // deinit retains ownership of every unread buffer, including
+                // the pool entries not selected before stop.
+            } else {
+                try std.testing.expectEqual(@as(usize, 64), harness.seen);
+                try std.testing.expectEqual(@as(usize, 0), server.datagram_read_offset);
+                try std.testing.expectEqual(@as(usize, 1), server.datagram_queue.items.len);
+                try std.testing.expectEqual(@as(u8, 64), server.datagram_queue.items[0].data[1]);
+                harness.enabled = true;
+                server.drainQueuedDatagrams(io, allocator);
+                harness.enabled = false;
+                try std.testing.expectEqual(@as(usize, 65), harness.seen);
+                for (harness.markers, 0..) |marker, index| try std.testing.expectEqual(@as(u8, @intCast(index)), marker);
+                try std.testing.expectEqual(@as(usize, 0), server.datagram_queue.items.len);
+                try std.testing.expectEqual(@as(usize, 0), server.datagram_read_offset);
+            }
+        }
+    }
+}
+
+test "metrics snapshot receive batches honor pure cancellation before draining the next suffix" {
+    inline for (.{ Server, IPv6Server }) |Runtime| {
+        const Harness = struct {
+            var active: ?*@This() = null;
+            underlying_check: @FieldType(std.Io.VTable, "checkCancel"),
+            checks: usize = 0,
+
+            fn check(context: ?*anyopaque) std.Io.Cancelable!void {
+                const self = active.?;
+                self.checks += 1;
+                if (self.checks == 2) return error.Canceled;
+                return self.underlying_check(context);
+            }
+        };
+        const allocator = std.testing.allocator;
+        const base_io = std.testing.io;
+        var vtable = base_io.vtable.*;
+        const io: std.Io = .{ .userdata = base_io.userdata, .vtable = &vtable };
+        var server = try Runtime.init(allocator, io, .{
+            .port = 0,
+            .alpn = &.{},
+            .cert_der = &.{},
+            .private_key = &.{},
+            .max_connections = 1,
+        });
+        defer server.deinit();
+        for (0..129) |index| try enqueueReceiveTestDatagram(&server, @intCast(index), index < queued_datagram_pool_size);
+        var harness: Harness = .{ .underlying_check = vtable.checkCancel };
+        Harness.active = &harness;
+        defer {
+            vtable.checkCancel = harness.underlying_check;
+            Harness.active = null;
+        }
+        vtable.checkCancel = Harness.check;
+        try std.testing.expectError(error.Canceled, server.drive());
+        try std.testing.expectEqual(@as(usize, 2), harness.checks);
+        try std.testing.expect(!server.stopping);
+        try std.testing.expectEqual(@as(usize, 64), server.datagram_read_offset);
+        try std.testing.expectEqual(@as(usize, 129), server.datagram_queue.items.len);
+        try std.testing.expect(server.hasPendingWork());
+        for (server.datagram_pool.free) |available| try std.testing.expect(available);
     }
 }
 
@@ -1310,9 +1672,11 @@ pub fn ServerForTuple(comptime Path: type) type {
             }
         }
 
-        /// Process every queued datagram in FIFO order and free its buffer.
+        /// Process one finite FIFO batch so timers and publication cannot starve.
         fn drainQueuedDatagrams(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
-            while (true) {
+            var processed: usize = 0;
+            while (processed < receive_batch_size) : (processed += 1) {
+                if (@atomicLoad(bool, &self.stopping, .acquire)) return;
                 while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
                 if (self.datagram_read_offset >= self.datagram_queue.items.len) {
                     self.datagram_queue.clearRetainingCapacity();
@@ -1325,6 +1689,20 @@ pub fn ServerForTuple(comptime Path: type) type {
                 self.queue_mutex.unlock();
                 self.processDatagram(io, allocator, qd.from, qd.data);
                 if (qd.pooled) self.datagram_pool.release(qd.data) else allocator.free(qd.data);
+            }
+            while (!self.queue_mutex.tryLock()) std.atomic.spinLoopHint();
+            defer self.queue_mutex.unlock();
+            const consumed = self.datagram_read_offset;
+            const remaining = self.datagram_queue.items.len - consumed;
+            if (remaining == 0) {
+                self.datagram_queue.clearRetainingCapacity();
+                self.datagram_read_offset = 0;
+            } else if (consumed >= remaining) {
+                // Moving descriptors transfers their queue ownership; buffers
+                // remain live. Copy only when its cost is paid by consumed input.
+                std.mem.copyForwards(QueuedDatagram, self.datagram_queue.items[0..remaining], self.datagram_queue.items[consumed..]);
+                self.datagram_queue.shrinkRetainingCapacity(remaining);
+                self.datagram_read_offset = 0;
             }
         }
 
@@ -1747,6 +2125,7 @@ pub fn ServerForTuple(comptime Path: type) type {
             const allocator = self.allocator;
             const io = self.io;
             while (!@atomicLoad(bool, &self.stopping, .acquire)) {
+                try io.checkCancel();
                 self.drainOutgoing(io, allocator);
                 self.drainQueuedDatagrams(io, allocator);
                 self.drainSharedPunches(io);
