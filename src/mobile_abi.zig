@@ -850,6 +850,69 @@ test "mobile client connect timeout bounds a silent UDP peer" {
     );
 }
 
+test "mobile IPv4 handshake ignores a STUN packet from another sender" {
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const peer = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(std.testing.io);
+    const foreign = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer foreign.close(std.testing.io);
+    try std.testing.expect(peer.address.ip4.port != foreign.address.ip4.port);
+    const server_name = "localhost";
+    const alpn = "quicz-mobile-foreign-source-test";
+    const config = ClientConfig{
+        .server_ipv4 = .{ 127, 0, 0, 1 },
+        .server_port = peer.address.ip4.port,
+        .allow_migration = 1,
+        .reserved = 0,
+        .server_name = server_name.ptr,
+        .server_name_length = server_name.len,
+        .alpn = alpn.ptr,
+        .alpn_length = alpn.len,
+        .ca_certificate_der = null,
+        .ca_certificate_der_length = 0,
+    };
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_unverified(&config, &handle));
+    defer quicz_mobile_client_destroy(handle);
+    const Wait = struct {
+        handle: ?*anyopaque,
+        result: i32 = -1,
+        elapsed_ms: i64 = 0,
+
+        fn run(wait: *@This()) void {
+            const started = std.Io.Timestamp.now(std.testing.io, .awake);
+            wait.result = quicz_mobile_client_connect_timeout(wait.handle, 3_000);
+            wait.elapsed_ms = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).toMilliseconds();
+        }
+    };
+    var wait: Wait = .{ .handle = handle };
+    const worker = try std.Thread.spawn(.{}, Wait.run, .{&wait});
+    var joined = false;
+    defer if (!joined) worker.join();
+    var buffer: [2048]u8 = undefined;
+    const initial = try peer.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(1_000),
+    } });
+    try std.testing.expect(initial.data.len >= 1200);
+    var bound: Ipv4Endpoint = undefined;
+    try std.testing.expectEqual(code(.ok), quicz_mobile_client_bound_ipv4(handle, &bound));
+    try std.testing.expectEqual(bound.port, initial.from.ip4.port);
+    const packet = quicz.connectivity.stun.encodeBindingSuccessIpv4(@splat(0x81), .{ 127, 0, 0, 1 }, foreign.address.ip4.port);
+    const injected = std.Io.Timestamp.now(std.testing.io, .awake);
+    try foreign.send(std.testing.io, &initial.from, &packet);
+    worker.join();
+    joined = true;
+    const after_injection_ms = injected.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).toMilliseconds();
+    const state = stateFromHandle(quicz.endpoint.Udp4Tuple, handle).?;
+    const failure = if (state.client.handshake_error) |err| @errorName(err) else "none";
+    std.debug.print("foreign-source handshake: initial_bytes={d} foreign_bytes={d} result={d} elapsed_ms={d} after_injection_ms={d} failure={s}\n", .{
+        initial.data.len, packet.len, wait.result, wait.elapsed_ms, after_injection_ms, failure,
+    });
+    try std.testing.expectEqual(code(.connection_timed_out), wait.result);
+    try std.testing.expect(wait.elapsed_ms >= 2_900);
+}
+
 test "mobile punch diagnostics retain silent peer counters on failure" {
     const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     const silent = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });

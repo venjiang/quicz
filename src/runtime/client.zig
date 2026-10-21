@@ -1127,7 +1127,10 @@ pub fn ClientForTuple(comptime Path: type) type {
                     },
                 }
             }
-            if (Path == endpoint.Udp6Tuple) {
+            // Discovery can leave unrelated UDP replies on this socket. They
+            // cannot fail a pending handshake; IPv4 migration remains available
+            // after confirmation. Retained authenticated punches were handled above.
+            if (Path == endpoint.Udp6Tuple or self.handshake_state.load(.acquire) != handshake_confirmed) {
                 const peer = Family.fromIp(from) orelse return;
                 if (!peer.eql(self.client.path.remote)) return;
             }
