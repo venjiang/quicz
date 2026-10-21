@@ -101,10 +101,25 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             scratch: []u8,
             datagram: []const u8,
         ) !ReceiveResult {
+            const route = try self.admitDatagram(datagram);
+            return self.receiveAdmitted(now_nanos, scratch, datagram, route);
+        }
+
+        fn admitDatagram(self: *const Self, datagram: []const u8) !endpoint.RouteResult {
             if (datagram.len == 0) return error.InvalidPacket;
             if (!isVersionNegotiationDatagram(datagram) and (datagram[0] & 0x40) == 0) return error.InvalidPacket;
             const route = try self.lifecycle.routeDatagram(self.path, datagram);
             if (route.connection_id != self.connection_id) return error.InvalidPacket;
+            return route;
+        }
+
+        fn receiveAdmitted(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+            route: endpoint.RouteResult,
+        ) !ReceiveResult {
             if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
                 if (self.transport.connection.processStatelessResetDatagram(now_nanos, datagram)) |sequence_number| {
                     try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
@@ -131,6 +146,31 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
             const received = try self.receive(now_nanos, scratch, datagram);
+            return self.receiveResultWithRoutePath(path, received);
+        }
+
+        /// Discard only untrusted outer admission failures. Validate the owned
+        /// route first so missing internal state remains an error. Admitted
+        /// packet protection, frame, and TLS errors retain the throwing path.
+        pub fn receiveWithRoutePathOrDiscard(
+            self: *Self,
+            now_nanos: i64,
+            scratch: []u8,
+            datagram: []const u8,
+        ) !?ReceiveDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const owned_route = try self.lifecycle.router.routeConnectionId(local_source_connection_id, path);
+            if (owned_route.connection_id != self.connection_id) return error.InvalidPacket;
+            const route = self.admitDatagram(datagram) catch |err| switch (err) {
+                error.InvalidPacket, error.InvalidDatagram, error.InvalidConnectionIdLength, error.UnknownConnectionId => return null,
+                else => return err,
+            };
+            const received = try self.receiveAdmitted(now_nanos, scratch, datagram, route);
+            return self.receiveResultWithRoutePath(path, received);
+        }
+
+        fn receiveResultWithRoutePath(self: *Self, path: Path, received: ReceiveResult) ReceiveDatagramPathResult {
             return .{
                 .receive = received,
                 .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
@@ -1167,6 +1207,8 @@ test "Tls13ClientEndpoint reports fixed-bit-clear datagrams as receive errors" {
         &[_]u8{ 0x80, 0, 0, 0, 1 },
     };
     for (invalid_datagrams) |datagram| {
+        try std.testing.expectError(error.InvalidPacket, client.receiveWithRoutePath(10, &scratch, datagram));
+        try std.testing.expect(try client.receiveWithRoutePathOrDiscard(10, &scratch, datagram) == null);
         const received = try client.receiveWithRoutePathOrClose(10, &scratch, datagram);
         try std.testing.expect(received.receive == null);
         try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
@@ -1176,6 +1218,21 @@ test "Tls13ClientEndpoint reports fixed-bit-clear datagrams as receive errors" {
         try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
         try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
     }
+
+    const unknown_cid = [_]u8{0x40} ++ ([_]u8{0xaa} ** 32);
+    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePath(10, &scratch, &unknown_cid));
+    try std.testing.expect(try client.receiveWithRoutePathOrDiscard(10, &scratch, &unknown_cid) == null);
+
+    const other_cid = [_]u8{0xbb} ** 8;
+    try client.lifecycle.registerConnectionId(30, &other_cid, path, .{ .active_migration_disabled = false });
+    const other_connection = [_]u8{0x40} ++ other_cid ++ ([_]u8{0} ** 24);
+    try std.testing.expectError(error.InvalidPacket, client.receiveWithRoutePath(10, &scratch, &other_connection));
+    try std.testing.expect(try client.receiveWithRoutePathOrDiscard(10, &scratch, &other_connection) == null);
+
+    _ = client.lifecycle.retireConnection(client.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrDiscard(10, &scratch, &.{}));
+    try client.lifecycle.registerConnectionId(30, &client_scid, path, .{ .active_migration_disabled = false });
+    try std.testing.expectError(error.InvalidPacket, client.receiveWithRoutePathOrDiscard(10, &scratch, &.{}));
 }
 
 test "Tls13ClientEndpoint polls application output with committed route path" {
@@ -1349,7 +1406,7 @@ test "Tls13ClientEndpoint exposes unidirectional and stream cancellation control
     try std.testing.expectEqual(@as(usize, 1), client.transport.connection.pending_stop_sending.items.len);
 }
 
-test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
+fn clientReceiveKeepsFrameError(comptime classified: bool) !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40 };
     const alpn = [_][]const u8{"hq-interop"};
@@ -1406,19 +1463,35 @@ test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
     var scratch: [128]u8 = undefined;
     try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
     try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram));
+    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrDiscard(10, &scratch, invalid_datagram));
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
     try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
 
-    const received = try client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram);
-    try std.testing.expect(received.receive == null);
-    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
+    const close_datagram = if (classified) close: {
+        try std.testing.expectError(error.InvalidPacket, client.receiveWithRoutePathOrDiscard(10, &scratch, invalid_datagram));
+        break :close (try client.pollApplicationDatagramWithRoutePath(10)) orelse return error.TestUnexpectedResult;
+    } else close: {
+        const received = try client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram);
+        try std.testing.expect(received.receive == null);
+        try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
+        const close_deadline = received.next_deadline orelse return error.TestUnexpectedResult;
+        try std.testing.expect(close_deadline == .close_timeout);
+        break :close received.outbound_application orelse return error.TestUnexpectedResult;
+    };
     try std.testing.expectEqual(transport_types.ConnectionState.closing, client.transport.connection.connectionState());
-    const close_datagram = received.outbound_application orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(close_datagram.datagram);
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
-    const close_deadline = received.next_deadline orelse return error.TestUnexpectedResult;
+    const close_deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expect(close_deadline == .close_timeout);
+}
+
+test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
+    try clientReceiveKeepsFrameError(false);
+}
+
+test "Tls13ClientEndpoint classified receive preserves authenticated frame errors" {
+    try clientReceiveKeepsFrameError(true);
 }
 
 test "Tls13ClientEndpoint receive close drain reports zero output capacity" {
@@ -2439,6 +2512,28 @@ test "Tls13ClientEndpoint installs Version Negotiation follow-up route" {
         .scid = &original_dcid,
         .versions = &server_versions,
     });
+    for ([_]bool{ false, true }) |classified| {
+        var receiver = try Tls13ClientEndpoint.init(
+            std.testing.allocator,
+            117,
+            path,
+            .{ .active_migration_disabled = false },
+            .{ .chosen_version = .v2, .available_versions = &available_versions },
+            .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+            original_dcid,
+            client_scid,
+        );
+        defer receiver.deinit();
+        const receiver_initial = try receiver.begin(1, &scratch);
+        defer std.testing.allocator.free(receiver_initial);
+        const received = if (classified)
+            (try receiver.receiveWithRoutePathOrDiscard(2, &scratch, vn_writer.getWritten())) orelse return error.TestUnexpectedResult
+        else
+            try receiver.receiveWithRoutePath(2, &scratch, vn_writer.getWritten());
+        try std.testing.expectEqual(@as(?packet.Version, .v1), received.receive.transport.version_negotiation_selected_version);
+        try std.testing.expect(received.outbound_initial == null);
+        try std.testing.expect(received.outbound_handshake == null);
+    }
     const followup = (try client.processVersionNegotiationFollowupRoute(
         2,
         vn_writer.getWritten(),

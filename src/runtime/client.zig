@@ -1141,7 +1141,7 @@ pub fn ClientForTuple(comptime Path: type) type {
                 const peer = Family.fromIp(from) orelse return;
                 if (!peer.eql(self.client.path.remote)) return;
             }
-            const result = self.client.receiveWithRoutePath(self.nowNanos(), &self.scratch, data) catch |err| {
+            const result = (self.client.receiveWithRoutePathOrDiscard(self.nowNanos(), &self.scratch, data) catch |err| {
                 if (err == error.ConnectionClosed and self.close_initiated) {
                     self.checkConnectionClose();
                     return;
@@ -1157,7 +1157,7 @@ pub fn ClientForTuple(comptime Path: type) type {
                 }
                 self.recordHandshakeError(err);
                 return;
-            };
+            }) orelse return;
             if (result.outbound_initial) |o| {
                 self.socket.send(self.io, &self.server_address, o.datagram) catch {};
                 self.allocator.free(o.datagram);

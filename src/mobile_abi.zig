@@ -863,7 +863,7 @@ test "mobile client connect timeout bounds a silent UDP peer" {
     try std.testing.expect(quicz_mobile_client_handshake_error(client) == null);
 }
 
-test "mobile IPv4 handshake ignores a STUN packet from another sender" {
+fn mobileHandshakeIgnoresSTUN(comptime from_peer: bool) !void {
     const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     const peer = try address.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(std.testing.io);
@@ -911,20 +911,31 @@ test "mobile IPv4 handshake ignores a STUN packet from another sender" {
     var bound: Ipv4Endpoint = undefined;
     try std.testing.expectEqual(code(.ok), quicz_mobile_client_bound_ipv4(handle, &bound));
     try std.testing.expectEqual(bound.port, initial.from.ip4.port);
-    const packet = quicz.connectivity.stun.encodeBindingSuccessIpv4(@splat(0x81), .{ 127, 0, 0, 1 }, foreign.address.ip4.port);
+    const sender = if (from_peer) peer else foreign;
+    const packet = quicz.connectivity.stun.encodeBindingSuccessIpv4(@splat(0x81), .{ 127, 0, 0, 1 }, sender.address.ip4.port);
     const injected = std.Io.Timestamp.now(std.testing.io, .awake);
-    try foreign.send(std.testing.io, &initial.from, &packet);
+    try sender.send(std.testing.io, &initial.from, &packet);
     worker.join();
     joined = true;
     const after_injection_ms = injected.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).toMilliseconds();
     const state = stateFromHandle(quicz.endpoint.Udp4Tuple, handle).?;
     const failure = if (state.client.handshake_error) |err| @errorName(err) else "none";
-    std.debug.print("foreign-source handshake: initial_bytes={d} foreign_bytes={d} result={d} elapsed_ms={d} after_injection_ms={d} failure={s}\n", .{
-        initial.data.len, packet.len, wait.result, wait.elapsed_ms, after_injection_ms, failure,
+    std.debug.print("{s} handshake: initial_bytes={d} injected_bytes={d} result={d} elapsed_ms={d} after_injection_ms={d} failure={s}\n", .{
+        if (from_peer) "configured-peer" else "foreign-source", initial.data.len, packet.len,
+        wait.result,                                            wait.elapsed_ms,  after_injection_ms,
+        failure,
     });
     try std.testing.expectEqual(code(.connection_timed_out), wait.result);
     try std.testing.expect(wait.elapsed_ms >= 2_900);
     try std.testing.expect(quicz_mobile_client_handshake_error(handle) == null);
+}
+
+test "mobile IPv4 handshake ignores a STUN packet from another sender" {
+    try mobileHandshakeIgnoresSTUN(false);
+}
+
+test "mobile IPv4 handshake ignores a STUN packet from its configured peer" {
+    try mobileHandshakeIgnoresSTUN(true);
 }
 
 test "mobile punch diagnostics retain silent peer counters on failure" {
