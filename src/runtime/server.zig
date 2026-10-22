@@ -966,6 +966,121 @@ test "metrics snapshot publishes IPv6 closure during sustained valid receive" {
     try metricsSnapshotDuringSustainedReceive(IPv6Server);
 }
 
+fn pendingRecoveryKeepsPeer(comptime Runtime: type) !void {
+    const allocator = std.testing.allocator;
+    const base_io = std.testing.io;
+    const protection = quicz.protection;
+    const Path = if (Runtime == Server) endpoint.Udp4Tuple else endpoint.Udp6Tuple;
+    const Family = @import("udp_address.zig").ForTuple(Path);
+    const peer_secret: [protection.traffic_secret_len]u8 = @splat(0x51);
+    const local_secret: [protection.traffic_secret_len]u8 = @splat(0x52);
+    const bind_address: std.Io.net.IpAddress = if (Runtime == Server) .{ .ip4 = .loopback(0) } else .{ .ip6 = .loopback(0) };
+    const owner_peer = try bind_address.bind(base_io, .{ .mode = .dgram, .protocol = .udp });
+    defer owner_peer.close(base_io);
+    const triggering_peer = try bind_address.bind(base_io, .{ .mode = .dgram, .protocol = .udp });
+    defer triggering_peer.close(base_io);
+    const Clock = struct {
+        var tick: i64 = 10;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = tick };
+        }
+    };
+    Clock.tick = 10;
+    var vtable = base_io.vtable.*;
+    vtable.now = Clock.now;
+    var server = try Runtime.init(allocator, .{ .userdata = base_io.userdata, .vtable = &vtable }, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 2,
+    });
+    defer server.deinit();
+    for (1..3) |handle| {
+        const tag: u8 = @intCast(handle);
+        const cid: [8]u8 = @splat(tag);
+        const peer_cid: [8]u8 = @splat(tag + 0x10);
+        const peer = if (handle == 1) owner_peer.address else triggering_peer.address;
+        const record = try allocator.create(ServerRecord);
+        {
+            errdefer allocator.destroy(record);
+            record.* = .{ .handle = handle, .transport = try Tls13ServerTransport.init(allocator, .{}, .{}) };
+            errdefer record.deinit();
+            try record.transport.setOriginalDestinationConnectionId(&cid);
+            try record.transport.setLocalInitialSourceConnectionId(&cid);
+            try record.transport.setPeerInitialSourceConnectionId(&peer_cid);
+            try record.connectionRef().installOneRttTrafficSecrets(.{ .local = local_secret, .peer = peer_secret });
+            try record.connectionRef().validatePeerAddress();
+            try record.connectionRef().confirmHandshake();
+            try server.server_ep.records.adopt(handle, record);
+        }
+        const path = Path{ .local = Family.fromIp(server.socket.address).?, .remote = Family.fromIp(peer).? };
+        try server.server_ep.lifecycle.registerConnectionId(handle, &cid, path, .{ .active_migration_disabled = true });
+    }
+    const owner_record = server.server_ep.records.get(1).?;
+    try owner_record.connectionRef().sendPing();
+    const dropped = (try server.server_ep.pollDatagramWithRoutePathWithScratch(Clock.tick, .application)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(dropped.datagram);
+    try std.testing.expectEqual(@as(u64, 1), dropped.connection_id);
+    try server.server_ep.lifecycle.armRecoveryTimerFromConnection(1, owner_record.connectionRef());
+    const deadline = (try server.server_ep.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), deadline.connection_id);
+    try std.testing.expectEqual(quicz.endpoint_types.EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    Clock.tick = deadline.deadline_nanos;
+
+    const triggering_cid: [8]u8 = @splat(2);
+    const incoming = try protection.protectShortPacketAes128(allocator, .{
+        .dcid = &triggering_cid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, .{ .len = 4, .truncated_packet_number = 0 }, protection.deriveAes128PacketProtectionKeys(peer_secret), &.{0x01});
+    defer allocator.free(incoming);
+    server.processDatagram(server.io, allocator, triggering_peer.address, incoming);
+    const triggering_record = server.server_ep.records.get(2).?;
+    try std.testing.expectEqual(@as(u64, 1), triggering_record.connectionRef().next_peer_packet_number);
+
+    const owner_peer_cid: [8]u8 = @splat(0x11);
+    var misrouted_packets: usize = 0;
+    var owner_packets: usize = 0;
+    var buffer: [2048]u8 = undefined;
+    for (0..8) |_| {
+        const received = triggering_peer.receiveTimeout(base_io, &buffer, .{
+            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(50) },
+        }) catch |err| switch (err) {
+            error.Timeout => break,
+            else => return err,
+        };
+        if (received.data.len >= 9 and received.data[0] & 0x80 == 0 and
+            std.mem.eql(u8, received.data[1..9], &owner_peer_cid)) misrouted_packets += 1;
+    }
+    for (0..8) |_| {
+        const received = owner_peer.receiveTimeout(base_io, &buffer, .{
+            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(50) },
+        }) catch |err| switch (err) {
+            error.Timeout => break,
+            else => return err,
+        };
+        if (received.data.len >= 9 and received.data[0] & 0x80 == 0 and
+            std.mem.eql(u8, received.data[1..9], &owner_peer_cid)) owner_packets += 1;
+    }
+    if (misrouted_packets != 0 or owner_packets == 0) {
+        std.debug.print("recovery routing: ipv6={} owner_received={d} misrouted={d}\n", .{
+            Runtime == IPv6Server, owner_packets, misrouted_packets,
+        });
+    }
+    try std.testing.expectEqual(@as(usize, 0), misrouted_packets);
+    try std.testing.expect(owner_packets != 0);
+}
+
+test "IPv4 pending recovery keeps its peer during another connection's receive" {
+    try pendingRecoveryKeepsPeer(Server);
+}
+
+test "IPv6 pending recovery keeps its peer during another connection's receive" {
+    try pendingRecoveryKeepsPeer(IPv6Server);
+}
+
 fn enqueueReceiveTestDatagram(server: anytype, marker: u8, pooled: bool) !void {
     const allocator = std.testing.allocator;
     const buffer = if (pooled)
@@ -2062,7 +2177,9 @@ pub fn ServerForTuple(comptime Path: type) type {
                         else => {},
                     }
                     for (pending_out[0..step.pending_drain.datagrams_written]) |o| {
-                        self.socket.send(io, &dest, o.datagram) catch {};
+                        // The pending sweep can emit output for another connection.
+                        var destination = Family.toIp(o.path.remote);
+                        self.socket.send(io, &destination, o.datagram) catch {};
                         allocator.free(o.datagram);
                     }
                 },
