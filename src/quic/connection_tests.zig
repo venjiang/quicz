@@ -52846,6 +52846,136 @@ test "processProtectedShortDatagram acknowledges reordered packets with ACK rang
     try std.testing.expectEqual(@as(?u64, 2), server.pendingAckLargest(.application));
 }
 
+test "pacing query retains only an actual blocked poll without consuming state" {
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 1200 });
+    defer conn.deinit();
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+    try std.testing.expectError(error.InvalidPacket, conn.pollProtectedShortDatagramWithInstalledKeys(0, &dcid));
+    try conn.confirmHandshake();
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "paced payload", false);
+    conn.recovery_state.min_rtt_ns = 100 * ms;
+    conn.recovery_state.smoothed_rtt_ns = 100 * ms;
+    conn.recovery_state.congestion_window = 12_000;
+    conn.tx_pacer.budget = 0;
+    conn.tx_pacer.last_sent_ns = 0;
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+    try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.client) == null);
+    const before = conn.tx_pacer;
+    try std.testing.expectEqual(@as(?i64, 8 * ms), conn.pacingDeadline());
+    try std.testing.expectEqual(@as(?i64, 8 * ms), conn.pacingDeadline());
+    try std.testing.expectEqualDeep(before, conn.tx_pacer);
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPacketNumber(.application));
+    try std.testing.expectEqualStrings("paced payload", conn.send_queue.items[0].data);
+
+    try std.testing.expectError(error.InvalidPacket, conn.pollProtectedShortDatagramWithInstalledKeys(0, &dcid));
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+    try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.client) == null);
+    try conn.closeApplication(0, "closed");
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+}
+
+test "pacing output keeps congestion admission and queued control state" {
+    for ([_]bool{ false, true }) |has_path_response| {
+        const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+        const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+        var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 1200 });
+        defer conn.deinit();
+        try conn.confirmHandshake();
+        if (has_path_response) {
+            var input: [32]u8 = undefined;
+            var out = buffer.fixedWriter(&input);
+            try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = .{ 1, 2, 3, 4, 5, 6, 7, 8 } } });
+            try conn.processDatagram(0, out.getWritten());
+        }
+        const stream_id = try conn.openStream();
+        try conn.sendOnStream(stream_id, "paced payload", false);
+        conn.recovery_state.min_rtt_ns = 100 * ms;
+        conn.recovery_state.smoothed_rtt_ns = 100 * ms;
+        conn.recovery_state.congestion_window = 12_000;
+        conn.recovery_state.bytes_in_flight = 12_000;
+        conn.tx_pacer.budget = 0;
+        conn.tx_pacer.last_sent_ns = 0;
+        try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.client) == null);
+        try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+        conn.tx_pacer.budget = conn.tx_pacer.maxBurstSize();
+        try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.client) == null);
+        try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+        try std.testing.expectEqual(@as(u64, 0), conn.nextPacketNumber(.application));
+        try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+        try std.testing.expectEqual(@as(usize, @intFromBool(has_path_response)), conn.pending_path_responses.items.len);
+    }
+}
+
+test "pacing permits ACK-only output without consuming queued STREAM data" {
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 1200 });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    try conn.processDatagram(0, &.{0x01});
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "paced payload", false);
+    conn.recovery_state.min_rtt_ns = 100 * ms;
+    conn.recovery_state.smoothed_rtt_ns = 100 * ms;
+    conn.recovery_state.congestion_window = 12_000;
+    conn.tx_pacer.budget = 0;
+    conn.tx_pacer.last_sent_ns = 0;
+
+    const datagram = (try conn.pollProtectedShortDatagram(0, &dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.client, datagram, dcid.len, 0);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    try std.testing.expect(decoded.frame == .ack);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+    try std.testing.expectEqualStrings("paced payload", conn.send_queue.items[0].data);
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPacketNumber(.application));
+}
+
+test "pacing permits PATH_RESPONSE without consuming queued STREAM data" {
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 1200 });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    const challenge = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var input: [32]u8 = undefined;
+    var input_writer = buffer.fixedWriter(&input);
+    try frame.encodeFrame(input_writer.writer(), .{ .path_challenge = .{ .data = challenge } });
+    try conn.processDatagram(0, input_writer.getWritten());
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "paced payload", false);
+    conn.recovery_state.min_rtt_ns = 100 * ms;
+    conn.recovery_state.smoothed_rtt_ns = 100 * ms;
+    conn.recovery_state.congestion_window = 12_000;
+    conn.tx_pacer.budget = 0;
+    conn.tx_pacer.last_sent_ns = 0;
+
+    const datagram = (try conn.pollProtectedShortDatagram(0, &dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.client, datagram, dcid.len, 0);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var ack = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&ack.frame, std.testing.allocator);
+    try std.testing.expect(ack.frame == .ack);
+    var response = try frame.decodeFrameSlice(opened.packet.plaintext[ack.len..], std.testing.allocator);
+    defer frame.deinitFrame(&response.frame, std.testing.allocator);
+    try std.testing.expect(response.frame == .path_response);
+    try std.testing.expectEqualSlices(u8, &challenge, &response.frame.path_response.data);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+    try std.testing.expectEqualStrings("paced payload", conn.send_queue.items[0].data);
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expect(conn.sent_packets.items[0].stream_frame == null);
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPacketNumber(.application));
+}
+
 test "pollProtectedShortDatagram emits protected PING and ACK-only response" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };

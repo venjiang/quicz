@@ -175,6 +175,42 @@ const OpenStreamRequest = struct {
     result: ?u64 = null,
 };
 
+test "pacing client wait observes budget readiness without new traffic" {
+    // This query reads only the initialized transport connection and keepalive deadline.
+    // No socket or runtime task participates in this controlled-clock test.
+    var client: Client = undefined;
+    client.client.transport.connection = try quicz.Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 1200 });
+    defer client.client.transport.connection.deinit();
+    client.next_keepalive_nanos = 10 * std.time.ns_per_s;
+    const conn = &client.client.transport.connection;
+    try conn.confirmHandshake();
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "paced payload", false);
+    conn.recovery_state.min_rtt_ns = 100 * std.time.ns_per_ms;
+    conn.recovery_state.smoothed_rtt_ns = 100 * std.time.ns_per_ms;
+    conn.recovery_state.congestion_window = 12_000;
+    conn.tx_pacer.budget = 0;
+    conn.tx_pacer.last_sent_ns = 0;
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &dcid);
+    try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.client) == null);
+
+    const timeout = client.nextDriveTimeout();
+    const ready_at: i64 = switch (timeout) {
+        .deadline => |deadline| @intCast(deadline.raw.nanoseconds),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(i64, 8 * std.time.ns_per_ms), ready_at);
+    client.next_keepalive_nanos = std.time.ns_per_ms;
+    const earlier = client.nextDriveTimeout();
+    try std.testing.expectEqual(@as(i96, std.time.ns_per_ms), earlier.deadline.raw.nanoseconds);
+    client.next_keepalive_nanos = 10 * std.time.ns_per_s;
+    try std.testing.expect(try conn.pollProtectedShortDatagram(ready_at - 1, &dcid, secrets.client) == null);
+    const datagram = (try conn.pollProtectedShortDatagram(ready_at, &dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+}
+
 pub const Client = ClientForTuple(endpoint.Udp4Tuple);
 /// Native IPv6 client with an explicitly bound source socket.
 pub const IPv6Client = ClientForTuple(endpoint.Udp6Tuple);
@@ -913,6 +949,11 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                 deadline.deadline()
             else
                 null;
+            if (self.client.transport.connection.pacingDeadline()) |pacing_deadline| {
+                if (deadline_nanos == null or pacing_deadline < deadline_nanos.?) {
+                    deadline_nanos = pacing_deadline;
+                }
+            }
             if (self.next_keepalive_nanos) |keepalive_deadline| {
                 if (deadline_nanos == null or keepalive_deadline < deadline_nanos.?) {
                     deadline_nanos = keepalive_deadline;

@@ -768,6 +768,8 @@ pub const Connection = struct {
     send_queue: std.ArrayList(PendingStreamFrame),
     /// Token bucket pacer for ack-eliciting packet transmission.
     tx_pacer: pacer_module.Pacer,
+    /// Set only when protected packet polling encounters the pacing gate.
+    pacing_send_deadline: ?i64 = null,
     /// RFC 9221 outgoing DATAGRAM payloads queued by sendDatagram().
     pending_datagrams: std.ArrayList([]const u8),
     /// RFC 9221 incoming DATAGRAM payloads received from peer.
@@ -4317,6 +4319,8 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
     ) Error!?[]u8 {
+        self.pacing_send_deadline = null;
+        errdefer self.pacing_send_deadline = null;
         self.expireIdleState(now_nanos);
         self.expireCloseState(now_nanos);
         if (self.pending_close != null) {
@@ -4324,20 +4328,31 @@ pub const Connection = struct {
         }
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
-        // Pacer gate: block ack-eliciting packets when budget is exhausted.
-        // Control packets (ACK, CLOSE, PATH_RESPONSE) bypass the pacer.
-        // Before the first RTT sample, pacing is disabled (no rate estimate).
+        // Select control-only output before the general builder can coalesce
+        // STREAM data or remove obsolete queued frames.
+        var pacing_limited = false;
         if (self.recovery_state.min_rtt_ns != null and
             (self.send_queue.items.len != 0 or self.crypto_send_queue.items.len != 0))
         {
             const cwnd = self.recovery_state.congestion_window;
             const srtt: u64 = self.recovery_state.smoothed_rtt_ns;
             if (!self.tx_pacer.canSend(now_nanos, self.maxTxDatagramSize(), cwnd, srtt)) {
-                return null;
+                pacing_limited = true;
+                self.pacing_send_deadline = self.tx_pacer.nextSendTime(now_nanos, self.maxTxDatagramSize(), cwnd, srtt);
             }
         }
 
-        var built = (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
+        var built = if (pacing_limited) limited: {
+            if (self.application_packet_space_discarded) return error.InvalidPacket;
+            const ack = self.pendingAckFrame(.application);
+            if (self.pending_path_responses.items.len != 0) {
+                break :limited try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack);
+            }
+            if (ack) |pending| {
+                break :limited try self.buildProtectedShortControlPacket(dcid, keys, key_phase, try ackFrameWireLen(pending), pending, false);
+            }
+            return null;
+        } else (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
         errdefer {
             built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
@@ -4349,6 +4364,7 @@ pub const Connection = struct {
         else
             !self.canSendToPeerAddress(built.datagram.len))
         {
+            self.pacing_send_deadline = null;
             built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
@@ -4366,7 +4382,22 @@ pub const Connection = struct {
             const srtt: u64 = self.recovery_state.smoothed_rtt_ns;
             self.tx_pacer.onPacketSent(now_nanos, built.datagram.len, cwnd, srtt);
         }
+        if (pacing_limited) {
+            self.pacing_send_deadline = self.tx_pacer.nextSendTime(now_nanos, self.maxTxDatagramSize(), self.recovery_state.congestion_window, self.recovery_state.smoothed_rtt_ns);
+        }
         return built.datagram;
+    }
+
+    /// Return a pacing wakeup recorded by protected polling. Merge this value
+    /// with lifecycle deadlines, then poll output again when it becomes due.
+    /// This query does not consume packets, frames, or pacing budget.
+    pub fn pacingDeadline(self: *const Connection) ?i64 {
+        if (self.isClosingOrClosed() or self.pending_close != null or self.application_packet_space_discarded or
+            (self.send_queue.items.len == 0 and self.crypto_send_queue.items.len == 0)) return null;
+        if (self.pto_probe_count == 0 and self.congestion_probe_count == 0 and
+            self.availableCongestionWindow(.application) == 0) return null;
+        if (self.antiAmplificationLimitRemaining()) |remaining| if (remaining == 0) return null;
+        return self.pacing_send_deadline;
     }
 
     /// Return one protected 1-RTT short-header datagram using key-phase state.
@@ -4397,7 +4428,10 @@ pub const Connection = struct {
         now_nanos: i64,
         dcid: []const u8,
     ) Error!?[]u8 {
-        const state = self.local_one_rtt_key_phase_state orelse return error.InvalidPacket;
+        const state = self.local_one_rtt_key_phase_state orelse {
+            self.pacing_send_deadline = null;
+            return error.InvalidPacket;
+        };
         return self.pollProtectedShortDatagramWithKeyPhaseState(now_nanos, dcid, &state);
     }
 

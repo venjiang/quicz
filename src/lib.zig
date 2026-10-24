@@ -173,6 +173,7 @@ pub const AckElicitingSendAdmission = connection_rules.AckElicitingSendAdmission
 
 test {
     _ = runtime.server;
+    _ = runtime.client;
     _ = @import("runtime/ipv6_tests.zig");
     _ = protection;
     _ = address_validation_token;

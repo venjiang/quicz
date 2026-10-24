@@ -60,6 +60,22 @@ pub const Pacer = struct {
         return self.budgetAt(now_ns, cwnd, smoothed_rtt_ns) >= packet_size;
     }
 
+    /// Return the first representable time when this packet has enough budget.
+    /// This query does not consume tokens. Null means no pacing wait is needed
+    /// or the supplied clock/rate cannot represent a future send time.
+    pub fn nextSendTime(self: *const Pacer, now_ns: i64, packet_size: usize, cwnd: usize, smoothed_rtt_ns: u64) ?i64 {
+        if (cwnd == 0 or smoothed_rtt_ns == 0 or packet_size > self.maxBurstSize() or
+            self.canSend(now_ns, packet_size, cwnd, smoothed_rtt_ns)) return null;
+        const last = self.last_sent_ns orelse return null;
+        const missing = packet_size - self.budget;
+        const numerator = @as(u128, missing) * smoothed_rtt_ns * 4;
+        const denominator = @as(u128, cwnd) * 5;
+        const wait_ns = numerator / denominator + @intFromBool(numerator % denominator != 0);
+        if (wait_ns > std.math.maxInt(i64)) return null;
+        const deadline = std.math.add(i64, last, @intCast(wait_ns)) catch return null;
+        return if (deadline > now_ns) deadline else null;
+    }
+
     /// Record that a packet was sent, deducting from budget.
     pub fn onPacketSent(self: *Pacer, now_ns: i64, packet_size: usize, cwnd: usize, smoothed_rtt_ns: u64) void {
         const current_budget = self.budgetAt(now_ns, cwnd, smoothed_rtt_ns);
@@ -154,4 +170,30 @@ test "pacer reset restores full burst" {
     p.reset();
     try std.testing.expectEqual(@as(usize, 12000), p.budget);
     try std.testing.expect(p.last_sent_ns == null);
+}
+
+test "pacing send time rounds upward without changing token state" {
+    var p = Pacer.init(1200);
+    p.budget = 1000;
+    p.last_sent_ns = 0;
+    const before = p;
+    const deadline = p.nextSendTime(200_000, 1200, 43_200, 100_000_000) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 370_371), deadline);
+    try std.testing.expect(!p.canSend(deadline - 1, 1200, 43_200, 100_000_000));
+    try std.testing.expect(p.canSend(deadline, 1200, 43_200, 100_000_000));
+    try std.testing.expectEqualDeep(before, p);
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(deadline, 1200, 43_200, 100_000_000));
+}
+
+test "pacing send time rejects absent waits and unrepresentable clocks" {
+    var p = Pacer.init(1200);
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(0, 1200, 12_000, 100_000_000));
+    p.budget = 0;
+    p.last_sent_ns = 0;
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(0, 1200, 0, 100_000_000));
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(0, 1200, 12_000, 0));
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(0, p.maxBurstSize() + 1, 12_000, 100_000_000));
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(0, 1200, 1, std.math.maxInt(u64)));
+    p.last_sent_ns = std.math.maxInt(i64) - 1;
+    try std.testing.expectEqual(@as(?i64, null), p.nextSendTime(p.last_sent_ns.?, 1, 3, 7));
 }

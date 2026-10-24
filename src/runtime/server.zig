@@ -547,6 +547,47 @@ const ConnState = struct {
     }
 };
 
+test "pacing server wait observes budget readiness without new traffic" {
+    // Initialize only the state read by the deadline selector. No socket is opened.
+    var server: Server = undefined;
+    server.mutex = .unlocked;
+    server.shared_punch_coordinator = null;
+    server.conns = std.AutoHashMap(u64, *ConnState).init(std.testing.allocator);
+    defer server.conns.deinit();
+    server.server_ep = try ServerEndpointForTuple(endpoint.Udp4Tuple).initWithCapacity(std.testing.allocator, 1, .{});
+    defer server.server_ep.deinit();
+    const record = try std.testing.allocator.create(ServerRecord);
+    record.* = .{ .handle = 1, .transport = try Tls13ServerTransport.init(std.testing.allocator, .{ .max_datagram_size = 1200 }, .{}) };
+    try server.server_ep.records.adopt(1, record);
+    const conn = record.connectionRef();
+    try conn.confirmHandshake();
+    try conn.validatePeerAddress();
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "paced payload", false);
+    conn.recovery_state.min_rtt_ns = 100 * std.time.ns_per_ms;
+    conn.recovery_state.smoothed_rtt_ns = 100 * std.time.ns_per_ms;
+    conn.recovery_state.congestion_window = 12_000;
+    conn.tx_pacer.budget = 0;
+    conn.tx_pacer.last_sent_ns = 0;
+    var state = ConnState{ .handle = 1, .conn = conn, .peer = .{ .ip4 = .loopback(0) } };
+    try server.conns.put(1, &state);
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &dcid);
+    try std.testing.expect(try conn.pollProtectedShortDatagram(0, &dcid, secrets.server) == null);
+
+    const ready_at: i64 = switch (server.nextDriveTimeout()) {
+        .deadline => |deadline| @intCast(deadline.raw.nanoseconds),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(i64, 8 * std.time.ns_per_ms), ready_at);
+    const datagram = (try conn.pollProtectedShortDatagram(ready_at, &dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    try std.testing.expectEqual(@as(?i64, null), conn.pacingDeadline());
+    // Runtime state can outlive the endpoint-owned record and its Connection.
+    try server.server_ep.records.remove(1);
+    try std.testing.expect(server.nextDriveTimeout() == .none);
+}
+
 test "connection drain releases every concurrent stream flush" {
     const FlushWaiters = struct {
         var waiting: std.atomic.Value(u32) = .init(0);
@@ -2259,16 +2300,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                 // changes wake_id so the compare cannot match. Without this
                 // check the drive could park forever past a stop request.
                 if (@atomicLoad(bool, &self.stopping, .acquire)) break;
-                const timeout: std.Io.Timeout = timeout: {
-                    var deadline_nanos: ?i64 = null;
-                    if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
-                    if (self.shared_punch_coordinator) |coordinator| if (coordinator.nextDeadlineMs()) |deadline_ms| {
-                        const nanos = std.math.mul(u64, deadline_ms, 1_000_000) catch std.math.maxInt(u64);
-                        const punch_nanos: i64 = @intCast(@min(nanos, std.math.maxInt(i64)));
-                        if (deadline_nanos == null or punch_nanos < deadline_nanos.?) deadline_nanos = punch_nanos;
-                    };
-                    break :timeout if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
-                };
+                const timeout = self.nextDriveTimeout();
                 self.publishConnectionState();
                 // Re-check work whose notifyDrive bump was captured by the
                 // snapshot. Publication may also wake a handler that releases
@@ -2276,6 +2308,27 @@ pub fn ServerForTuple(comptime Path: type) type {
                 if (self.hasPendingWork()) continue;
                 io.futexWaitTimeout(u32, &self.wake_id.raw, snapshot, timeout) catch return;
             }
+        }
+
+        fn nextDriveTimeout(self: *ServerSelf) std.Io.Timeout {
+            var deadline_nanos: ?i64 = null;
+            if (self.server_ep.nextDeadlineWithScratch() catch null) |deadline| deadline_nanos = deadline.deadline_nanos;
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            var connections = self.conns.valueIterator();
+            while (connections.next()) |state| {
+                // A lifecycle query can retire a record before its handler releases the runtime state.
+                if (self.server_ep.records.get(state.*.handle) == null) continue;
+                if (state.*.conn.pacingDeadline()) |pacing_deadline| {
+                    if (deadline_nanos == null or pacing_deadline < deadline_nanos.?) deadline_nanos = pacing_deadline;
+                }
+            }
+            self.mutex.unlock();
+            if (self.shared_punch_coordinator) |coordinator| if (coordinator.nextDeadlineMs()) |deadline_ms| {
+                const nanos = std.math.mul(u64, deadline_ms, 1_000_000) catch std.math.maxInt(u64);
+                const punch_nanos: i64 = @intCast(@min(nanos, std.math.maxInt(i64)));
+                if (deadline_nanos == null or punch_nanos < deadline_nanos.?) deadline_nanos = punch_nanos;
+            };
+            return if (deadline_nanos) |deadline| .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = .awake } } else .none;
         }
 
         /// Accept the next new connection (polls with std.time.sleep).
