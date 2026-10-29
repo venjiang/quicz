@@ -5,7 +5,9 @@
 记录日期：2026-10-29。
 
 状态：review 修复已通过复审。分支为 `feat/zig-0.17`。
-macOS 原生验证和 iOS 设备、模拟器静态库构建已通过。全量互通矩阵仍待 CI 验证。
+完整运行核验已结束，但测试和示例没有全部通过。
+本地跨实现矩阵为 13/13，另有 4 个扩展场景通过。远端 CI 仍未验收。
+iOS 设备、模拟器静态库构建均通过，模拟器 C ABI 运行也通过。实体设备尚未运行。
 
 迁移前基线：提交 `7beeffa2728b77165be7f99ec3a33a79ec57ab89` 使用 Zig 0.16.0。
 本机默认 `zig` 仍为 0.16.0，`zig17` 为 0.17.0。
@@ -47,6 +49,8 @@ IPv4 P2P 的真实网络故障仍需单独定位，版本升级不构成该故�
 - [x] IPv4、IPv6、P2P 和共享 socket 的相关回归通过。
 - [x] 移动 C ABI 的本机测试通过，包括超时、取消和 socket 交接。
 - [x] 受影响的平台交叉编译通过。
+- [x] 核验全部 97 个 `run-*` 入口对应的程序，并与原始基线对照失败项。
+- [ ] 解决既有运行失败，使所有示例和集成检查通过。
 - [ ] CI 完整外部互通矩阵通过。
 - [x] 同步运行方式和工具链文档，并记录无法执行的验收项。
 - [x] `git diff --check` 通过，复审确认没有混入协议或功能改动。
@@ -84,7 +88,83 @@ benchmark 的元数据查询和构建使用同一个 `${ZIG:-zig}`。
 
 Retry 进程场景另有 `TokenExpired` 失败。
 同一场景在原始 0.16.0 提交上也失败，因此本轮将其记录为既有问题。
-本轮未扩大范围修复该问题，也未重新运行完整跨实现互通矩阵。
+迁移和 review 修复阶段没有扩大范围修复该问题。
+后续完整运行结果见下一节。
+
+### 完整运行核验
+
+核验日期为 2026-10-29。被测源码提交为 `5f02c0c0`，原始基线为 `7beeffa2`。
+迁移分支使用 `zig17` 0.17.0，原始基线使用默认 `zig` 0.16.0。
+基线源码从原始提交提取到临时目录，不修改 main 工作区。
+
+本轮结果如下：
+
+- 根测试使用独立缓存实际执行 2021/2021，全部通过。库测试占 2000 项，移动 ABI 占 20 项，runtime keepalive 占 1 项。
+- CLI 使用独立缓存实际执行 33/33，全部通过。
+- runtime metrics 实际执行 27/27，peer punch 实际执行 13/13，全部通过。专项 mobile ABI 复用本轮根测试的有效结果。
+- 构建帮助列出的 97 个 `run-*` 入口对应程序均已核验。默认或配对调用中，85 个通过，12 个失败。
+- 需要常驻服务端的程序使用独立端口配对运行。部分配对直接调用同一构建图安装的二进制，不以服务端仅启动作为通过证据。
+- `bench-suite` 实际运行六个基准程序并通过。结果只证明可运行，不构成与 0.16 的性能对比。
+- QUIC 跨实现矩阵为 13/13。正向覆盖 quic-go、quiche、s2n-quic 的三个场景，反向覆盖 quic-go、quiche、s2n-quic、quinn。
+- 该矩阵使用 CA 签发的叶证书，保留证书及主机名校验。Go 的 multiconnect、keyupdate、v2、chacha20 现有场景另为 4/4。
+- H3 双向请求、cookie 和重定向配对检查通过。自签名 H3 演示使用其既有跳过校验方式，不归入上述证书验证矩阵。
+- iOS 18.6 模拟器通过公开 C ABI 完成 CA 校验、连接、流回显和关闭。该结果不能代替实体设备验收。
+- 工具链脚本回归通过。默认编译器和全局标准库保持不变。
+
+下面 12 个入口在 0.17 和原始 0.16 基线均失败。
+两版本出现相同错误或失败断言。这些证据表明问题已存在，不能据此推定根因，也不能排除其他性能差异。
+
+| 入口 | 两版本的失败证据 |
+| --- | --- |
+| `run-transport-parameters` | `TransportParameterExampleFailed`。服务端 stateless reset token 的非空断言失败。 |
+| `run-loss-recovery` | `LossRecoveryExampleFailed`。拥塞窗口增长断言失败。 |
+| `run-pto-recovery` | `PtoRecoveryExampleFailed`。anti-amplification 下的过期 timer 处理断言失败。 |
+| `run-path-validation` | `UnexpectedState`。pending path challenge 计数断言失败。 |
+| `run-multi-conn-test` | `ConnectionLeak`。回显结束后的回收窗口仍有存活连接。 |
+| `run-tls-openssl-backend-adapter` | `InvalidPacket`。示例再次驱动已丢弃的 Handshake space。 |
+| `run-tls-openssl-pair-transcript` | `UnexpectedState`。`recoveryTimerCount() == 0` 断言失败。 |
+| `run-udp-endpoint-loopback` | `UnexpectedState`。示例没有取得预期的 poll 结果。 |
+| `run-udp-handshake-keys-loopback` | `UnexpectedState`。`recoveryTimerCount() == 0` 断言失败。 |
+| `run-udp-crypto-stream-loopback` | `UnexpectedState`。`recoveryTimerCount() == 0` 断言失败。 |
+| `run-udp-key-update-loopback` | `UnexpectedState`。ACK key phase 断言失败。 |
+| `run-scale-bench` | `ScaleFailed`。默认 500 个客户端中，0.17 成功 97 个，0.16 成功 114 个。 |
+
+以下问题不计入上述 12 个默认入口失败，但仍需处理：
+
+1. `run-interop-event-loopback` 的默认场景通过，额外的 `persistent` 场景在两版本均超时。
+2. `scripts/cli_h3_live_test.sh --skip-live` 在两版本均未通过 OpenSSL 检查。
+   前四项 H3、POST、resolve 和 HTTPS 检查通过。独立捕获显示 HTTP 200 后出现 `unexpected eof while reading`，OpenSSL 退出码为 1。
+3. CLI 的 TCP TLS 路径在发送超过记录缓冲容量的大响应时，会在 `cli/src/tls_tcp.zig:109` 越界并中止进程。
+   大目录列表在两版本均复现。该问题属于既有 CLI 服务端缺陷，不是 QUIC transport 的升级修复。
+4. 前述 Retry 进程场景的 `TokenExpired` 仍未修复。
+
+本轮没有修改核心协议代码，也没有削弱断言或跳过失败测试。
+不能将本次核验表述为“所有测试及示例都通过”。
+
+复查时可以使用以下命令。`RUN` 应指向新的验收目录。
+
+```sh
+zig17 build test --cache-dir "$RUN/root-cache" --test-timeout 30s --summary all -j2
+(cd cli && zig17 build test --cache-dir "$RUN/cli-cache" --test-timeout 30s --summary all -j2)
+zig17 build test-runtime-metrics test-peer-punch test-mobile-abi --summary all -j1
+zig17 build bench-suite --summary all -j1
+ZIG=zig17 bash scripts/cli_h3_live_test.sh --skip-live
+bash scripts/test_zig_toolchain_scripts.sh
+```
+
+每个失败入口都可以用 `zig17 build <入口>` 复查。
+persistent 场景使用 `zig17 build run-interop-event-loopback -- persistent`。
+原始 0.16 基线需要在独立目录使用原始源码构建，不应直接在迁移分支切换编译器。
+
+本机日志、逐项退出码、配对参数和基线结果保存在
+`/private/tmp/quicz-zig017-validation.U8HGZg`。
+其中 `run-targets-results.json` 汇总入口覆盖，`matrix-results.json` 汇总 17 项互通结果。
+`baseline-*-results.json` 保存基线对照。临时目录含测试私钥，不提交到仓库。
+这些本机文件可能被系统清理，仓库保留本节的源码版本、命令和失败清单。
+
+尚未完成的验收包括远端 CI 矩阵和实体 iOS 设备运行。
+Linux 运行时、本地回环之外的 IPv4 P2P 连通性，以及所有参数组合不在本轮运行证明范围内。
+后续应单独安排既有失败修复。优先处理 CLI 大响应中止、连接回收、规模连接和 persistent 超时。
 
 ### 收益与风险
 
