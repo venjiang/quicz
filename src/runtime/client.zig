@@ -1308,6 +1308,9 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
         /// Route one datagram through the client endpoint, send the TLS outbound
         /// it returns, deliver stream data, and drain the responses (ACKs).
         fn processDatagram(self: *Self, from: std.Io.net.IpAddress, data: []const u8) void {
+            // Datagram size is not authenticated (RFC 9000 section 14).
+            // Discard size violations without failing the handshake.
+            if (data.len == 0 or data.len > self.client.transport.connection.config.max_datagram_size) return;
             if (self.punch_responder) |responder| {
                 switch (responder.handle(from, self.nowNanos(), data)) {
                     .not_punch => {},
@@ -1525,6 +1528,42 @@ test "runtime client datagram limits preserve legacy configuration and defaults"
     try std.testing.expectEqual(@as(u64, 1200), limited.client.transport.connection.localTransportParameters().max_udp_payload_size);
     try std.testing.expectEqual(@as(u16, 1200), ipv6.client.transport.connection.config.max_datagram_size);
     try std.testing.expectEqual(@as(u64, 1200), ipv6.client.transport.connection.localTransportParameters().max_udp_payload_size);
+}
+
+test "runtime client discards oversized datagrams without failing a pending handshake" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const protection = quicz.protection;
+    const server_cid: [8]u8 = @splat(0xa1);
+    const secrets = try protection.deriveInitialSecrets(.v1, &server_cid);
+    var plaintext: [1472 - 1 - 8 - 4 - 16]u8 = @splat(0);
+    plaintext[0] = 1;
+    inline for (.{ Client, ClientForTupleWithDatagramLimit(endpoint.Udp4Tuple, 1200), IPv6Client }) |Runtime| {
+        var client = try Runtime.init(allocator, io, if (Runtime == IPv6Client)
+            .{ .server_port = 4433, .bind_addr = .loopback(0), .alpn = &.{} }
+        else
+            .{ .server_port = 4433, .alpn = &.{} });
+        defer client.deinit();
+        const client_cid = client.client.transport.local_source_connection_id;
+        const conn = &client.client.transport.connection;
+        try conn.setLocalInitialSourceConnectionId(&client_cid);
+        try conn.setPeerInitialSourceConnectionId(&server_cid);
+        try conn.installOneRttTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+        client.handshake_started = true;
+        const datagram = try protection.protectShortPacketAes128(allocator, .{
+            .dcid = &client_cid,
+            .key_phase = false,
+            .packet_number = 0,
+        }, .{ .len = 4, .truncated_packet_number = 0 }, secrets.server, &plaintext);
+        defer allocator.free(datagram);
+        try std.testing.expectEqual(@as(usize, 1472), datagram.len);
+        client.processDatagram(client.server_address, datagram);
+        client.processDatagram(client.server_address, &.{});
+        try std.testing.expectEqual(Runtime.handshake_pending, client.handshake_state.load(.acquire));
+        try std.testing.expect(!client.handshake_complete.isSet());
+        try std.testing.expect(client.handshakeError() == null);
+        try std.testing.expectEqual(quicz.ConnectionState.active, conn.connectionState());
+    }
 }
 
 const IPv4Config = struct {

@@ -39,12 +39,12 @@ jobs:
           curl -L https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-0.17.0" >> $GITHUB_PATH
-      # Build the quicz interop binaries (client + runtime server) and the
+      # Build the four QUIC and HTTP/3 client/server binaries and the
       # external tools (quic-go / quiche / s2n-quic servers and echo clients).
       # Cargo builds of quiche/s2n take a few minutes; this job is separate so
       # it does not slow the main build-linux job.
       - name: Build quicz interop binaries
-        run: zig build -Doptimize=fast
+        run: zig build interop-build -Doptimize=fast
       - name: Build external interop tools (Go + Cargo)
         run: bash scripts/build_interop_tools.sh
       # Forward matrix: quicz client vs external servers (handshake/transfer/verified).

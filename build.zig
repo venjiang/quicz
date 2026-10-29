@@ -2109,6 +2109,11 @@ pub fn build(b: *std.Build) void {
     run_interop_event_loopback_cmd.step.dependOn(b.getInstallStep());
     run_interop_event_loopback_cmd.addPassthruArgs();
 
+    const interop_build = b.step("interop-build", "Build the QUIC and HTTP/3 interop matrix binaries");
+    for ([_]*std.Build.Step.Compile{ exe_interop_runtime_client, exe_interop_runtime_server, exe_h3_server, exe_h3_external_client }) |artifact| {
+        interop_build.dependOn(&b.addInstallArtifact(artifact, .{}).step);
+    }
+
     const test_step = b.step("test", "Run quicz unit tests");
     const runtime_metrics_tests = b.addTest(.{ .root_module = quicz_mod, .filters = &.{
         "metrics snapshot",           "connection drain",                   "idle retirement",
