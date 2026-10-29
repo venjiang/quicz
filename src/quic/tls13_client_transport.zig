@@ -366,12 +366,16 @@ pub const Tls13ClientTransport = struct {
             if (end > datagram.len) return error.InvalidPacket;
             switch (info.packet_type) {
                 .initial => {
-                    try self.connection.processProtectedLongDatagramInSpace(.initial, now_nanos, self.server_initial_keys, datagram[offset..end]);
-                    _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
+                    if (!self.connection.packetNumberSpaceDiscarded(.initial)) {
+                        try self.connection.processProtectedLongDatagramInSpace(.initial, now_nanos, self.server_initial_keys, datagram[offset..end]);
+                        _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
+                    }
                 },
                 .handshake => {
-                    try self.connection.processProtectedHandshakeDatagramWithInstalledKeys(now_nanos, datagram[offset..end]);
-                    _ = try self.connection.driveCryptoBackendInSpace(.handshake, self.backend.cryptoBackend(), scratch);
+                    if (!self.connection.packetNumberSpaceDiscarded(.handshake)) {
+                        try self.connection.processProtectedHandshakeDatagramWithInstalledKeys(now_nanos, datagram[offset..end]);
+                        _ = try self.connection.driveCryptoBackendInSpace(.handshake, self.backend.cryptoBackend(), scratch);
+                    }
                 },
                 .zero_rtt, .retry => return error.InvalidPacket,
             }

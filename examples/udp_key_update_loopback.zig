@@ -170,7 +170,8 @@ pub fn main() !void {
     )) orelse return error.UnexpectedState;
     defer allocator.free(ack);
     const ack_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.server.hp, ack, client_dcid.len);
-    try require(!ack_key_phase);
+    try require(ack_key_phase);
+    try require(server.localOneRttKeyPhase().? == ack_key_phase);
     try server_socket.send(io, &client_socket.address, ack);
 
     const ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
@@ -287,17 +288,26 @@ pub fn main() !void {
     try client_socket.send(io, &server_socket.address, stale_generation_1_ping);
 
     const stale_ping_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    // Each endpoint retains old keys for its own PTO, not its peer's PTO.
+    var stale_time = second_update_timer.timer.deadline_nanos + 2;
+    for (0..2) |_| {
+        if (!(server.peerOneRttRetainsKeyGeneration(1) orelse return error.UnexpectedState)) break;
+        stale_time = @max(stale_time, server.oneRttKeyDiscardDeadline() orelse return error.UnexpectedState);
+        try require(server.discardExpiredOneRttKeys(stale_time));
+    }
     const stale_rejected = if (server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
         51,
         &server,
         stale_ping_received.path,
-        6,
+        stale_time,
         stale_ping_received.data,
     )) |_| false else |err| switch (err) {
         error.InvalidPacket => true,
         else => return err,
     };
     try require(stale_rejected);
+    try require(!(server.peerOneRttRetainsKeyGeneration(1) orelse return error.UnexpectedState));
+    try require(server.connectionState() == .active);
     try require(server.nextPeerPacketNumber(.application) == 3);
     try require(server.pendingAckLargest(.application).? == second_pto_ack_largest);
     try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 2);
@@ -307,7 +317,7 @@ pub fn main() !void {
     const second_ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         51,
         &server,
-        second_update_timer.timer.deadline_nanos + 3,
+        stale_time + 1,
         &client_dcid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(second_ack);
@@ -320,7 +330,7 @@ pub fn main() !void {
         41,
         &client,
         second_ack_received.path,
-        second_update_timer.timer.deadline_nanos + 4,
+        stale_time + 2,
         second_ack_received.data,
     );
     try require(second_ack_route.connection_id == 41);

@@ -47,7 +47,7 @@ It does not refer to an application domain.
   by flow control, reset, STOP_SENDING, and the stream state machine.
 - Transport parameters: QUIC handshake configuration such as stream limits,
   ACK delay, max UDP payload size, preferred_address, and version information.
-- TLS backend: the adapter around the external TLS library. The backend owns the
+- TLS backend: the boundary around the pure Zig implementation or an external TLS library. The backend owns the
   TLS transcript, traffic secrets, and QUIC TLS callbacks. quicz packetizes
   CRYPTO bytes, installs packet protection keys, and drives transport state.
 - Traffic secrets: TLS-produced inputs for Handshake and 1-RTT packet protection
@@ -171,7 +171,7 @@ The TLS backend is responsible for:
 - consuming TLS handshake bytes from QUIC CRYPTO frames;
 - producing the next TLS CRYPTO bytes;
 - exposing peer transport parameters and traffic secrets through callbacks;
-- notifying quicz when TLS considers the handshake confirmed.
+- reporting TLS handshake progress and server-side confirmation.
 
 quicz is responsible for:
 
@@ -221,6 +221,13 @@ behavior runs end to end.
 6. quicz applies peer transport parameters, installs packet protection keys, and
    discards old packet number spaces when the boundary is reached.
 
+TLS completion does not confirm a QUIC client handshake.
+The server confirms its handshake when TLS completes.
+The client confirms its handshake only after it receives `HANDSHAKE_DONE`.
+The server queues this frame without discarding pending Handshake CRYPTO output.
+Recovery retransmits `HANDSHAKE_DONE` after loss or PTO until an ACK covers a copy.
+An ACK cancels pending copies and prevents later loss of another copy from queuing the frame again.
+
 ### 1-RTT Stream Path
 
 1. The application or example opens a stream and writes data.
@@ -238,6 +245,16 @@ behavior runs end to end.
 3. The endpoint suppresses routes that must not send again and removes routing
    state for the closed connection.
 4. Recovery and timers stop producing send-side effects for cleaned-up routes.
+
+For `runtime.Client`, `close()` queues an application close without waiting.
+The caller can use `waitClosed(timeout_ms)` to retain the socket until the protocol closing or draining period ends.
+Timeout or cancellation ends only that wait. The driver remains active.
+Completion does not prove that the peer received a close packet.
+The driver answers peer packets during closing, with exponential response suppression.
+It sends no response during draining or after closure.
+`deinit()` still cancels tasks and releases resources immediately.
+Call `close()` and then `waitClosed()` before `deinit()` when the closing period must finish.
+The mobile C ABI does not change.
 
 ## Extension Entry Points
 

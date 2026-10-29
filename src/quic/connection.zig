@@ -793,6 +793,7 @@ pub const Connection = struct {
     handshake_confirmed: bool,
     pending_handshake_done: bool,
     handshake_done_sent: bool,
+    handshake_done_acked: bool,
     peer_close: ?PeerClose,
     pending_close: ?PendingCloseFrame,
     state: ConnectionState,
@@ -964,6 +965,7 @@ pub const Connection = struct {
             .handshake_confirmed = false,
             .pending_handshake_done = false,
             .handshake_done_sent = false,
+            .handshake_done_acked = false,
             .peer_close = null,
             .pending_close = null,
             .state = .active,
@@ -3561,8 +3563,8 @@ pub const Connection = struct {
     /// Process one unencrypted packet payload and queue CONNECTION_CLOSE on classified peer errors.
     ///
     /// This is the Application-space counterpart to
-    /// `processDatagramForPacketTypeOrClose()`. Existing callers that need
-    /// pure rollback behavior can continue using `processDatagram()`.
+    /// `processDatagramForPacketTypeOrClose()`. The throwing receive path does
+    /// not add a close. Frames processed before an error can still change state.
     pub fn processDatagramOrClose(
         self: *Connection,
         now_nanos: i64,
@@ -4125,9 +4127,9 @@ pub const Connection = struct {
     ///
     /// The key-phase state supplies current and next receive keys. It advances
     /// only after the packet authenticates and the decrypted frame payload is
-    /// accepted, so failed datagrams do not mutate peer key-phase state. Real
-    /// TLS traffic-secret production, key-update confirmation, and old-key
-    /// discard remain future endpoint/TLS integration work. Successful
+    /// accepted. Failed authentication does not advance key generations.
+    /// Retention deadlines still expire under the supplied clock.
+    /// This path supports both caller-owned and installed receive state. Successful
     /// server-side receive also discards installed 0-RTT receive keys.
     pub fn processProtectedShortDatagramWithKeyPhaseState(
         self: *Connection,
@@ -4164,6 +4166,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_nanos)) return;
+        _ = key_phase_state.discardExpiredPrevious(now_nanos);
         try self.validateReceivedUdpDatagramSize(datagram);
 
         const packet_space = self.packetNumberSpace(.application);
@@ -4178,19 +4181,7 @@ pub const Connection = struct {
             expected_packet_number,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.KeyUpdateError => {
-                // The packet's revealed key phase matches a previous
-                // generation whose keys were already discarded past the PTO
-                // retain window: the peer is protecting packets with keys
-                // older than the retained generation (RFC 9001 §6.5). Surface
-                // this as a KEY_UPDATE_ERROR transport close.
-                self.closeConnection(
-                    transport_error.codeValue(.key_update_error),
-                    0,
-                    "packet protected with discarded key",
-                ) catch {};
-                return error.InvalidPacket;
-            },
+            // A key-phase bit without authentication cannot prove a peer violation.
             else => return error.InvalidPacket,
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
@@ -6739,6 +6730,7 @@ pub const Connection = struct {
                 .crypto_frame = sent_crypto_frame,
                 .reset_stream_frame = built.sent_reset_stream_frame,
                 .stop_sending_frame = built.sent_stop_sending_frame,
+                .handshake_done = built.consume_handshake_done,
             });
             sent_crypto_frame = null;
         }
@@ -7125,7 +7117,7 @@ pub const Connection = struct {
     /// selected packet type, or classified semantic frame-processing failures,
     /// this wrapper queues a transport CONNECTION_CLOSE with the RFC 9000 close
     /// code before returning `InvalidPacket`. Existing callers that need pure
-    /// rollback behavior can continue using `processDatagramForPacketType()`.
+    /// error reporting without a close can use `processDatagramForPacketType()`.
     pub fn processDatagramForPacketTypeOrClose(
         self: *Connection,
         packet_type: FramePacketType,
@@ -8227,6 +8219,9 @@ pub const Connection = struct {
         if (backend_confirmed and !self.handshake_confirmed) {
             try self.confirmHandshake();
         }
+        if (backend_confirmed and self.side == .server and self.hasOneRttProtectionKeys() and !self.handshake_done_sent) {
+            self.pending_handshake_done = true;
+        }
         const handshake_no_output_pending = self.handshake_packet_space.crypto_send_queue.items.len == 0;
         if (backend_confirmed and handshake_outbound_chunks == 0 and handshake_no_output_pending) {
             self.discardPacketNumberSpaceState(.handshake);
@@ -8840,6 +8835,10 @@ pub const Connection = struct {
                 .ect0 => newly_acked_ect0 += 1,
                 .ect1 => newly_acked_ect1 += 1,
             }
+            if (removed.handshake_done) {
+                self.handshake_done_acked = true;
+                self.pending_handshake_done = false;
+            }
             markSentPacketAckedOnStreams(self, removed);
             removed.deinit(self.allocator);
         }
@@ -9104,6 +9103,7 @@ pub const Connection = struct {
             }
 
             var removed = packet_space.sent_packets.orderedRemove(i);
+            if (removed.handshake_done and !self.handshake_done_acked) self.pending_handshake_done = true;
             result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_nanos.*);
             removed.deinit(self.allocator);
         }
@@ -9314,6 +9314,10 @@ pub const Connection = struct {
         if (space != .application) return false;
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
+            if (sent_packet.handshake_done and !self.handshake_done_acked) {
+                self.pending_handshake_done = true;
+                return true;
+            }
             if (sent_packet.reset_stream_frame) |reset| {
                 if (resetStreamFrameAlreadyAcked(self, reset)) continue;
                 self.pending_reset_streams.append(self.allocator, reset) catch return error.OutOfMemory;
@@ -9849,6 +9853,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .sent_time_nanos = now_nanos,
             .bytes = encoded_len,
+            .handshake_done = true,
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 

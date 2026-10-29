@@ -199,6 +199,13 @@ pub fn main() !void {
     try require(server_hs_drive.handshake_confirmed);
     try require(server.handshakeConfirmed());
 
+    const confirmation = (try server.pollProtectedShortDatagramWithInstalledKeys(47, &client_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(confirmation);
+    try server_socket.send(io, &old_client_socket.address, confirmation);
+    const confirmed = try old_client_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try client.processProtectedShortDatagramWithInstalledKeys(47, client_scid.len, confirmed.data);
+    try require(client.handshakeConfirmed());
+
     // === 握手完成，1-RTT keys 已安装 ===
 
     // === 在 server 侧注册 lifecycle CID 路由 ===

@@ -64,6 +64,96 @@ test "client runtime answers an authenticated probe after socket handoff" {
     );
 }
 
+test "closing client answers a peer retransmission with one close packet" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const protection = quicz.protection;
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    var client = try Client.init(allocator, io, .{ .server_port = peer.address.ip4.port, .alpn = &.{}, .insecure_skip_verify = true });
+    defer client.deinit();
+    const server_cid: [8]u8 = @splat(0xa1);
+    const client_cid = client.client.transport.local_source_connection_id;
+    const secrets = try protection.deriveInitialSecrets(.v1, &server_cid);
+    const conn = &client.client.transport.connection;
+    try conn.setLocalInitialSourceConnectionId(&client_cid);
+    try conn.setPeerInitialSourceConnectionId(&server_cid);
+    try conn.installOneRttTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+    try conn.confirmHandshake();
+    client.handshake_state.store(Client.handshake_confirmed, .release);
+    client.close();
+    client.processCloseRequest();
+    var incoming: [1500]u8 = undefined;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } };
+    _ = try peer.receiveTimeout(io, &incoming, timeout);
+    const retransmission = try protection.protectShortPacketAes128(allocator, .{
+        .dcid = &client_cid,
+        .key_phase = false,
+        .packet_number = 0,
+    }, .{ .len = 4, .truncated_packet_number = 0 }, secrets.server, &.{ 1, 0, 0 });
+    defer allocator.free(retransmission);
+    client.processDatagram(peer.address, retransmission);
+    const received = try peer.receiveTimeout(io, &incoming, timeout);
+    var decoded = try protection.unprotectShortPacketAes128(allocator, secrets.client, received.data, server_cid.len, 1);
+    defer protection.deinitProtectedShortPacket(&decoded, allocator);
+    var close_frame = try quicz.frame.decodeFrameSlice(decoded.packet.plaintext, allocator);
+    defer quicz.frame.deinitFrame(&close_frame.frame, allocator);
+    switch (close_frame.frame) {
+        .application_close => {},
+        else => return error.TestUnexpectedResult,
+    }
+    client.processDatagram(peer.address, retransmission);
+    _ = try peer.receiveTimeout(io, &incoming, timeout);
+    client.processDatagram(peer.address, retransmission);
+    try std.testing.expectError(error.Timeout, peer.receiveTimeout(io, &incoming, timeout));
+}
+
+test "waitClosed observes terminal timers and allows timeout and cancellation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    var client = try Client.init(allocator, io, .{ .server_port = peer.address.ip4.port, .alpn = &.{}, .insecure_skip_verify = true });
+    defer client.deinit();
+    try std.testing.expectError(error.InvalidTimeout, client.waitClosed(0));
+    try std.testing.expectError(error.ClientNotStarted, client.waitClosed(1));
+    const server_cid: [8]u8 = @splat(0xa1);
+    const conn = &client.client.transport.connection;
+    try conn.setLocalInitialSourceConnectionId(&client.client.transport.local_source_connection_id);
+    try conn.setPeerInitialSourceConnectionId(&server_cid);
+    try conn.installOneRttTrafficSecrets(.{ .local = @splat(1), .peer = @splat(2) });
+    try conn.confirmHandshake();
+    conn.recovery_state.smoothed_rtt_ns = std.time.ns_per_ms;
+    conn.recovery_state.rttvar_ns = 0;
+    conn.recovery_state.max_ack_delay_ns = 0;
+    client.handshake_state.store(Client.handshake_confirmed, .release);
+    try client.startTasks();
+    try std.testing.expectError(error.ConnectionTimedOut, client.waitClosed(1));
+    const Waiter = struct {
+        client: *Client,
+        ready: std.Io.Event = .unset,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) std.Io.Cancelable!void {
+            self.ready.set(self.client.io);
+            self.client.waitClosed(1000) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var waiter = Waiter{ .client = &client };
+    var waiting = try io.concurrent(Waiter.run, .{&waiter});
+    try waiter.ready.wait(io);
+    try waiting.cancel(io);
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), waiter.failure);
+    try std.testing.expect(!client.protocol_closed.isSet());
+    client.close();
+    try client.waitClosed(1000);
+    try std.testing.expect(client.protocol_closed.isSet());
+}
+
 /// Receive-buffer / datagram-pool size (UDP payload allowance).
 const max_datagram_size: usize = 8192;
 /// Outbound QUIC packet size cap (standard MTU). Sending jumbo datagrams
@@ -298,6 +388,8 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
         /// Drive-observed connection close; a blocked receive() cannot learn
         /// about the close from stream data or EOF, so it checks this flag.
         conn_closing_or_closed: bool = false,
+        protocol_closed: std.Io.Event = .unset,
+        closing_datagrams_received: u32 = 0,
         /// Packet-processing error that failed the handshake, if any. Surfaces the
         /// original error to `connect()` instead of a generic HandshakeFailed.
         handshake_error: ?anyerror = null,
@@ -424,6 +516,8 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             );
         }
 
+        /// Cancel workers and destroy owned state immediately.
+        /// Call close and waitClosed first when the protocol closing period must finish.
         pub fn deinit(self: *Self) void {
             if (self.started) {
                 @atomicStore(bool, &self.stopping, true, .release);
@@ -472,11 +566,28 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd)) catch {};
         }
 
-        /// Gracefully close the connection with an APPLICATION_CLOSE; the drive
-        /// task emits the close frame and any PTO retransmit while it runs.
+        /// Queue APPLICATION_CLOSE without waiting. The driver answers peer packets during closing.
+        /// Use waitClosed before deinit to retain the protocol closing period.
         pub fn close(self: *Self) void {
             @atomicStore(bool, &self.close_requested, true, .release);
             self.notifyDrive(self.io);
+        }
+
+        /// Wait for the protocol closing/draining period to finish, without destroying this client.
+        /// Timeout or cancellation leaves the driver running. Completion does not prove peer receipt.
+        pub fn waitClosed(self: *Self, timeout_ms: u32) !void {
+            if (timeout_ms == 0) return error.InvalidTimeout;
+            if (!self.started) return error.ClientNotStarted;
+            const deadline = std.Io.Timestamp.now(self.io, .awake).addDuration(.fromMilliseconds(timeout_ms));
+            while (!self.protocol_closed.isSet()) {
+                self.protocol_closed.waitTimeout(self.io, .{ .deadline = .{ .clock = .awake, .raw = deadline } }) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (!self.protocol_closed.isSet() and std.Io.Timestamp.now(self.io, .awake).nanoseconds >= deadline.nanoseconds)
+                            return error.ConnectionTimedOut;
+                    },
+                    else => return err,
+                };
+            }
         }
 
         /// Whether any caller request or queued datagram still waits for the
@@ -867,9 +978,9 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                 self.serviceKeepalive();
                 self.drainOutgoing();
                 self.drainQueuedDatagrams();
+                self.serviceDueDeadlines();
                 self.checkHandshakeProgress();
                 self.checkConnectionClose();
-                self.serviceDueDeadlines();
                 // Park until a datagram arrives, a request is queued, stop() runs,
                 // or the next lifecycle deadline comes due. The snapshot is taken
                 // after draining, pairing with notifyDrive's bump: a notifier that
@@ -914,9 +1025,14 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             if (!@atomicLoad(bool, &self.close_requested, .acquire)) return;
             @atomicStore(bool, &self.close_requested, false, .release);
             self.close_initiated = true;
-            const closed = self.client.closeApplicationWithRoutePath(0, "session complete", self.nowNanos()) catch return;
+            const closed = self.client.closeApplicationWithRoutePath(0, "session complete", self.nowNanos()) catch |err| {
+                log.debug("client: close preparation: {}", .{err});
+                return;
+            };
             if (closed) |o| {
-                self.socket.send(self.io, &self.server_address, o.datagram) catch {};
+                self.socket.send(self.io, &self.server_address, o.datagram) catch |err| {
+                    log.debug("client: close send: {}", .{err});
+                };
                 self.allocator.free(o.datagram);
             }
         }
@@ -1120,13 +1236,14 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             if (req != null) self.key_update_done_sem.post(self.io);
         }
 
-        /// Drain pending outgoing datagrams to the server. Bounded: the server
-        /// endpoint can keep producing closing-frame retransmits, and an unbounded
-        /// loop here wedges the drive task so it never reaches the main loop's
-        /// `stopping` check (and group.cancel cannot interrupt a non-blocking
-        /// busy-spin). The remainder is picked up on the next drive iteration,
-        /// mirroring the server runtime's single-pass drain.
+        /// Drain bounded application output. Closing sends one initial packet,
+        /// then uses incoming-packet backoff instead of filling batches with duplicates.
         fn drainOutgoing(self: *Self) void {
+            const conn = &self.client.transport.connection;
+            if (conn.isClosingOrClosed()) {
+                if (conn.connectionState() == .closing and conn.closeDeadline() == null) self.sendClosePacket();
+                return;
+            }
             var out: [16]TlsEndpoint.ApplicationDatagramPathResult = undefined;
             var iterations: usize = 0;
             while (iterations < 16) : (iterations += 1) {
@@ -1149,6 +1266,25 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                     self.allocator.free(o.datagram);
                 }
             }
+        }
+
+        fn sendClosePacket(self: *Self) void {
+            if (self.client.transport.connection.connectionState() != .closing) return;
+            const outgoing = self.client.pollApplicationDatagramWithRoutePath(self.nowNanos()) catch |err| {
+                if (err != error.ConnectionClosed) log.debug("client: close response poll: {}", .{err});
+                return;
+            };
+            if (outgoing) |packet| {
+                defer self.allocator.free(packet.datagram);
+                self.socket.send(self.io, &self.server_address, packet.datagram) catch |err|
+                    log.debug("client: close response send: {}", .{err});
+            }
+        }
+
+        fn respondWhileClosing(self: *Self) void {
+            if (self.client.transport.connection.connectionState() != .closing) return;
+            self.closing_datagrams_received +|= 1;
+            if (std.math.isPowerOfTwo(self.closing_datagrams_received)) self.sendClosePacket();
         }
 
         /// Process every queued datagram in FIFO order and free its buffer.
@@ -1192,6 +1328,7 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             }
             const result = (self.client.receiveWithRoutePathOrDiscard(self.nowNanos(), &self.scratch, data) catch |err| {
                 if (err == error.ConnectionClosed and self.close_initiated) {
+                    self.respondWhileClosing();
                     self.checkConnectionClose();
                     return;
                 }
@@ -1205,6 +1342,7 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                     }
                 }
                 self.recordHandshakeError(err);
+                self.drainOutgoing();
                 return;
             }) orelse return;
             if (result.outbound_initial) |o| {
@@ -1215,13 +1353,16 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                 self.socket.send(self.io, &self.server_address, o.datagram) catch {};
                 self.allocator.free(o.datagram);
             }
+            if (self.client.transport.connection.connectionState() == .closing) {
+                self.respondWhileClosing();
+                self.checkConnectionClose();
+                return;
+            }
             self.deliverStreamData();
             self.drainOutgoing();
         }
 
-        /// Fail a pending handshake with the packet-processing error that made it
-        /// unrecoverable. Without this, an invalid/undecryptable server response
-        /// is only logged and `connect()` keeps retrying until an external timeout.
+        /// Publish receive failures after admission and discarded-space filtering.
         fn recordHandshakeError(self: *Self, err: anyerror) void {
             if (self.handshake_state.load(.acquire) != handshake_pending) return;
             if (!self.handshake_started) return;
@@ -1333,6 +1474,7 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
         /// Surface a closing/closed connection to a blocked receive(): wake the
         /// stream waiters once, so they observe error.ConnectionClosed.
         fn checkConnectionClose(self: *Self) void {
+            if (self.client.transport.connection.connectionState() == .closed) self.protocol_closed.set(self.io);
             if (@atomicLoad(bool, &self.conn_closing_or_closed, .acquire)) return;
             if (!self.client.transport.connection.isClosingOrClosed()) return;
             @atomicStore(bool, &self.conn_closing_or_closed, true, .release);

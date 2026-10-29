@@ -7851,7 +7851,7 @@ test "Tls13 endpoints complete certificate-verified local handshake through endp
         delivered_server_flights += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), delivered_server_flights);
-    try std.testing.expect(client.handshakeConfirmed());
+    try std.testing.expect(!client.handshakeConfirmed());
 
     const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
     client_finished_datagram = null;
@@ -7932,7 +7932,14 @@ test "Tls13 endpoints complete certificate-verified local handshake through endp
     for (server_finish_pending_out[0..server_finish_step.pending_drain.datagrams_written]) |outbound| {
         try std.testing.expectEqual(server_handle, outbound.connection_id);
         try std.testing.expect(outbound.path.eql(server_path));
+        const confirmation = try client.receiveWithRoutePath(15, &client_scratch, outbound.datagram);
+        try std.testing.expect(confirmation.outbound_initial == null);
+        try std.testing.expect(confirmation.outbound_handshake == null);
     }
+    const handshake_done = (try server_endpoint.pollDatagramWithRoutePathWithScratch(15, .application)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_done.datagram);
+    _ = try client.receiveWithRoutePath(16, &client_scratch, handshake_done.datagram);
+    try std.testing.expect(client.handshakeConfirmed());
 }
 
 test "Tls13 endpoints complete protected STREAM echo close and route retirement through endpoint routes" {
@@ -8154,7 +8161,7 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
         const r = try client.receiveWithRoutePath(13, &client_scratch, o.datagram);
         if (r.outbound_handshake) |f| client_finished_datagram = f.datagram;
     }
-    try std.testing.expect(client.handshakeConfirmed());
+    try std.testing.expect(!client.handshakeConfirmed());
 
     const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
     client_finished_datagram = null;
@@ -8165,7 +8172,7 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     var fin_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
     var fin_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
     var fin_route_out: [256]u8 = undefined;
-    _ = try server_endpoint.receiveDatagramStepWithRoutePath(
+    const finished = try server_endpoint.receiveDatagramStepWithRoutePath(
         std.testing.allocator,
         server_path,
         14,
@@ -8187,8 +8194,17 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
         &fin_pending_out,
     );
     defer {
-        for (fin_pending_out[0..0]) |o| std.testing.allocator.free(o.datagram);
+        for (fin_pending_out[0..finished.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
     }
+    for (fin_pending_out[0..finished.pending_drain.datagrams_written]) |outbound| {
+        const confirmation = try client.receiveWithRoutePath(15, &client_scratch, outbound.datagram);
+        try std.testing.expect(confirmation.outbound_initial == null);
+        try std.testing.expect(confirmation.outbound_handshake == null);
+    }
+    const handshake_done = (try server_endpoint.pollDatagramWithRoutePathWithScratch(15, .application)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_done.datagram);
+    _ = try client.receiveWithRoutePath(16, &client_scratch, handshake_done.datagram);
+    try std.testing.expect(client.handshakeConfirmed());
     const active_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
     try std.testing.expect(active_record.transport.connection.handshakeConfirmed());
 

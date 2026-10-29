@@ -31,7 +31,7 @@ HTTP/3 完整连接管理（SETTINGS 全参数、GOAWAY、stream 状态机）、
   和 stream state machine 约束。
 - Transport parameters：QUIC 握手期间交换的 transport 配置，例如 stream 限额、
   ACK delay、max UDP payload size、preferred_address 和 version information。
-- TLS backend：外部 TLS 库的 adapter。TLS backend 负责 TLS transcript、traffic secret
+- TLS backend：纯 Zig 实现或外部 TLS 库的集成边界。TLS backend 负责 TLS transcript、traffic secret
   和 QUIC TLS callback；quicz 负责把 CRYPTO bytes 放进包、安装 packet protection key、
   并驱动 transport 状态。
 - Traffic secrets：TLS 产出的 Initial 之后的 Handshake/1-RTT 密钥材料输入。quicz 用它们
@@ -127,7 +127,7 @@ TLS backend 的职责：
 - 从 QUIC CRYPTO frame 消费 TLS handshake bytes；
 - 产出下一段 TLS CRYPTO bytes；
 - 通过 callback 提供 peer transport parameters 和 traffic secrets；
-- 在 TLS 认为握手完成时通知 quicz。
+- 报告 TLS 握手进度和服务端握手确认状态。
 
 quicz 的职责：
 
@@ -169,6 +169,12 @@ timer、投递 stateless reset、清理关闭连接。生产级高层 API 已通
 6. quicz 应用 peer transport parameters、安装 packet protection key，并在边界满足时丢弃旧
    packet number space。
 
+TLS 完成不等于 QUIC 客户端握手确认。
+服务端在 TLS 完成时确认握手。客户端只在收到 `HANDSHAKE_DONE` 后确认握手。
+服务端排队该帧时保留尚未发送的 Handshake CRYPTO。
+Recovery 在丢包或 PTO 后重传 `HANDSHAKE_DONE`，直到任意副本被 ACK。
+收到 ACK 后，连接取消待发副本。其他副本之后丢失时，不再重新排队该帧。
+
 ### 1-RTT stream path
 
 1. 应用或示例打开 stream 并写入数据。
@@ -183,6 +189,16 @@ timer、投递 stateless reset、清理关闭连接。生产级高层 API 已通
 2. quicz 生成 CONNECTION_CLOSE 或 reset 相关输出。
 3. Endpoint 抑制不应继续发送的 active route，并清理连接路由。
 4. Recovery/timer 不再为已清理 route 产生新的发送副作用。
+
+`runtime.Client.close()` 只排队应用关闭请求，不等待关闭完成。
+调用方可以使用 `waitClosed(timeout_ms)`，保留 socket 直到协议的 closing 或 draining 阶段结束。
+超时或取消只结束本次等待，driver 继续运行。
+等待完成不代表对端已经收到关闭包。
+Driver 在 closing 阶段回应对端数据报，并按指数间隔抑制重复响应。
+Draining 和 closed 阶段不再响应。
+`deinit()` 仍立即取消任务并释放资源。
+需要完成协议关闭阶段时，调用方应先调用 `close()`，再调用 `waitClosed()`，最后调用 `deinit()`。
+移动 C ABI 保持不变。
 
 ## 开发扩展入口
 

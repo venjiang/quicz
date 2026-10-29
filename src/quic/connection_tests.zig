@@ -18,6 +18,7 @@ const buffer = @import("buffer.zig");
 const clock = @import("../time/clock.zig");
 const duration_mod = @import("../time/duration.zig");
 const lib = @import("../lib.zig");
+const tls13_test_support = @import("tls13_test_support.zig");
 
 // Aliases for names used by tests.
 const Connection = conn_mod.Connection;
@@ -62162,6 +62163,8 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Server issues a new connection ID.
     const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
     const srt = @as([16]u8, @splat(0xEE));
@@ -62405,6 +62408,8 @@ test "Tls13Backend + Connection: stateless reset on TLS-owned path" {
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Server issues a new connection ID carrying a stateless reset token.
     const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
     const srt = @as([16]u8, @splat(0xEE));
@@ -62490,6 +62495,8 @@ test "Tls13Backend + Connection: flow-control window update on TLS-owned path" {
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Client opens a stream and sends data up to the server's flow-control limit.
     const stream_id = try client.openStream();
@@ -63070,6 +63077,8 @@ test "Tls13Backend + Connection: NEW_TOKEN over 1-RTT on TLS-owned path" {
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Server issues a NEW_TOKEN for the client's future address validation.
     const token: []const u8 = "address-validation-token";
@@ -63722,6 +63731,8 @@ test "Tls13Backend + Connection: PTO backoff doubles deadline on TLS-owned path"
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Client sends a PING over 1-RTT (in-flight, never ACKed).
     try client.sendPing();
     const ping_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(8 * ms, &server_scid)) orelse return error.UnexpectedState;
@@ -63801,6 +63812,8 @@ test "Tls13Backend + Connection: initiateOneRttKeyUpdate on TLS-owned path" {
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Client initiates a 1-RTT key update via the Connection API: this
     // advances the internal key-phase state (and arms the ack threshold),
@@ -64662,7 +64675,7 @@ test "delayed previous-key packet opens without advancing peer key phase" {
     try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
 }
 
-test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
+test "unauthenticated discarded previous-key packet does not close a connection" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -64697,9 +64710,7 @@ test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
     try server.checkPtoTimeouts(10_000 * ms);
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 
-    // A packet protected with the discarded gen-0 key phase is a peer protocol
-    // violation: the receive path queues a KEY_UPDATE_ERROR transport
-    // CONNECTION_CLOSE (RFC 9001 §6.5).
+    // Once its key is gone, this packet cannot authenticate a peer violation.
     const stale_plaintext = [_]u8{
         @backingInt(frame.FrameType.ping),
         @backingInt(frame.FrameType.padding),
@@ -64719,13 +64730,15 @@ test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
     defer std.testing.allocator.free(stale_ping);
     try std.testing.expectError(
         error.InvalidPacket,
-        server.processProtectedShortDatagramWithInstalledKeys(12 * ms, server_dcid.len, stale_ping),
+        server.processProtectedShortDatagramWithInstalledKeys(10_001 * ms, server_dcid.len, stale_ping),
     );
-    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expectEqual(
-        @as(?u64, transport_error.codeValue(.key_update_error)),
-        server.pendingCloseErrorCode(),
-    );
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+    try std.testing.expectEqual(@as(?u64, null), server.pendingCloseErrorCode());
+    try client.sendPing();
+    const current_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(10_002 * ms, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(current_ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(10_003 * ms, server_dcid.len, current_ping);
+    try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
 }
 
 test "sendDatagram and recvDatagram roundtrip through pollTx and frame processing" {

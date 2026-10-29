@@ -1114,6 +1114,158 @@ fn pendingRecoveryKeepsPeer(comptime Runtime: type) !void {
     try std.testing.expect(owner_packets != 0);
 }
 
+fn routedStreamDelivery(comptime Runtime: type) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const protection = quicz.protection;
+    const Path = if (Runtime == Server) endpoint.Udp4Tuple else endpoint.Udp6Tuple;
+    const Family = @import("udp_address.zig").ForTuple(Path);
+    const address: std.Io.net.IpAddress = if (Runtime == Server) .{ .ip4 = .loopback(0) } else .{ .ip6 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    var server = try Runtime.init(allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+        .max_connections = 2,
+    });
+    defer server.deinit();
+    const peer_secret: [protection.traffic_secret_len]u8 = @splat(0x51);
+    const local_secret: [protection.traffic_secret_len]u8 = @splat(0x52);
+    for (1..3) |handle| {
+        const cid: [8]u8 = @splat(@intCast(handle));
+        const peer_cid: [8]u8 = @splat(@intCast(handle + 0x10));
+        const record = try allocator.create(ServerRecord);
+        {
+            errdefer allocator.destroy(record);
+            record.* = .{ .handle = handle, .transport = try Tls13ServerTransport.init(allocator, .{ .initial_max_streams_bidi = 300 }, .{}) };
+            errdefer record.deinit();
+            try record.transport.setOriginalDestinationConnectionId(&cid);
+            try record.transport.setLocalInitialSourceConnectionId(&cid);
+            try record.transport.setPeerInitialSourceConnectionId(&peer_cid);
+            try record.connectionRef().installOneRttTrafficSecrets(.{ .local = local_secret, .peer = peer_secret });
+            try record.connectionRef().validatePeerAddress();
+            try record.connectionRef().confirmHandshake();
+            try server.server_ep.records.adopt(handle, record);
+        }
+        const path = Path{ .local = Family.fromIp(server.socket.address).?, .remote = Family.fromIp(peer.address).? };
+        try server.server_ep.lifecycle.registerConnectionId(handle, &cid, path, .{});
+        const state = try allocator.create(ConnState);
+        state.* = .{ .handle = handle, .conn = record.connectionRef(), .peer = peer.address };
+        errdefer allocator.destroy(state);
+        try server.conns.put(handle, state);
+    }
+    var stream_payload: [64]u8 = undefined;
+    const buffer = @import("../quic/buffer.zig");
+    var out = buffer.fixedWriter(&stream_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream = .{ .stream_id = 0, .offset = 0, .data = "untouched", .fin = false } });
+    try server.server_ep.records.get(2).?.connectionRef().processDatagram(0, out.getWritten());
+    out.pos = 0;
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream = .{ .stream_id = 1024, .offset = 0, .data = "routed", .fin = true } });
+    const datagram = try protection.protectShortPacketAes128(allocator, .{
+        .dcid = &@as([8]u8, @splat(1)),
+        .key_phase = false,
+        .packet_number = 0,
+    }, .{ .len = 4, .truncated_packet_number = 0 }, protection.deriveAes128PacketProtectionKeys(peer_secret), out.getWritten());
+    defer allocator.free(datagram);
+    server.processDatagram(io, allocator, peer.address, datagram);
+    const routed = server.conns.get(1).?;
+    const untouched = server.conns.get(2).?;
+    try std.testing.expectEqual(@as(usize, 1), routed.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 1024), routed.recv_streams.items[0].id);
+    try std.testing.expectEqualStrings("routed", routed.recv_streams.items[0].queue.items);
+    try std.testing.expect(routed.recv_streams.items[0].eof);
+    try std.testing.expectEqual(@as(usize, 0), untouched.recv_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), untouched.conn.recv_streams.items[0].read_offset);
+    const permits = routed.data_sem.permits;
+    server.processDatagram(io, allocator, peer.address, datagram);
+    try std.testing.expectEqual(permits, routed.data_sem.permits);
+}
+
+test "IPv4 receive delivers high stream IDs only to the routed connection" {
+    try routedStreamDelivery(Server);
+}
+
+test "IPv6 receive delivers high stream IDs only to the routed connection" {
+    try routedStreamDelivery(IPv6Server);
+}
+
+test "runtime client recovers lost Finished and HANDSHAKE_DONE before confirming" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const credentials = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generateDeterministic(@splat(0x55));
+    const certificate = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xde, 0xad, 0xbe, 0xef };
+    const alpn = [_][]const u8{"hq-interop"};
+    var server = try Server.init(allocator, io, .{
+        .port = 0,
+        .alpn = &alpn,
+        .cert_der = &certificate,
+        .private_key = &credentials.secret_key.bytes,
+    });
+    defer server.deinit();
+    const Proxy = struct {
+        socket: std.Io.net.Socket,
+        server: std.Io.net.IpAddress,
+        allow_finished: std.atomic.Value(bool) = .init(false),
+        dropped: std.atomic.Value(usize) = .init(0),
+        dropped_confirmation: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), proxy_io: std.Io) std.Io.Cancelable!void {
+            var client: ?std.Io.net.IpAddress = null;
+            var buf: [8192]u8 = undefined;
+            while (true) {
+                try proxy_io.checkCancel();
+                const received = self.socket.receive(proxy_io, &buf) catch return;
+                var destination: std.Io.net.IpAddress = undefined;
+                if (received.from.ip4.port == self.server.ip4.port) {
+                    if (received.data.len != 0 and received.data[0] & 0x80 == 0 and !self.dropped_confirmation.swap(true, .acq_rel)) continue;
+                    destination = client orelse continue;
+                } else {
+                    client = received.from;
+                    if (received.data.len != 0 and received.data[0] & 0xf0 == 0xe0 and !self.allow_finished.load(.acquire)) {
+                        _ = self.dropped.rmw(.Add, 1, .release);
+                        continue;
+                    }
+                    destination = self.server;
+                }
+                self.socket.send(proxy_io, &destination, received.data) catch return;
+            }
+        }
+
+        fn echo(conn: ServerConnection) std.Io.Cancelable!void {
+            var connection = conn;
+            var stream = connection.acceptStream() catch return;
+            var buf: [64]u8 = undefined;
+            const n = stream.receive(&buf) catch return;
+            stream.send(buf[0..n], true) catch return;
+        }
+    };
+    try server.serve(Proxy.echo);
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var proxy: Proxy = .{ .socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp }), .server = server.socket.address };
+    defer proxy.socket.close(io);
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, Proxy.run, .{ &proxy, io });
+    var client = try quicz.runtime.client.Client.init(allocator, io, .{
+        .server_port = proxy.socket.address.ip4.port,
+        .server_name = "localhost",
+        .alpn = &alpn,
+        .insecure_skip_verify = true,
+    });
+    defer client.deinit();
+    try std.testing.expectError(error.ConnectionTimedOut, client.connectWithTimeout(200));
+    try std.testing.expect(proxy.dropped.load(.acquire) != 0);
+    proxy.allow_finished.store(true, .release);
+    try client.connectWithTimeout(3000);
+    try std.testing.expect(proxy.dropped_confirmation.load(.acquire));
+    const sid = try client.send("finished recovered", true);
+    var echoed: [64]u8 = undefined;
+    const n = try client.receive(sid, &echoed);
+    try std.testing.expectEqualStrings("finished recovered", echoed[0..n]);
+}
+
 test "IPv4 pending recovery keeps its peer during another connection's receive" {
     try pendingRecoveryKeepsPeer(Server);
 }
@@ -1708,6 +1860,61 @@ pub fn ServerForTuple(comptime Path: type) type {
             return @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds);
         }
 
+        fn deliverReceivedStreams(self: *ServerSelf, handle: u64) void {
+            while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+            defer self.mutex.unlock();
+            const record = self.server_ep.records.get(handle) orelse return;
+            const st = self.conns.get(handle) orelse return;
+            const conn = record.connectionRef();
+            var stream_buf: [4096]u8 = undefined;
+            var pushed = false;
+            for (conn.recv_streams.items) |stream| {
+                const sid = stream.stream_id;
+                while (true) {
+                    const n = conn.recvOnStream(sid, &stream_buf) catch break;
+                    const len = n orelse break;
+                    if (len == 0) break;
+                    while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
+                    var idx: ?usize = null;
+                    for (st.recv_streams.items, 0..) |queued, i| {
+                        if (queued.id == sid) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    if (idx == null) {
+                        st.recv_streams.append(self.allocator, .{ .id = sid }) catch {};
+                        idx = st.recv_streams.items.len - 1;
+                        st.pending_streams.append(self.allocator, sid) catch {};
+                    }
+                    st.recv_streams.items[idx.?].queue.appendSlice(self.allocator, stream_buf[0..len]) catch {};
+                    pushed = true;
+                    st.mutex.unlock();
+                }
+                if (conn.recvStreamFinished(sid) catch false) {
+                    while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
+                    var idx: ?usize = null;
+                    for (st.recv_streams.items, 0..) |queued, i| {
+                        if (queued.id == sid) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    if (idx == null) {
+                        st.recv_streams.append(self.allocator, .{ .id = sid }) catch {};
+                        idx = st.recv_streams.items.len - 1;
+                        st.pending_streams.append(self.allocator, sid) catch {};
+                    }
+                    if (!st.recv_streams.items[idx.?].eof) {
+                        st.recv_streams.items[idx.?].eof = true;
+                        pushed = true;
+                    }
+                    st.mutex.unlock();
+                }
+            }
+            if (pushed) st.data_sem.post(self.io);
+        }
+
         /// Drain queued stream sends and emit outgoing datagrams.
         fn drainOutgoing(self: *ServerSelf, io: std.Io, allocator: std.mem.Allocator) void {
             while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -2042,7 +2249,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                         }
                     }
                 },
-                .routed => {
+                .routed => |admitted_route| {
                     // RFC 9000 §12.2: a datagram may coalesce long-header and
                     // short-header packets.  When the first long-header packet
                     // doesn't fill the datagram and the trailing byte is a short
@@ -2102,6 +2309,14 @@ pub fn ServerForTuple(comptime Path: type) type {
                         space,
                         &pending_out,
                     ) catch |e| {
+                        if (e == error.InvalidPacket) {
+                            if (self.server_ep.records.get(admitted_route.connection_id)) |record| {
+                                if (!record.connectionRef().isClosingOrClosed()) {
+                                    log.debug("drive: discarded invalid or undecryptable datagram ({d} bytes)", .{effective_data.len});
+                                    return;
+                                }
+                            }
+                        }
                         log.err("drive: receiveDatagramStep ({d} bytes, first 0x{x:0>2}): {}", .{ effective_data.len, effective_data[0], e });
                         return;
                     };
@@ -2112,70 +2327,10 @@ pub fn ServerForTuple(comptime Path: type) type {
                                     self.socket.send(io, &dest, o.datagram) catch {};
                                     allocator.free(o.datagram);
                                 }
-                                // Deliver received stream data to per-connection
-                                // queues via the endpoint's own records: the
-                                // routed connection is the record's connection.
-                                while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-                                var rit = self.server_ep.records.records.valueIterator();
-                                while (rit.next()) |recp| {
-                                    const rec = recp.*;
-                                    const conn = rec.transport.connectionRef();
-                                    const handle = rec.handle;
-                                    const st = self.conns.get(handle) orelse continue;
-                                    var stream_buf: [4096]u8 = undefined;
-                                    var sid: u64 = 0;
-                                    var pushed = false;
-                                    // Poll every client-initiated stream (even sid):
-                                    // bidirectional (0,4,8,...) and unidirectional
-                                    // (2,6,10,...). ServerSelf-initiated (odd) sids are
-                                    // send-only here and skipped.
-                                    while (sid < 1024) : (sid += 1) {
-                                        if ((sid & 1) != 0) continue;
-                                        while (true) {
-                                            const n = conn.recvOnStream(sid, &stream_buf) catch break;
-                                            const len = n orelse break;
-                                            if (len == 0) break;
-                                            while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
-                                            var idx: ?usize = null;
-                                            for (st.recv_streams.items, 0..) |s, i| {
-                                                if (s.id == sid) {
-                                                    idx = i;
-                                                    break;
-                                                }
-                                            }
-                                            if (idx == null) {
-                                                st.recv_streams.append(allocator, .{ .id = sid }) catch {};
-                                                idx = st.recv_streams.items.len - 1;
-                                                st.pending_streams.append(allocator, sid) catch {};
-                                            }
-                                            st.recv_streams.items[idx.?].queue.appendSlice(allocator, stream_buf[0..len]) catch {};
-                                            pushed = true;
-                                            st.mutex.unlock();
-                                        }
-                                        // FIN received and all bytes drained from the
-                                        // connection: surface EOF on the stream queue.
-                                        if (conn.recvStreamFinished(sid) catch false) {
-                                            while (!st.mutex.tryLock()) std.atomic.spinLoopHint();
-                                            var eof_idx: ?usize = null;
-                                            for (st.recv_streams.items, 0..) |s, i| {
-                                                if (s.id == sid) {
-                                                    eof_idx = i;
-                                                    break;
-                                                }
-                                            }
-                                            if (eof_idx == null) {
-                                                st.recv_streams.append(allocator, .{ .id = sid }) catch {};
-                                                eof_idx = st.recv_streams.items.len - 1;
-                                                st.pending_streams.append(allocator, sid) catch {};
-                                            }
-                                            st.recv_streams.items[eof_idx.?].eof = true;
-                                            pushed = true;
-                                            st.mutex.unlock();
-                                        }
-                                    }
-                                    if (pushed) st.data_sem.post(io);
-                                }
-                                self.mutex.unlock();
+                                if (ik.feed) |received| switch (received.feed) {
+                                    .routed => |route| self.deliverReceivedStreams(route.connection_id),
+                                    else => {},
+                                };
                                 self.drainOutgoing(io, allocator);
                             },
                             // Long-header packets on an accepted connection:

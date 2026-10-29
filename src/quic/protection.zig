@@ -61,10 +61,8 @@ pub const ProtectionError = error{
     InvalidPacketNumberLength,
     InvalidPayloadLength,
     AuthenticationFailed,
-    /// A packet's revealed key phase matches a previous generation whose keys
-    /// have already been discarded past the PTO retain window, i.e. the peer is
-    /// protecting packets with keys older than the retained generation
-    /// (RFC 9001 §6.5). Callers MAY surface this as a KEY_UPDATE_ERROR.
+    /// Authentication failed and the revealed phase matches a discarded generation.
+    /// This diagnostic does not authenticate a peer protocol violation.
     KeyUpdateError,
 };
 

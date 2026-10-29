@@ -282,7 +282,8 @@ pub const Tls13Backend = struct {
 
     fn handshakeConfirmed(context: *anyopaque) bool {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
-        return self.hs.isComplete();
+        // A client still needs QUIC HANDSHAKE_DONE after TLS completes.
+        return self.hs.is_server and self.hs.isComplete();
     }
 
     fn setEarlyDataAccepted(context: *anyopaque, accepted: bool) Error!void {
@@ -892,8 +893,9 @@ test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
     const alpn_result = (try cb.pullNegotiatedAlpn(&scratch)) orelse return error.TestExpectedAlpn;
     try testing.expectEqualStrings(alpn_proto, alpn_result);
 
-    // Handshake is complete.
-    try testing.expect(cb.isHandshakeConfirmed());
+    // TLS completion cannot confirm delivery of the client Finished to the server.
+    try testing.expect(backend.hs.isComplete());
+    try testing.expect(!cb.isHandshakeConfirmed());
 
     // No more outbound data in any space.
     try testing.expect((try cb.pull(cb.context, .initial, &scratch)) == null);

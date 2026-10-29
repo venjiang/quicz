@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|concurrent-uni|concurrent-flow|rolling] [max_active_connections] [idle_timeout_nanos]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|concurrent-uni|concurrent-flow|rolling] [max_active_connections] [idle_timeout_ms]
 //!
 //! A concurrent mode with completion_target=0 runs until interrupted and
 //! requires an explicit positive max_active_connections value.
@@ -25,8 +25,8 @@ const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const max_initial_datagrams: usize = 4;
 const max_application_datagrams: usize = 16;
 const server_max_datagram_size: usize = 8192;
-const default_server_idle_timeout_nanos: u64 = 30_000;
-const retry_token_lifetime_nanos: u64 = 10_000;
+const default_server_idle_timeout_ms: u64 = 30_000;
+const retry_token_lifetime_nanos: u64 = 10 * std.time.ns_per_s;
 const max_retry_datagram_size: usize = 256;
 const echo_stream_ids = [_]u64{ 0, 4 };
 const echo_payloads = [_][]const u8{ "hello", "world" };
@@ -53,14 +53,14 @@ const client_uni_payload = "uni";
 const server_uni_payload = "uni-reply";
 
 fn recvTimeoutForDeadline(io: std.Io, deadline_nanos: ?i64) std.Io.Timeout {
-    const now_nanos = std.Io.Clock.awake.now(io).toMilliseconds() * 1_000_000; // ms→ns
+    const now_nanos: i64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
     const timeout_nanos = if (deadline_nanos) |deadline|
         @max(@as(i64, 0), deadline - now_nanos)
     else
-        10_000;
+        10 * std.time.ns_per_s;
     return .{ .duration = .{
         .clock = .awake,
-        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_nanos / 1_000_000)),
+        .raw = std.Io.Duration.fromNanoseconds(timeout_nanos),
     } };
 }
 
@@ -71,8 +71,8 @@ fn recvTimeout() std.Io.Timeout {
     } };
 }
 
-fn nowMillis(io: std.Io) i64 {
-    return std.Io.Clock.awake.now(io).toMilliseconds() * 1_000_000; // ms→ns
+fn nowNanos(io: std.Io) i64 {
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
 
 fn require(condition: bool) !void {
@@ -194,6 +194,19 @@ fn sendToCurrentRoute(
     try socket.send(io, &peer_address, datagram);
 }
 
+fn sendHandshakeConfirmation(
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+    server_endpoint: *ProcessServerEndpoint,
+    managed: *ManagedProcessConnection,
+    now_nanos: i64,
+) !void {
+    if (!managed.connectionRef().pending_handshake_done) return;
+    const datagram = (try server_endpoint.pollOneRttDatagram(managed.handle, now_nanos)) orelse return error.UnexpectedState;
+    defer managed.connectionRef().allocator.free(datagram);
+    try sendToCurrentRoute(io, socket, server_endpoint, managed, datagram);
+}
+
 fn destroyManagedConnection(
     server_endpoint: *ProcessServerEndpoint,
     handle: u64,
@@ -214,7 +227,7 @@ fn serveConcurrent(
     expect_client_stop_sending: bool,
     expect_client_uni_stream: bool,
     expect_flow_control: bool,
-    idle_timeout_nanos: u64,
+    idle_timeout_ms: u64,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
@@ -248,7 +261,7 @@ fn serveConcurrent(
                 var due_datagrams: [max_initial_datagrams]quicz.endpoint_types.EndpointPolledDatagramResult = undefined;
                 const due = (try server_endpoint.processDueDeadlineAndDrainDatagrams(
                     allocator,
-                    nowMillis(io),
+                    nowNanos(io),
                     &due_datagrams,
                 )) orelse continue;
                 for (due_datagrams[0..due.drain.datagrams_written]) |output| {
@@ -286,7 +299,7 @@ fn serveConcurrent(
             },
             else => return err,
         };
-        const now_nanos = nowMillis(io);
+        const now_nanos = nowNanos(io);
         const path = try serverPath(bind_address, received.from);
         const action = try server_endpoint.feedDatagram(
             &endpoint_output,
@@ -341,7 +354,7 @@ fn serveConcurrent(
                     // Keep the local loss-recovery probe comfortably ahead of
                     // the configured endpoint idle timeout.
                     .initial_rtt_ns = 100000000,
-                    .max_idle_timeout_ms = idle_timeout_nanos,
+                    .max_idle_timeout_ms = idle_timeout_ms,
                 }, .{
                     .alpn = &alpn,
                     .cert_chain_der = &.{active_cert},
@@ -501,6 +514,7 @@ fn serveConcurrent(
                             try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                         }
                         if (coalesced_handshake.backend.drain.first_error) |drain_error| return drain_error;
+                        try sendHandshakeConfirmation(io, socket, &server_endpoint, managed, now_nanos);
                         continue;
                     }
                     var datagram_offset: usize = 0;
@@ -564,6 +578,7 @@ fn serveConcurrent(
                         }
                         datagram_offset += long_info.len;
                     }
+                    try sendHandshakeConfirmation(io, socket, &server_endpoint, managed, now_nanos);
                     continue;
                 }
 
@@ -736,15 +751,15 @@ pub fn main(init: std.process.Init) !void {
     else
         return error.MissingActiveConnectionCapacity;
     if (max_active_connections == 0) return error.InvalidConnectionCount;
-    const idle_timeout_nanos = if (args.next()) |raw_timeout|
+    const idle_timeout_ms = if (args.next()) |raw_timeout|
         try std.fmt.parseInt(u64, raw_timeout, 10)
     else
-        default_server_idle_timeout_nanos;
+        default_server_idle_timeout_ms;
     if (args.next() != null) return error.TooManyArgs;
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
     var socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} idle_timeout_ms={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, idle_timeout_nanos, mode });
+    std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} idle_timeout_ms={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, idle_timeout_ms, mode });
 
     // CERT/KEY environment variables override the embedded test certificate
     // (PEM loaded via quicz.tls_pem), matching the external server wrappers.
@@ -764,25 +779,25 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, mode, "concurrent") or std.mem.eql(u8, mode, "rolling")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-retry")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false, false, false, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false, false, false, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-limit")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false, false, false, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false, false, false, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-reset")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true, false, false, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true, false, false, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-stop")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, true, false, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, true, false, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-uni")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, true, false, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, true, false, idle_timeout_ms);
     }
     if (std.mem.eql(u8, mode, "concurrent-flow")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, true, idle_timeout_nanos);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, true, idle_timeout_ms);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
     if (completion_target == 0) return error.InvalidConnectionCount;
@@ -814,7 +829,12 @@ pub fn main(init: std.process.Init) !void {
         var lifecycle = EndpointConnectionLifecycle.init(allocator);
         defer lifecycle.deinit();
 
-        const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        const received_initial = receive_initial: while (true) {
+            const candidate = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+            const header = protection.peekProtectedLongPacketInfo(candidate.data) catch continue;
+            // The previous session can leave late ACK or close packets on this socket.
+            if (header.packet_type == .initial) break :receive_initial candidate;
+        };
         const server_path = endpoint.Udp4Tuple{
             .local = endpoint.Udp4Address.init(bind_address.ip4.bytes, bind_address.ip4.port),
             .remote = endpoint.Udp4Address.init(received_initial.from.ip4.bytes, received_initial.from.ip4.port),
@@ -941,6 +961,14 @@ pub fn main(init: std.process.Init) !void {
         }
         try require(handshake_confirmed);
         try require(connection.handshakeConfirmed());
+        const confirmation = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &connection,
+            4 + @as(i64, @intCast(handshake_datagrams)),
+            client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(confirmation);
+        try socket.send(io, &received_initial.from, confirmation);
 
         var request_received: [echo_stream_ids.len]bool = .{ false, false };
         var echoed: [echo_stream_ids.len]bool = .{ false, false };

@@ -78,6 +78,7 @@ pub const SentPacket = struct {
     crypto_frame: ?PendingCryptoFrame = null,
     reset_stream_frame: ?frame.ResetStreamFrame = null,
     stop_sending_frame: ?frame.StopSendingFrame = null,
+    handshake_done: bool = false,
 
     pub fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
         if (self.stream_frame) |pending| {
