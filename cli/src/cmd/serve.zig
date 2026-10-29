@@ -303,6 +303,9 @@ fn handleHttp11Connection(stream: std.Io.net.Stream, port: u16, tls_config: tls_
         std.debug.print("serve: TLS handshake failed: {s}\n", .{@errorName(err)});
         return;
     };
+    defer tls_stream.end() catch |err| {
+        if (common.g_verbose) std.debug.print("serve: TLS close failed: {s}\n", .{@errorName(err)});
+    };
     handleHttp11Tls(&tls_stream, port);
 }
 
