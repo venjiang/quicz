@@ -23,7 +23,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ZIG_DIR="${ZIG_AARCH64_LINUX_DIR:-/tmp/zig-aarch64-linux-0.17.0}"
-CONTAINER="quicz-linux-arm64"
+CONTAINER="quicz-linux-arm64-zig-0.17.0"
 ZIG="/opt/zig-aarch64-linux-0.17.0/zig"
 
 if [ ! -x "$ZIG_DIR/zig" ]; then

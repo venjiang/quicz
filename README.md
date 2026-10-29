@@ -165,10 +165,11 @@ Requires **Zig 0.17.0**. If your default `zig` command uses another version,
 invoke your 0.17.0 executable instead. For example, use `zig17 build` or
 `make ZIG=zig17` when that executable is named `zig17`.
 
-Known limitation: Zig 0.17.0 fails to compile the iOS device and simulator
-archives in `std.Io.Threaded` because `NullFile` has no `fd` field.
-The previous Zig 0.16.0 baseline compiles these archives. Native mobile ABI
-tests pass on macOS, but this migration is not yet ready for iOS deployment.
+For iOS `mobile-static` builds, the build applies a temporary compatibility
+fix to `std.Io.Threaded.processReplace` in a cache-local standard library copy.
+This step uses the POSIX `sed` utility. The installed compiler and standard
+library remain unchanged. Remove this compatibility step after an upstream
+toolchain update passes the device and simulator compilation checks.
 
 ```bash
 zig build                                    # build library

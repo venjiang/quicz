@@ -63,9 +63,23 @@ pub fn build(b: *std.Build) void {
             .{ .name = "quicz", .module = quicz_mod },
         },
     });
+    const mobile_zig_lib: ?std.Build.LazyPath = if (target.result.os.tag == .ios) blk: {
+        // Zig 0.17.0 routes iOS process replacement through unsupported spawning.
+        // Keep the POSIX path in a build-local copy, without changing the installed standard library.
+        const patch_threaded = b.addSystemCommand(&.{
+            "sed",
+            "s/if (is_darwin) if (t\\.spawnDarwin(/if (is_darwin and process.can_spawn) if (t.spawnDarwin(/",
+        });
+        patch_threaded.addFileArg(std.Build.LazyPath.zig_lib.path(b, "std/Io/Threaded.zig"));
+        const ios_stdlib = b.addWriteFiles();
+        _ = ios_stdlib.addCopyDirectory(.zig_lib, "", .{ .exclude_extensions = &.{"Threaded.zig"} });
+        _ = ios_stdlib.addCopyFile(patch_threaded.captureStdOut(.{}), "std/Io/Threaded.zig");
+        break :blk ios_stdlib.getDirectory();
+    } else null;
     const mobile_abi_lib = b.addLibrary(.{
         .name = "quicz_mobile",
         .root_module = mobile_abi_mod,
+        .zig_lib_dir = mobile_zig_lib,
     });
     const install_mobile_abi = b.addInstallArtifact(mobile_abi_lib, .{});
     const install_mobile_header = b.addInstallFileWithDir(

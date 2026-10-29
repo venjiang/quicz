@@ -130,9 +130,10 @@ const qlog = quicz.qlog;
 需要 Zig **0.17.0**。如果默认 `zig` 命令使用其他版本，请改用 0.17.0 的可执行文件。
 例如，该命令名为 `zig17` 时，可以使用 `zig17 build` 或 `make ZIG=zig17`。
 
-已知限制：Zig 0.17.0 的设备和模拟器 iOS 静态库构建在 `std.Io.Threaded` 中失败，
-原因是 `NullFile` 没有 `fd` 字段。原始 Zig 0.16.0 基线可以编译这些静态库。
-移动 ABI 的 macOS 本机测试已通过，但本次迁移尚不适用于 iOS 部署。
+iOS 的 `mobile-static` 构建会在缓存中的标准库副本上，对
+`std.Io.Threaded.processReplace` 应用临时兼容修正。该步骤使用 POSIX `sed` 工具。
+已安装的编译器和标准库保持不变。后续上游工具链通过设备和模拟器编译检查后，
+应移除此兼容步骤。
 
 ```sh
 zig build                                    # 构建库

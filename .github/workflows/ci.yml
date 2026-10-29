@@ -21,6 +21,14 @@ jobs:
       - name: Format check
         run: zig fmt --check build.zig src examples
 
+      - name: Toolchain script regressions
+        run: sh scripts/test_zig_toolchain_scripts.sh
+
+      - name: iOS mobile static libraries
+        run: |
+          zig build mobile-static -Dtarget=aarch64-ios -Doptimize=safe --prefix "$RUNNER_TEMP/quicz-ios-device"
+          zig build mobile-static -Dtarget=aarch64-ios-simulator -Doptimize=safe --prefix "$RUNNER_TEMP/quicz-ios-simulator"
+
   interop:
     name: Cross-implementation interop (Linux x86_64)
     runs-on: ubuntu-latest

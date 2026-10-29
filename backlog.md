@@ -4,7 +4,8 @@
 
 记录日期：2026-10-29。
 
-状态：迁移进行中。分支为 `feat/zig-0.17`。macOS 原生构建和测试通过，iOS 交叉编译仍受阻。
+状态：review 修复已通过复审。分支为 `feat/zig-0.17`。
+macOS 原生验证和 iOS 设备、模拟器静态库构建已通过。全量互通矩阵仍待 CI 验证。
 
 迁移前基线：提交 `7beeffa2728b77165be7f99ec3a33a79ec57ab89` 使用 Zig 0.16.0。
 本机默认 `zig` 仍为 0.16.0，`zig17` 为 0.17.0。
@@ -45,7 +46,8 @@ IPv4 P2P 的真实网络故障仍需单独定位，版本升级不构成该故�
 - [x] `zig build --summary all` 通过。
 - [x] IPv4、IPv6、P2P 和共享 socket 的相关回归通过。
 - [x] 移动 C ABI 的本机测试通过，包括超时、取消和 socket 交接。
-- [ ] 受影响的平台交叉编译和现有外部互通检查通过。
+- [x] 受影响的平台交叉编译通过。
+- [ ] CI 完整外部互通矩阵通过。
 - [x] 同步运行方式和工具链文档，并记录无法执行的验收项。
 - [x] `git diff --check` 通过，复审确认没有混入协议或功能改动。
 
@@ -61,14 +63,24 @@ IPv4 P2P 的真实网络故障仍需单独定位，版本升级不构成该故�
 - 独立 Go 实现与迁移后的客户端、服务端均完成证书验证及双流回显。
 - CLI 的本地 HTTPS 和 HTTP/3 证书验证请求均通过。
 
-iOS 仍是阻塞项。设备和模拟器的 `mobile-static` 构建均在
-Zig 0.17.0 的 `std/Io/Threaded.zig` 中失败，错误为 `NullFile` 没有 `fd`。
+iOS 最初在 Zig 0.17.0 的 `std/Io/Threaded.zig` 中失败，错误为 `NullFile` 没有 `fd`。
+不依赖 quicz 的最小程序也复现该错误，原始 0.16.0 基线则可编译。
+问题是 `processReplace` 在不能 spawn 的 iOS 上进入 `spawnDarwin`，最终访问 `getDevNullFd`。
 
-不依赖 quicz 的最小程序也复现该错误。失败链路为 I/O vtable 的
-`processReplace`、`spawnDarwin` 和 `getDevNullFd`。
-同一原始 0.16.0 基线的 iOS 静态库编译通过。
-本轮没有修改全局标准库，也没有通过切换 I/O 后端绕过失败。
-在 iOS 构建恢复前，不应将整个迁移标为完成或合入默认分支。
+修复仅用于 iOS `mobile-static` 编译。构建会在缓存中复制标准库，
+将上述条件改为 `is_darwin and process.can_spawn`。iOS 保留原有 POSIX replacement 路径。
+
+构建使用标准 `sed` 工具和公开的 Zig build API。
+缓存副本约为 228 MiB。全局标准库、`Threaded` 后端及 C ABI 均不改变。
+
+设备和模拟器构建各为 6/6，现有脚本的 XCFramework 打包也通过。
+两份 C ABI 头文件与仓库一致，两个平台的 SDK 链接检查均通过。尚未在实体设备运行。
+CI 已增加两个 iOS 目标的编译门禁。后续上游工具链通过这些门禁后，应移除此兼容步骤。
+
+两个 P2 也已修复。Linux 容器名称现在包含 Zig 版本，旧容器会保留。
+benchmark 的元数据查询和构建使用同一个 `${ZIG:-zig}`。
+新增 shell 回归先复现两项失败，修复后全部通过。测试模拟容器和编译器，不运行真实性能测试。
+修复后的两路复审覆盖原始基线至当前工作区，均未发现剩余或新增 P1/P2。
 
 Retry 进程场景另有 `TokenExpired` 失败。
 同一场景在原始 0.16.0 提交上也失败，因此本轮将其记录为既有问题。
