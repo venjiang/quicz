@@ -172,8 +172,9 @@ timer、投递 stateless reset、清理关闭连接。生产级高层 API 已通
 TLS 完成不等于 QUIC 客户端握手确认。
 服务端在 TLS 完成时确认握手。客户端只在收到 `HANDSHAKE_DONE` 后确认握手。
 服务端排队该帧时保留尚未发送的 Handshake CRYPTO。
-Recovery 在丢包或 PTO 后重传 `HANDSHAKE_DONE`，直到任意副本被 ACK。
-收到 ACK 后，连接取消待发副本。其他副本之后丢失时，不再重新排队该帧。
+Recovery 在丢包或 PTO 后重传 `HANDSHAKE_DONE`，直到在途副本或保留记录中的已判丢副本被 ACK。
+连接保留最近 32 个已判丢副本的 packet number，不保留整包缓冲。
+收到匹配的 ACK 后，连接取消待发副本。其他副本之后丢失时，不再重新排队该帧。
 
 ### 1-RTT stream path
 

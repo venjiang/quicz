@@ -794,6 +794,9 @@ pub const Connection = struct {
     pending_handshake_done: bool,
     handshake_done_sent: bool,
     handshake_done_acked: bool,
+    // Retain only PN metadata after loss, with oldest-copy eviction when full.
+    lost_handshake_done_packet_numbers: [32]u64,
+    lost_handshake_done_count: usize,
     peer_close: ?PeerClose,
     pending_close: ?PendingCloseFrame,
     state: ConnectionState,
@@ -966,6 +969,8 @@ pub const Connection = struct {
             .pending_handshake_done = false,
             .handshake_done_sent = false,
             .handshake_done_acked = false,
+            .lost_handshake_done_packet_numbers = undefined,
+            .lost_handshake_done_count = 0,
             .peer_close = null,
             .pending_close = null,
             .state = .active,
@@ -8804,6 +8809,15 @@ pub const Connection = struct {
         var newly_acked_ect0: u64 = 0;
         var newly_acked_ect1: u64 = 0;
         var local_key_update_acked = false;
+        var newly_acked_handshake_done = false;
+        if (space == .application and !self.handshake_done_acked) {
+            for (self.lost_handshake_done_packet_numbers[0..self.lost_handshake_done_count]) |packet_number| {
+                if (ackFrameContains(ack, packet_number)) {
+                    newly_acked_handshake_done = true;
+                    break;
+                }
+            }
+        }
         const congestion_window_utilized = packet_space.recovery_state.isCongestionWindowUtilized();
 
         var i: usize = 0;
@@ -8836,13 +8850,18 @@ pub const Connection = struct {
                 .ect1 => newly_acked_ect1 += 1,
             }
             if (removed.handshake_done) {
-                self.handshake_done_acked = true;
-                self.pending_handshake_done = false;
+                newly_acked_handshake_done = true;
             }
             markSentPacketAckedOnStreams(self, removed);
             removed.deinit(self.allocator);
         }
 
+        // A late ACK can confirm the frame without acknowledging any in-flight bytes.
+        if (newly_acked_handshake_done) {
+            self.handshake_done_acked = true;
+            self.pending_handshake_done = false;
+            self.lost_handshake_done_count = 0;
+        }
         if (acked_bytes == 0) return;
 
         const ecn_result = self.validateEcnAck(
@@ -9103,7 +9122,16 @@ pub const Connection = struct {
             }
 
             var removed = packet_space.sent_packets.orderedRemove(i);
-            if (removed.handshake_done and !self.handshake_done_acked) self.pending_handshake_done = true;
+            if (removed.handshake_done and !self.handshake_done_acked) {
+                const retained = &self.lost_handshake_done_packet_numbers;
+                if (self.lost_handshake_done_count == retained.len) {
+                    std.mem.copyForwards(u64, retained[0 .. retained.len - 1], retained[1..]);
+                    self.lost_handshake_done_count -= 1;
+                }
+                retained[self.lost_handshake_done_count] = removed.packet_number;
+                self.lost_handshake_done_count += 1;
+                self.pending_handshake_done = true;
+            }
             result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_nanos.*);
             removed.deinit(self.allocator);
         }

@@ -225,8 +225,9 @@ TLS completion does not confirm a QUIC client handshake.
 The server confirms its handshake when TLS completes.
 The client confirms its handshake only after it receives `HANDSHAKE_DONE`.
 The server queues this frame without discarding pending Handshake CRYPTO output.
-Recovery retransmits `HANDSHAKE_DONE` after loss or PTO until an ACK covers a copy.
-An ACK cancels pending copies and prevents later loss of another copy from queuing the frame again.
+Recovery retransmits `HANDSHAKE_DONE` after loss or PTO until an ACK covers an in-flight or retained lost copy.
+The connection retains the packet numbers of the 32 most recently declared-lost copies, without retaining their packet buffers.
+A matching ACK cancels pending copies and prevents later loss of another copy from queuing the frame again.
 
 ### 1-RTT Stream Path
 
