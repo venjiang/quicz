@@ -7,9 +7,8 @@
 //!     single server drive task)
 //!   - success / failure counts
 //!
-//! Run with a Debug build to also leak-check the whole run:
-//!   zig build run-scale-bench                      # Debug, leak-checked
-//!   zig build run-scale-bench -Doptimize=ReleaseFast
+//! The benchmark uses optimized protocol code and a checked debug allocator.
+//!   zig build run-scale-bench
 
 const std = @import("std");
 const test_certs = @import("test_certs.zig");
@@ -26,6 +25,8 @@ const alpn = [_][]const u8{"hq-interop"};
 const Result = struct {
     ok: bool = false,
     connect_ms: u64 = 0,
+    stage: enum { init, connect, send, receive, done } = .init,
+    failure: ?anyerror = null,
 };
 
 fn echoHandler(conn: ServerConnection) std.Io.Cancelable!void {
@@ -48,31 +49,55 @@ fn clientTask(io: std.Io, allocator: std.mem.Allocator, idx: usize, results: []R
         .server_name = "localhost",
         .alpn = &alpn,
         .insecure_skip_verify = true,
-    }) catch return;
+    }) catch |err| {
+        results[idx].failure = err;
+        return;
+    };
     defer client.deinit();
 
     const t0 = std.Io.Timestamp.now(io, .awake);
-    client.connect() catch return;
+    results[idx].stage = .connect;
+    client.connect() catch |err| {
+        results[idx].failure = err;
+        return;
+    };
     const t1 = std.Io.Timestamp.now(io, .awake);
     results[idx].connect_ms = @intCast(std.Io.Duration.toMilliseconds(t0.durationTo(t1)));
 
-    const payload = allocator.alloc(u8, echo_payload_len) catch return;
+    results[idx].stage = .send;
+    const payload = allocator.alloc(u8, echo_payload_len) catch |err| {
+        results[idx].failure = err;
+        return;
+    };
     defer allocator.free(payload);
     @memset(payload, @intCast('A' + @mod(idx, 26)));
-    const sid = client.send(payload, false) catch return;
+    results[idx].stage = .send;
+    const sid = client.send(payload, false) catch |err| {
+        results[idx].failure = err;
+        return;
+    };
+    results[idx].stage = .receive;
     var rbuf: [4096]u8 = undefined;
     var received: usize = 0;
     while (received < payload.len) {
-        const n = client.receive(sid, &rbuf) catch return;
+        const n = client.receive(sid, &rbuf) catch |err| {
+            results[idx].failure = err;
+            return;
+        };
         if (n == 0) break;
+        if (n > payload.len - received or !std.mem.eql(u8, payload[received..][0..n], rbuf[0..n])) {
+            results[idx].failure = error.EchoMismatch;
+            return;
+        }
         received += n;
     }
     results[idx].ok = received == payload.len;
+    results[idx].stage = .done;
 }
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(.{ .safety = true, .stack_trace_frames = 6 }) = .init;
     const allocator = gpa.allocator();
 
     var server = try Server.init(allocator, io, .{
@@ -97,8 +122,9 @@ pub fn main(init: std.process.Init) !void {
 
     var ok_count: usize = 0;
     var total_connect_ms: u64 = 0;
-    for (results) |r| {
+    for (results, 0..) |r, index| {
         if (r.ok) ok_count += 1;
+        if (!r.ok) std.debug.print("scale client {d}: stage={s} failure={s}\n", .{ index, @tagName(r.stage), if (r.failure) |err| @errorName(err) else "EchoMismatch" });
         total_connect_ms += r.connect_ms;
     }
     const seconds: f64 = @as(f64, @floatFromInt(std.Io.Duration.toMilliseconds(t0.durationTo(t1)))) / 1000.0;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const quicz = @import("quicz");
+const ms = std.time.ns_per_ms;
 
 fn packetContainsCrypto(
     allocator: std.mem.Allocator,
@@ -38,12 +39,12 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    var pre_confirm = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var pre_confirm = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer pre_confirm.deinit();
-    _ = try pre_confirm.recordPacketSentInSpace(.application, 10, 100);
+    _ = try pre_confirm.recordPacketSentInSpace(.application, 10 * ms, 100);
     if (pre_confirm.ptoDeadline(.application) != null) return error.PtoRecoveryExampleFailed;
     if (pre_confirm.lossDetectionTimerDeadline() != null) return error.PtoRecoveryExampleFailed;
-    try pre_confirm.checkPtoTimeouts(10_000);
+    try pre_confirm.checkPtoTimeouts(10_000 * ms);
     if (pre_confirm.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
     if (pre_confirm.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
     try pre_confirm.confirmHandshake();
@@ -53,10 +54,10 @@ pub fn main() !void {
         .{pre_confirm_deadline},
     );
 
-    var anti_deadlock = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var anti_deadlock = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer anti_deadlock.deinit();
-    _ = try anti_deadlock.recordPacketSentInSpace(.initial, 10, 100);
-    try anti_deadlock.receiveAckInSpace(.initial, 70, .{
+    _ = try anti_deadlock.recordPacketSentInSpace(.initial, 10 * ms, 100);
+    try anti_deadlock.receiveAckInSpace(.initial, 70 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -81,13 +82,13 @@ pub fn main() !void {
         .{ anti_deadlock_deadline.deadline_nanos, anti_deadlock_probe.len },
     );
 
-    var initial_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var initial_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer initial_ack_client.deinit();
-    _ = try initial_ack_client.recordPacketSentInSpace(.initial, 10, 100);
+    _ = try initial_ack_client.recordPacketSentInSpace(.initial, 10 * ms, 100);
     initial_ack_client.initial_packet_space.recovery_state.pto_count = 2;
     initial_ack_client.handshake_packet_space.recovery_state.pto_count = 2;
     initial_ack_client.recovery_state.pto_count = 2;
-    try initial_ack_client.receiveAckInSpace(.initial, 70, .{
+    try initial_ack_client.receiveAckInSpace(.initial, 70 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -97,12 +98,12 @@ pub fn main() !void {
     if (initial_ack_client.handshake_packet_space.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
     if (initial_ack_client.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
 
-    var handshake_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var handshake_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer handshake_ack_client.deinit();
-    _ = try handshake_ack_client.recordPacketSentInSpace(.handshake, 20, 100);
+    _ = try handshake_ack_client.recordPacketSentInSpace(.handshake, 20 * ms, 100);
     handshake_ack_client.handshake_packet_space.recovery_state.pto_count = 2;
     handshake_ack_client.recovery_state.pto_count = 2;
-    try handshake_ack_client.receiveAckInSpace(.handshake, 90, .{
+    try handshake_ack_client.receiveAckInSpace(.handshake, 90 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -116,27 +117,28 @@ pub fn main() !void {
         .{ preserved_initial_ack_backoff, reset_handshake_ack_backoff },
     );
 
-    var limited_server = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100 });
+    var limited_server = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100_000_000 });
     defer limited_server.deinit();
     try limited_server.recordPeerAddressBytesReceived(1);
-    _ = try limited_server.recordPacketSentInSpace(.initial, 10, 3);
+    _ = try limited_server.recordPacketSentInSpace(.initial, 10 * ms, 3);
     if ((limited_server.antiAmplificationLimitRemaining() orelse return error.PtoRecoveryExampleFailed) != 0) {
         return error.PtoRecoveryExampleFailed;
     }
     if (limited_server.ptoDeadline(.initial) != null) return error.PtoRecoveryExampleFailed;
     if (limited_server.lossDetectionTimerDeadline() != null) return error.PtoRecoveryExampleFailed;
-    try limited_server.checkPtoTimeouts(10_000);
+    const anti_amp_unblock_nanos: i64 = 10_000 * ms;
+    try limited_server.checkPtoTimeouts(anti_amp_unblock_nanos);
     if (limited_server.initial_packet_space.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
     if (limited_server.initial_packet_space.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
 
-    const anti_amp_serviced = (try limited_server.recordPeerAddressDatagramReceived(10_000, 1)) orelse return error.PtoRecoveryExampleFailed;
+    const anti_amp_serviced = (try limited_server.recordPeerAddressDatagramReceived(anti_amp_unblock_nanos, 1)) orelse return error.PtoRecoveryExampleFailed;
     const anti_amp_pto_deadline = anti_amp_serviced.deadline_nanos;
     if (anti_amp_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
     if (anti_amp_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     if (limited_server.initial_packet_space.pending_ping_count != 1) return error.PtoRecoveryExampleFailed;
 
     var anti_amp_buf: [32]u8 = undefined;
-    const anti_amp_probe = (try limited_server.pollTxInSpace(.initial, anti_amp_pto_deadline + 1, &anti_amp_buf)) orelse return error.PtoRecoveryExampleFailed;
+    const anti_amp_probe = (try limited_server.pollTxInSpace(.initial, anti_amp_unblock_nanos + 1, &anti_amp_buf)) orelse return error.PtoRecoveryExampleFailed;
     var anti_amp_decoded = try quicz.frame.decodeFrameSlice(anti_amp_probe, allocator);
     defer quicz.frame.deinitFrame(&anti_amp_decoded.frame, allocator);
     switch (anti_amp_decoded.frame) {
@@ -149,11 +151,11 @@ pub fn main() !void {
         .{ anti_amp_pto_deadline, anti_amp_probe.len },
     );
 
-    var conn = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var conn = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer conn.deinit();
     try conn.confirmHandshake();
 
-    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 10 * ms, 100);
     const timer = conn.lossDetectionTimerDeadline() orelse return error.PtoRecoveryExampleFailed;
     if (timer.space != .application) return error.PtoRecoveryExampleFailed;
     if (timer.kind != .pto) return error.PtoRecoveryExampleFailed;
@@ -187,12 +189,12 @@ pub fn main() !void {
         .{ deadline, payload.len, conn.congestionWindow(.application), conn.bytesInFlight(.application) },
     );
 
-    var stream_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var stream_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer stream_probe.deinit();
     try stream_probe.confirmHandshake();
     const stream_id = try stream_probe.openStream();
     try stream_probe.sendOnStream(stream_id, "old", false);
-    _ = (try stream_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    _ = (try stream_probe.pollTx(10 * ms, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     try stream_probe.sendOnStream(stream_id, "new", false);
     const stream_probe_deadline = stream_probe.ptoDeadline(.application) orelse return error.PtoRecoveryExampleFailed;
     try stream_probe.checkPtoTimeouts(stream_probe_deadline);
@@ -214,12 +216,12 @@ pub fn main() !void {
         .{stream_probe_payload.len},
     );
 
-    var retransmit_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var retransmit_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer retransmit_probe.deinit();
     try retransmit_probe.confirmHandshake();
     const retransmit_stream_id = try retransmit_probe.openStream();
     try retransmit_probe.sendOnStream(retransmit_stream_id, "old", false);
-    _ = (try retransmit_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    _ = (try retransmit_probe.pollTx(10 * ms, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     const retransmit_deadline = retransmit_probe.ptoDeadline(.application) orelse return error.PtoRecoveryExampleFailed;
     try retransmit_probe.checkPtoTimeouts(retransmit_deadline);
 
@@ -240,13 +242,13 @@ pub fn main() !void {
         .{retransmit_payload.len},
     );
 
-    var reset_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var reset_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer reset_probe.deinit();
     try reset_probe.confirmHandshake();
     const reset_stream_id = try reset_probe.openStream();
     try reset_probe.sendOnStream(reset_stream_id, "rst", false);
     try reset_probe.resetStream(reset_stream_id, 21);
-    _ = (try reset_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    _ = (try reset_probe.pollTx(10 * ms, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     const reset_probe_deadline = reset_probe.ptoDeadline(.application) orelse return error.PtoRecoveryExampleFailed;
     try reset_probe.checkPtoTimeouts(reset_probe_deadline);
     if (reset_probe.pending_reset_streams.items.len != 1) return error.PtoRecoveryExampleFailed;
@@ -261,7 +263,7 @@ pub fn main() !void {
         },
         else => return error.PtoRecoveryExampleFailed,
     }
-    try reset_probe.receiveAckInSpace(.application, reset_probe_deadline + 10_000, .{
+    try reset_probe.receiveAckInSpace(.application, reset_probe_deadline + 10_000 * std.time.ns_per_ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -270,7 +272,7 @@ pub fn main() !void {
     if (reset_probe_state.send != .reset_acked) return error.PtoRecoveryExampleFailed;
     if (reset_probe.pending_reset_streams.items.len != 0) return error.PtoRecoveryExampleFailed;
     if (reset_probe.sentPacketCount(.application) != 1) return error.PtoRecoveryExampleFailed;
-    try reset_probe.checkLossDetectionTimeouts(reset_probe_deadline + 100_000);
+    try reset_probe.checkLossDetectionTimeouts(reset_probe_deadline + 100_000 * std.time.ns_per_ms);
     if (reset_probe.pending_reset_streams.items.len != 0) return error.PtoRecoveryExampleFailed;
     if (reset_probe.sentPacketCount(.application) != 0) return error.PtoRecoveryExampleFailed;
 
@@ -283,12 +285,12 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var crypto_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var crypto_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer crypto_probe.deinit();
     try crypto_probe.confirmHandshake();
     try crypto_probe.sendCrypto("pto protected crypto");
     const first_crypto = (try crypto_probe.pollProtectedShortDatagram(
-        10,
+        10 * ms,
         &server_dcid,
         secrets.client,
     )) orelse return error.PtoRecoveryExampleFailed;
@@ -318,16 +320,16 @@ pub fn main() !void {
         .{crypto_payload.len},
     );
 
-    var handshake_rtt = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100 });
+    var handshake_rtt = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ns = 100_000_000 });
     defer handshake_rtt.deinit();
-    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 0, 100);
-    try handshake_rtt.receiveAckInSpace(.handshake, 100, .{
+    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 0 * ms, 100);
+    try handshake_rtt.receiveAckInSpace(.handshake, 100 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 1,
         .first_ack_range = 0,
     });
-    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 100, 100);
-    try handshake_rtt.receiveAckInSpace(.handshake, 220, .{
+    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 100 * ms, 100);
+    try handshake_rtt.receiveAckInSpace(.handshake, 220 * ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 1,
         .first_ack_range = 0,
@@ -339,13 +341,13 @@ pub fn main() !void {
         .{handshake_rtt.smoothedRtt(.handshake)},
     );
 
-    var shared_rtt = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100 });
+    var shared_rtt = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100_000_000 });
     defer shared_rtt.deinit();
     try shared_rtt.validatePeerAddress();
 
-    _ = try shared_rtt.recordPacketSentInSpace(.initial, 0, 100);
-    _ = try shared_rtt.recordPacketSentInSpace(.handshake, 10, 100);
-    try shared_rtt.receiveAckInSpace(.initial, 50, .{
+    _ = try shared_rtt.recordPacketSentInSpace(.initial, 0 * ms, 100);
+    _ = try shared_rtt.recordPacketSentInSpace(.handshake, 10 * ms, 100);
+    try shared_rtt.receiveAckInSpace(.initial, 50 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 5,
         .first_ack_range = 0,
@@ -353,7 +355,7 @@ pub fn main() !void {
     const shared_handshake_deadline = shared_rtt.ptoDeadline(.handshake) orelse return error.PtoRecoveryExampleFailed;
     if (shared_rtt.smoothedRtt(.handshake) != 50) return error.PtoRecoveryExampleFailed;
     if (shared_rtt.smoothedRtt(.application) != 50) return error.PtoRecoveryExampleFailed;
-    if (shared_handshake_deadline != 160) return error.PtoRecoveryExampleFailed;
+    if (shared_handshake_deadline != 160 * ms) return error.PtoRecoveryExampleFailed;
 
     std.debug.print(
         "[pto] RTT shared across spaces initial_smoothed={d} handshake_deadline={d} application_smoothed={d}\n",
@@ -364,17 +366,17 @@ pub fn main() !void {
         },
     );
 
-    var spaces = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100 });
+    var spaces = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ns = 100_000_000 });
     defer spaces.deinit();
     try spaces.validatePeerAddress();
 
-    _ = try spaces.recordPacketSentInSpace(.initial, 10, 100);
-    _ = try spaces.recordPacketSentInSpace(.handshake, 20, 100);
+    _ = try spaces.recordPacketSentInSpace(.initial, 10 * ms, 100);
+    _ = try spaces.recordPacketSentInSpace(.handshake, 20 * ms, 100);
 
     const initial_deadline = spaces.ptoDeadline(.initial) orelse return error.PtoRecoveryExampleFailed;
     const handshake_deadline = spaces.ptoDeadline(.handshake) orelse return error.PtoRecoveryExampleFailed;
-    if (initial_deadline != 310) return error.PtoRecoveryExampleFailed;
-    if (handshake_deadline != 320) return error.PtoRecoveryExampleFailed;
+    if (initial_deadline != 310 * ms) return error.PtoRecoveryExampleFailed;
+    if (handshake_deadline != 320 * ms) return error.PtoRecoveryExampleFailed;
     const spaces_timer = spaces.lossDetectionTimerDeadline() orelse return error.PtoRecoveryExampleFailed;
     if (spaces_timer.space != .initial) return error.PtoRecoveryExampleFailed;
     if (spaces_timer.kind != .pto) return error.PtoRecoveryExampleFailed;
@@ -384,7 +386,7 @@ pub fn main() !void {
     if (initial_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
     if (initial_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     const backed_off_handshake_deadline = spaces.ptoDeadline(.handshake) orelse return error.PtoRecoveryExampleFailed;
-    if (backed_off_handshake_deadline != 620) return error.PtoRecoveryExampleFailed;
+    if (backed_off_handshake_deadline != 620 * ms) return error.PtoRecoveryExampleFailed;
 
     const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var initial_decoded = try quicz.frame.decodeFrameSlice(initial_payload, allocator);

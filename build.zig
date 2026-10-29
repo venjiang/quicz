@@ -812,9 +812,9 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/scale_bench.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = .fast,
             .imports = &.{
-                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz", .module = quicz_bench_mod },
             },
         }),
     });

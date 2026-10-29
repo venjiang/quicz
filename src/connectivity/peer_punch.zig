@@ -282,10 +282,39 @@ test "peer learning cannot combine sources or reuse the original challenge" {
 }
 
 test "peer learning has an absolute deadline and propagates cancellation" {
+    const Clock = struct {
+        var active: *@This() = undefined;
+        base_now: @TypeOf(std.testing.io.vtable.now),
+        base_wait: @TypeOf(std.testing.io.vtable.batchAwaitConcurrent),
+        offset_ns: std.atomic.Value(i64) = .init(0),
+
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            var timestamp = active.base_now(context, clock);
+            if (clock == .awake) timestamp.nanoseconds += active.offset_ns.load(.acquire);
+            return timestamp;
+        }
+
+        fn wait(context: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+            var mapped = timeout;
+            switch (mapped) {
+                .deadline => |*deadline| if (deadline.clock == .awake) {
+                    deadline.raw.nanoseconds -= active.offset_ns.load(.acquire);
+                },
+                else => {},
+            }
+            return active.base_wait(context, batch, mapped);
+        }
+    };
     for ([_]bool{ false, true }) |cancel| {
         var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
         defer threaded.deinit();
         const io = threaded.io();
+        var vtable = io.vtable.*;
+        var clock = Clock{ .base_now = vtable.now, .base_wait = vtable.batchAwaitConcurrent };
+        Clock.active = &clock;
+        vtable.now = Clock.now;
+        vtable.batchAwaitConcurrent = Clock.wait;
+        const timed_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
         const address = Address{ .ip4 = .loopback(0) };
         const host = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
         defer host.close(io);
@@ -293,7 +322,7 @@ test "peer learning has an absolute deadline and propagates cancellation" {
         defer advertised.close(io);
         const learned = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
         defer learned.close(io);
-        var check = TestCheck{ .io = io, .socket = host, .remote = advertised.address, .attempt = try PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{
+        var check = TestCheck{ .io = timed_io, .socket = host, .remote = advertised.address, .attempt = try PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{
             .initial_retry_ms = 400,
             .maximum_retry_ms = 400,
             .max_attempts = 1,
@@ -310,14 +339,15 @@ test "peer learning has an absolute deadline and propagates cancellation" {
             const retained = try advertised.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
             try std.testing.expectEqualStrings("borrowed-socket-open", retained.data);
         } else {
-            try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+            // Advance logical time without depending on a sleep finishing before the deadline.
+            clock.offset_ns.store(250 * std.time.ns_per_ms, .release);
             const probe = wire.encode(@splat(0x42), .{ .kind = .probe, .attempt_id = @splat(0x11), .nonce = @splat(0xb2) });
             try learned.send(io, &host.address, &probe);
             task.await(io);
             try std.testing.expectEqual(@as(?anyerror, error.PunchFailed), check.failure);
             try std.testing.expectEqual(@as(u32, 2), check.attempt.diagnostics.probe_sends);
         }
-        try std.testing.expect(started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 550);
+        try std.testing.expect(started.durationTo(std.Io.Timestamp.now(timed_io, .awake)).toMilliseconds() < 550);
     }
 }
 

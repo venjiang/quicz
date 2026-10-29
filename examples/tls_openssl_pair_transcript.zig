@@ -1283,6 +1283,11 @@ fn verifySocketBackedHandshakeCryptoDelivery(
     try require(client_ack_route.connection_id == server_handle);
     try require(std.mem.eql(u8, client_ack_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.bytesInFlight(.handshake) == 0);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    const anti_deadlock = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(anti_deadlock.timer.space == .handshake and anti_deadlock.timer.kind == .pto);
+    try client.confirmHandshake();
+    try client_lifecycle.armRecoveryTimerFromConnection(client_handle, &client);
     try require(client_lifecycle.recoveryTimerCount() == 0);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 

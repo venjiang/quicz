@@ -83,6 +83,7 @@ pub fn main() !void {
         .initial_max_streams_bidi = 1,
     });
     defer server.deinit();
+    try server.setLocalInitialSourceConnectionId(&.{ 0x51, 0x52, 0x53, 0x54 });
 
     var client_extension: [512]u8 = undefined;
     const client_bytes = try client.encodeLocalTransportParameters(&client_extension);

@@ -143,6 +143,7 @@ pub fn main() !void {
     try require(client_lifecycle.routeCount() == 1);
 
     try client_socket.send(io, &server_socket.address, unsupported_initial);
+    _ = try version_negotiation_client.recordPacketSentInSpace(.initial, 0, unsupported_initial.len);
 
     var server_receive_buf: [1500]u8 = undefined;
     const unsupported_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());

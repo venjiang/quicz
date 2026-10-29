@@ -676,13 +676,15 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
     // library ALPN reporting (application_protocol_negotiated on progress) is
     // verified by dedicated unit tests with mock backends.
 
-    const server_discard_progress = try server.driveCryptoBackendInSpace(
+    if (server.driveCryptoBackendInSpace(
         .handshake,
         server_tls_backend.cryptoBackend(),
         &scratch,
-    );
-    try require(server_discard_progress.handshake_confirmed);
-    try require(server_discard_progress.outbound_chunks == 0);
+    )) |_| {
+        return error.UnexpectedState;
+    } else |err| {
+        try require(err == error.InvalidPacket);
+    }
     try require(server.packetNumberSpaceDiscarded(.handshake));
     try require(!server.hasHandshakeProtectionKeys());
 
@@ -959,15 +961,17 @@ fn verifyAdapterPeerBackendConfirmation(
     try require(server_application_progress.handshake_confirmed);
     try require(server.handshakeConfirmed());
 
-    const server_discard_progress = try loop.server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+    if (loop.server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
         adapter_server_handle,
         server,
         .handshake,
         server_tls_backend.cryptoBackend(),
         &scratch,
-    );
-    try require(server_discard_progress.handshake_confirmed);
-    try require(server_discard_progress.outbound_chunks == 0);
+    )) |_| {
+        return error.UnexpectedState;
+    } else |err| {
+        try require(err == error.InvalidPacket);
+    }
     try require(server.packetNumberSpaceDiscarded(.handshake));
     try require(!server.hasHandshakeProtectionKeys());
 
@@ -1510,6 +1514,21 @@ pub fn main() !void {
     try require(c.quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
     try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_context));
 
+    // Send the client's Handshake flight before application keys discard that space.
+    const peer_backend_confirmation = try verifyAdapterPeerBackendConfirmation(
+        &endpoint_loop,
+        &connection,
+        &peer,
+        &paired_server_tls_backend,
+        paired_server_backend_context,
+        server_probe_client_handshake,
+        transcript_local_transport_parameters.client,
+        server_handshake_local,
+        server_handshake_peer,
+        server_application_local,
+        server_application_peer,
+    );
+
     try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_application_secret(
         openssl_context,
         1,
@@ -1540,20 +1559,6 @@ pub fn main() !void {
     try require(application_progress.handshake_confirmed);
     try require(connection.handshakeConfirmed());
     try require(connection.hasOneRttProtectionKeys());
-
-    const peer_backend_confirmation = try verifyAdapterPeerBackendConfirmation(
-        &endpoint_loop,
-        &connection,
-        &peer,
-        &paired_server_tls_backend,
-        paired_server_backend_context,
-        server_probe_client_handshake,
-        transcript_local_transport_parameters.client,
-        server_handshake_local,
-        server_handshake_peer,
-        server_application_local,
-        server_application_peer,
-    );
 
     try require(connection.packetNumberSpaceDiscarded(.handshake));
     try require(!connection.hasHandshakeProtectionKeys());
