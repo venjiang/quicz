@@ -414,7 +414,7 @@ pub const TlsStream = struct {
         // 2. X25519 key exchange.
         var x25519_secret: [32]u8 = undefined;
         tls13.secureRandomBytes(&x25519_secret);
-        const x25519_public = try X25519.recoverPublicKey(x25519_secret);
+        const x25519_public = X25519.recoverPublicKey(x25519_secret);
         const shared_secret = try X25519.scalarmult(x25519_secret, client_key);
 
         // 3. ServerHello (plaintext).

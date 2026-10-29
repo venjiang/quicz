@@ -347,7 +347,7 @@ test "Tls13ServerTransport sends to peer Initial source connection ID before NEW
     var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x34} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x34));
     try transport.connection.validatePeerAddress();
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
@@ -394,7 +394,7 @@ test "Tls13ServerTransport sends to the newest peer connection ID" {
     var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x44} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x44));
     try transport.connection.validatePeerAddress();
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
@@ -402,7 +402,7 @@ test "Tls13ServerTransport sends to the newest peer connection ID" {
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const reset_token = [_]u8{0x55} ** 16;
+    const reset_token = @as([16]u8, @splat(0x55));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -431,7 +431,7 @@ test "Tls13ServerTransport closes with protected application output and deadline
     var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x84} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x84));
     try transport.connection.validatePeerAddress();
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
@@ -439,7 +439,7 @@ test "Tls13ServerTransport closes with protected application output and deadline
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
-    const reset_token = [_]u8{0x85} ** 16;
+    const reset_token = @as([16]u8, @splat(0x85));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{

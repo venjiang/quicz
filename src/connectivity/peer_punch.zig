@@ -27,8 +27,8 @@ pub fn runUntilValidated(io: std.Io, socket: std.Io.net.Socket, remote: Address,
         if (expired) attempt.state = .failed;
         attempt.diagnostics = socket_counts;
         for (pairs[0..count]) |pair| {
-            inline for (std.meta.fields(Diagnostics)) |field| {
-                @field(attempt.diagnostics, field.name) +|= @field(pair.punch.diagnostics, field.name);
+            inline for (@typeInfo(Diagnostics).@"struct".field_names) |name| {
+                @field(attempt.diagnostics, name) +|= @field(pair.punch.diagnostics, name);
             }
         }
     }

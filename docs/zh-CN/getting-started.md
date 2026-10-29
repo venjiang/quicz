@@ -4,7 +4,7 @@
 
 quicz 暴露四层 API——开箱 HTTP/3、运行时传输、TLS 端点、sans-IO 核心。本指南用最上面两层；底层见 [API 分层](api-layers.md)（含与 s2n-quic / quic-go / quinn / quiche / msquic / quic-zig 对照）。
 
-前置：Zig 0.16.0。库为纯 Zig——无 C 依赖。
+前置：Zig 0.17.0。库使用纯 Zig，没有 C 库依赖。
 
 ## 1. 添加依赖
 
@@ -172,7 +172,7 @@ const n = try client.receive(sid, &buf); // 0 = EOF
 示例内置本地测试用 P-256 密钥对（见任意 `examples/*_loopback.zig`）。生产：
 
 - **macOS / arm64**：ECDSA P-256 证书可用。
-- **Linux x86_64**：Zig 0.16 的 `std.crypto` 对 P-256/P-384/Ed25519 签名验证有已知代码生成 bug。用 **RSA 证书** + **Release** 构建（`-Doptimize=ReleaseFast`）。OpenSSL 生成的 RSA 证书在 Linux 上验证正确。
+- **Linux x86_64**：Zig 0.16 的 `std.crypto` 对 P-256/P-384/Ed25519 签名验证有已知代码生成 bug。用 **RSA 证书** + **Release** 构建（`-Doptimize=fast`）。OpenSSL 生成的 RSA 证书在 Linux 上验证正确。
 
 `Server.Config` 支持 `bind_addr`（默认 `127.0.0.1`）；设 `.{0,0,0,0}` 监听所有接口。
 

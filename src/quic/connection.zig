@@ -2052,7 +2052,7 @@ pub const Connection = struct {
             .dcid = client_source_connection_id,
             .scid = retry_source_connection_id,
             .token = token,
-            .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+            .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
         };
         const datagram = protection.encodeRetryPacketWithIntegrity(
             self.allocator,
@@ -2107,7 +2107,7 @@ pub const Connection = struct {
         };
         defer packet.deinitRetryPacket(&retry, self.allocator);
 
-        if (@intFromEnum(retry.version) != @intFromEnum(self.config.chosen_version)) return error.InvalidPacket;
+        if (@backingInt(retry.version) != @backingInt(self.config.chosen_version)) return error.InvalidPacket;
         try self.validateOriginalDestinationConnectionIdForRecord(original_destination_connection_id);
         if (self.original_destination_connection_id_len == null) {
             try validateInitialDestinationConnectionIdLength(original_destination_connection_id);
@@ -2858,7 +2858,7 @@ pub const Connection = struct {
                 if (transport_error.transportParameterErrorCode(err)) |code| {
                     try self.closeConnection(
                         transport_error.codeValue(code),
-                        @intFromEnum(frame.FrameType.crypto),
+                        @backingInt(frame.FrameType.crypto),
                         "transport parameters",
                     );
                     return error.InvalidPacket;
@@ -2872,7 +2872,7 @@ pub const Connection = struct {
             error.VersionNegotiationError => {
                 try self.closeConnection(
                     transport_error.codeValue(.version_negotiation_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "version negotiation",
                 );
                 return error.InvalidPacket;
@@ -2880,7 +2880,7 @@ pub const Connection = struct {
             error.InvalidPacket => {
                 try self.closeConnection(
                     transport_error.codeValue(.transport_parameter_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "transport parameters",
                 );
                 return error.InvalidPacket;
@@ -2909,7 +2909,7 @@ pub const Connection = struct {
                 if (transport_error.transportParameterErrorCode(err)) |code| {
                     try self.closeConnection(
                         transport_error.codeValue(code),
-                        @intFromEnum(frame.FrameType.crypto),
+                        @backingInt(frame.FrameType.crypto),
                         "transport parameters",
                     );
                     return error.InvalidPacket;
@@ -2926,7 +2926,7 @@ pub const Connection = struct {
             error.VersionNegotiationError => {
                 try self.closeConnection(
                     transport_error.codeValue(.version_negotiation_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "version negotiation",
                 );
                 return error.InvalidPacket;
@@ -2934,7 +2934,7 @@ pub const Connection = struct {
             error.InvalidPacket => {
                 try self.closeConnection(
                     transport_error.codeValue(.transport_parameter_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "transport parameters",
                 );
                 return error.InvalidPacket;
@@ -2963,7 +2963,7 @@ pub const Connection = struct {
                 if (!version_information.containsAvailableVersion(version_information.chosen_version)) {
                     return error.InvalidPacket;
                 }
-                if (@intFromEnum(version_information.chosen_version) != @intFromEnum(self.config.chosen_version)) {
+                if (@backingInt(version_information.chosen_version) != @backingInt(self.config.chosen_version)) {
                     return error.VersionNegotiationError;
                 }
             },
@@ -2972,7 +2972,7 @@ pub const Connection = struct {
                     return error.VersionNegotiationError;
                 }
                 if (self.version_negotiation_selected_version) |selected| {
-                    if (@intFromEnum(version_information.chosen_version) != @intFromEnum(selected)) {
+                    if (@backingInt(version_information.chosen_version) != @backingInt(selected)) {
                         return error.VersionNegotiationError;
                     }
                     if (version_information.available_versions.len == 0) {
@@ -2983,7 +2983,7 @@ pub const Connection = struct {
                         version_information.available_versions,
                         version_information.chosen_version,
                     ) orelse return error.VersionNegotiationError;
-                    if (@intFromEnum(preferred) != @intFromEnum(selected)) {
+                    if (@backingInt(preferred) != @backingInt(selected)) {
                         return error.VersionNegotiationError;
                     }
                 }
@@ -3073,7 +3073,7 @@ pub const Connection = struct {
             version_information,
             compatibilities,
         ) orelse return error.VersionNegotiationError;
-        if (@intFromEnum(selected) != @intFromEnum(self.config.chosen_version)) {
+        if (@backingInt(selected) != @backingInt(self.config.chosen_version)) {
             return error.VersionNegotiationError;
         }
         return selected;
@@ -3088,7 +3088,7 @@ pub const Connection = struct {
             try self.validatePeerVersionInformation(version_information);
         } else if (self.side == .client) {
             if (self.version_negotiation_selected_version) |selected| {
-                if (@intFromEnum(selected) != @intFromEnum(packet.Version.v1)) return error.VersionNegotiationError;
+                if (@backingInt(selected) != @backingInt(packet.Version.v1)) return error.VersionNegotiationError;
             }
         }
     }
@@ -3671,7 +3671,7 @@ pub const Connection = struct {
                 if (offset > 0) break;
                 return error.InvalidPacket;
             };
-            if (@intFromEnum(info.version) != @intFromEnum(self.config.chosen_version) or info.len == 0) {
+            if (@backingInt(info.version) != @backingInt(self.config.chosen_version) or info.len == 0) {
                 if (offset > 0) break;
                 return error.InvalidPacket;
             }
@@ -3693,7 +3693,7 @@ pub const Connection = struct {
         var processed_count: usize = 0;
         while (offset < coalesced_end) {
             const info = protection.peekProtectedLongPacketInfo(datagram[offset..]) catch return error.InvalidPacket;
-            if (@intFromEnum(info.version) != @intFromEnum(self.config.chosen_version) or info.len == 0) return error.InvalidPacket;
+            if (@backingInt(info.version) != @backingInt(self.config.chosen_version) or info.len == 0) return error.InvalidPacket;
             const route = protectedLongPacketRouteFor(keys, info.packet_type) orelse return error.InvalidPacket;
             try self.processProtectedLongDatagramWithRoute(
                 route,
@@ -3844,7 +3844,7 @@ pub const Connection = struct {
         defer protection.deinitProtectedLongPacket(&decoded, self.allocator);
 
         if (decoded.len != datagram.len) return error.InvalidPacket;
-        if (@intFromEnum(decoded.packet.header.version) != @intFromEnum(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
+        if (@backingInt(decoded.packet.header.version) != @backingInt(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
             return error.InvalidPacket;
         }
         // RFC 9000 §13.1: packets with an already-received or below-window
@@ -8140,7 +8140,7 @@ pub const Connection = struct {
                     if (err == error.CryptoError and cryptoBackendDrivePolicyClosesOnError(peer_transport_parameter_policy)) {
                         try self.closeConnection(
                             transport_error.cryptoErrorCode(80),
-                            @intFromEnum(frame.FrameType.crypto),
+                            @backingInt(frame.FrameType.crypto),
                             "crypto error",
                         );
                         return error.InvalidPacket;

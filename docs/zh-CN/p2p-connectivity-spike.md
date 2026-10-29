@@ -42,7 +42,7 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 ```bash
 zig build mobile-static \
   -Dtarget=aarch64-ios \
-  -Doptimize=ReleaseSafe \
+  -Doptimize=safe \
   --prefix /tmp/quicz-ios
 ```
 

@@ -145,8 +145,8 @@ test "runtime handoff returns promptly after mutual validation" {
     defer first_socket.close(io);
     const second_socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer second_socket.close(io);
-    var first_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{});
-    var second_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xb2} ** 16, .{});
+    var first_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{});
+    var second_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xb2), .{});
     var first = TestRun{ .io = io, .socket = first_socket, .remote = second_socket.address, .attempt = &first_attempt };
     var second = TestRun{ .io = io, .socket = second_socket, .remote = first_socket.address, .attempt = &second_attempt };
     const started = std.Io.Timestamp.now(io, .awake);
@@ -213,8 +213,8 @@ test "validated driver acknowledges a retransmit after its first ACK is lost" {
     const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(io);
     const config = punch_attempt.Config{ .initial_retry_ms = 30, .maximum_retry_ms = 60 };
-    var attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, config);
-    var peer_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xb2} ** 16, config);
+    var attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), config);
+    var peer_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xb2), config);
     var task = TestRun{ .io = io, .socket = local, .remote = peer.address, .attempt = &attempt };
     var pending: std.Io.Group = .init;
     defer pending.cancel(io);
@@ -257,7 +257,7 @@ test "driver propagates cancellation without waiting for probe retry" {
     defer local.close(io);
     const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(io);
-    var attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{
+    var attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{
         .initial_retry_ms = 500,
         .maximum_retry_ms = 500,
         .max_attempts = 1,

@@ -75,9 +75,9 @@ pub fn main() !void {
 
     var app_endpoint: mobile.Ipv4Endpoint = undefined;
     if (mobile.quicz_mobile_client_bound_ipv4(handle, &app_endpoint) != 0) return error.LocalEndpointFailed;
-    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
-    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
-    var host_attempt = try PunchAttempt.init(key, attempt_id, .{0xb2} ** 16, .{});
+    const key: quicz.connectivity.punch_wire.Key = @splat(0x42);
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
+    var host_attempt = try PunchAttempt.init(key, attempt_id, @splat(0xb2), .{});
     var host_failure: ?anyerror = null;
     var host_punch_group: std.Io.Group = .init;
     try host_punch_group.concurrent(io, runHostPunch, .{HostPunchContext{
@@ -93,7 +93,7 @@ pub fn main() !void {
         .remote = .{ .address = .{ 127, 0, 0, 1 }, .port = host_port },
         .key = key,
         .attempt_id = attempt_id,
-        .nonce = .{0xa1} ** 16,
+        .nonce = @splat(0xa1),
         .initial_retry_ms = 100,
         .maximum_retry_ms = 1_000,
         .max_attempts = 5,

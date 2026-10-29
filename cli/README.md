@@ -27,7 +27,7 @@ make install                        # installs to /usr/local/bin/quicz (may need
 ```
 
 `make install-local` (or `make install PREFIX="$HOME/.local"`) builds with
-`-Doptimize=ReleaseFast` and installs the standalone binary to
+`-Doptimize=fast` and installs the standalone binary to
 `$HOME/.local/bin/quicz`. On macOS `/usr/local/bin` is usually not writable by
 the current user, so prefer this target and add `$HOME/.local/bin` to your
 `PATH` (e.g. `export PATH="$HOME/.local/bin:$PATH"` in your shell profile).

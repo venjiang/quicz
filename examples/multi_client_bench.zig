@@ -102,7 +102,7 @@ fn clientTask(io: std.Io, idx: usize, results: []Result) std.Io.Cancelable!void 
 
 fn runClients(io: std.Io, host: [4]u8) !void {
     g_server_host = host;
-    var results: [num_clients]Result = .{Result{}} ** num_clients;
+    var results: [num_clients]Result = @splat(Result{});
     var group: std.Io.Group = .init;
     for (0..num_clients) |i| {
         try group.concurrent(io, clientTask, .{ io, i, &results });

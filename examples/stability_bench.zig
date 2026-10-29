@@ -130,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
     try server.serve(&echoHandler);
     std.debug.print("stability bench: server on 127.0.0.1:{d}, clients={d}, duration={d} ms\n", .{ port, num_clients, g_run_duration_ms });
 
-    var stats: [num_clients]Stats = .{Stats{}} ** num_clients;
+    var stats: [num_clients]Stats = @splat(Stats{});
     var group: std.Io.Group = .init;
     for (0..num_clients) |i| {
         try group.concurrent(io, clientSession, .{ io, allocator, i, &stats });

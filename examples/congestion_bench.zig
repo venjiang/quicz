@@ -68,7 +68,7 @@ pub fn main() !void {
         "Losses",
         "Min after loss",
     });
-    std.debug.print("{s}\n", .{"-" ** 58});
+    std.debug.print("{s}\n", .{@as([58]u8, @splat('-'))});
     for (results) |r| {
         std.debug.print("{s:<10} {d:>10} B {d:>10} B {d:>6} {d:>12} B\n", .{
             r.name,

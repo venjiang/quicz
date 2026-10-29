@@ -181,7 +181,7 @@ pub fn main() !void {
             close_error_code = close.error_code;
             close_frame_type = close.frame_type;
             try require(close_error_code == quicz.transport_error.codeValue(.transport_parameter_error));
-            try require(close_frame_type == @intFromEnum(quicz.frame.FrameType.crypto));
+            try require(close_frame_type == @backingInt(quicz.frame.FrameType.crypto));
         },
         else => return error.TransportParameterExampleFailed,
     }
@@ -191,7 +191,7 @@ pub fn main() !void {
         .{
             greased_client_bytes.len,
             server_bytes.len,
-            @intFromEnum(compatible_selected),
+            @backingInt(compatible_selected),
             compatible_peer.available_versions.len,
             client.effectiveIdleTimeout().?,
             client.recovery_state.max_datagram_size,

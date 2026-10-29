@@ -267,9 +267,9 @@ pub fn main() !void {
 
     const stale_generation_1_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);
     const stale_ping_plaintext = [_]u8{
-        @intFromEnum(quicz.frame.FrameType.ping),
-        @intFromEnum(quicz.frame.FrameType.padding),
-        @intFromEnum(quicz.frame.FrameType.padding),
+        @backingInt(quicz.frame.FrameType.ping),
+        @backingInt(quicz.frame.FrameType.padding),
+        @backingInt(quicz.frame.FrameType.padding),
     };
     const stale_generation_1_ping = try quicz.protection.protectShortPacketAes128(
         allocator,

@@ -250,7 +250,7 @@ pub const H3Server = struct {
         if (pos < data.len and data[pos] == 0x00) pos += 1; // stream type
         while (pos < data.len) {
             const frame = try h3_frame.decodeFrame(data[pos..]);
-            if (frame.frame.frame_type == @intFromEnum(h3_frame.FrameType.settings)) {
+            if (frame.frame.frame_type == @backingInt(h3_frame.FrameType.settings)) {
                 const settings = try h3_connection.Settings.decodePayload(frame.frame.payload);
                 if (settings.qpack_max_table_capacity != 0) {
                     try self.setPeerMaxTableCapacity(settings.qpack_max_table_capacity);
@@ -381,7 +381,7 @@ pub const H3Server = struct {
 
     pub fn feedRequestBytes(self: *H3Server, stream_id: u64, data: []const u8) !FeedResult {
         const frame = try h3_frame.decodeFrame(data);
-        if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+        if (frame.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
             return error.ExpectedHeadersFrame;
         }
         if (frame.frame.payload.len > self.local_max_field_section_size) {
@@ -430,7 +430,7 @@ pub const H3Server = struct {
                     else => return e,
                 };
             }
-            if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+            if (frame.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
                 return error.ExpectedHeadersFrame;
             }
             if (frame.frame.payload.len > self.local_max_field_section_size) {
@@ -711,7 +711,7 @@ pub const H3Server = struct {
             const rs = entry.value_ptr;
             if (rs.phase != .headers or !rs.blocked) continue;
             const frame = h3_frame.decodeFrame(rs.wire.items) catch continue;
-            if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) continue;
+            if (frame.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) continue;
             const headers_wire = rs.wire.items[0..frame.consumed];
             const r = h3_request.decodeRequestWithDynamicWithHeaders(headers_wire, &self.dec_table.?, &rs.request_headers) catch |e| switch (e) {
                 error.BlockedByQpack => continue,
@@ -1261,7 +1261,7 @@ test "H3Server pumps a streamed response as multiple DATA frames with fin last" 
     var body_ok = true;
     while (true) {
         const frame = h3_frame.decodeFrame(mock.response_data.items[pos..]) catch break;
-        if (frame.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+        if (frame.frame.frame_type == @backingInt(h3_frame.FrameType.data)) {
             total += frame.frame.payload.len;
             var i: usize = 0;
             while (i < frame.frame.payload.len) : (i += 1) {
@@ -1340,7 +1340,7 @@ test "H3Server retries a flow-control-blocked response chunk" {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             _ = fin;
             if (sid == 3) return; // control stream
-            if (data.len > 0 and data[0] == @intFromEnum(h3_frame.FrameType.data)) {
+            if (data.len > 0 and data[0] == @backingInt(h3_frame.FrameType.data)) {
                 if (self.block_next_data) {
                     self.block_next_data = false;
                     return error.FlowControlBlocked;

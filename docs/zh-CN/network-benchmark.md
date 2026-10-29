@@ -14,9 +14,9 @@
 全部用 ReleaseFast 构建——Debug 构建是测量假象（编译器代码生成，非库逻辑）：
 
 ```bash
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 # 或按目标
-zig build run-multi-client-bench -Doptimize=ReleaseFast
+zig build run-multi-client-bench -Doptimize=fast
 ```
 
 ## 1. 跨主机：client 在主机 A，server 在主机 B
@@ -36,7 +36,7 @@ var server = try Server.init(allocator, io, .{
 **主机 B**（server）：
 
 ```bash
-zig build run-io-echo -Doptimize=ReleaseFast   # 或 run-h3-server 用 H3
+zig build run-io-echo -Doptimize=fast   # 或 run-h3-server 用 H3
 ```
 
 **主机 A**（client），`Client.Config.server_host` 指向 B 的 IP、`server_port` 用 4433。改 `examples/multi_client_bench.zig` 或用连远端地址的小客户端：
@@ -60,7 +60,7 @@ var client = try Client.init(allocator, io, .{
 # 宿主机构建：交叉编译 x86_64 二进制（或在容器内编译）
 zig build-exe -target x86_64-linux-musl --dep quicz \
     -Mroot=examples/multi_client_bench.zig -Mquicz=src/lib.zig \
-    -OReleaseFast -lc --name qmc-bench-x64
+    -Ofast -lc --name qmc-bench-x64
 
 # 同一 bridge 网络的两个容器
 docker run -d --name bench-server --network bridge --entrypoint sleep <quicz-linux-img> infinity
@@ -118,7 +118,7 @@ QUIC 的丢包恢复（PTO、拥塞控制）是待测行为。在若干丢包率
 ```bash
 for loss in 0 0.5 1 3 5; do
     tc qdisc add dev eth0 root netem loss "${loss}%"
-    zig build run-quic-bench-hs -Doptimize=ReleaseFast 2>&1 | tee /tmp/hs_loss${loss}.log
+    zig build run-quic-bench-hs -Doptimize=fast 2>&1 | tee /tmp/hs_loss${loss}.log
     tc qdisc del dev eth0 root
 done
 ```
@@ -134,7 +134,7 @@ done
 ```bash
 # 主机 B：跑 server 部分（改示例绑定 0.0.0.0）
 # 主机 A：16 客户端，真实网络
-zig build run-multi-client-bench -Doptimize=ReleaseFast
+zig build run-multi-client-bench -Doptimize=fast
 ```
 
 预期输出（ReleaseFast，loopback 参考）：
@@ -157,7 +157,7 @@ mkdir -p "$BENCH_DIR"
 
 ## 6. 信任数值前的检查清单
 
-1. 用 `-Doptimize=ReleaseFast` 构建（绝不用 Debug）。
+1. 用 `-Doptimize=fast` 构建（绝不用 Debug）。
 2. 用 `iperf3` 对拍原始路径；quicz 应落在链路每连接 UDP/TCP 上限的合理因子内。
 3. Linux x86_64 用 RSA 证书。
 4. 关闭竞争流量；跨运行对比时固定 CPU。

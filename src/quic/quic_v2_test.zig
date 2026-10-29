@@ -85,7 +85,7 @@ test "QUIC v2: Retry integrity tag with v2 keys" {
         .dcid = &dcid,
         .scid = &scid,
         .token = retry_token,
-        .integrity_tag = [_]u8{0} ** 16,
+        .integrity_tag = @as([16]u8, @splat(0)),
     };
 
     const datagram = try protection.encodeRetryPacketWithIntegrity(
@@ -120,7 +120,7 @@ test "QUIC v2: version_information transport parameter" {
 
     try std.testing.expect(version_info.containsAvailableVersion(.v2));
     try std.testing.expect(version_info.containsAvailableVersion(.v1));
-    try std.testing.expect(!version_info.containsAvailableVersion(@enumFromInt(0x00000003)));
+    try std.testing.expect(!version_info.containsAvailableVersion(@fromBackingInt(@intCast(0x00000003))));
 }
 
 test "QUIC v2: selectMutualVersion prefers v2 when both support it" {

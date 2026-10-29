@@ -301,7 +301,7 @@ const TrieNode = struct {
 };
 
 const DecodeTrie = struct {
-    nodes: [MAX_TRIE_NODES]TrieNode = [_]TrieNode{.{}} ** MAX_TRIE_NODES,
+    nodes: [MAX_TRIE_NODES]TrieNode = @as([MAX_TRIE_NODES]TrieNode, @splat(.{})),
     count: u16 = 1,
 };
 

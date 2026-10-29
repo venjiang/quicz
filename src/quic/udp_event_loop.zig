@@ -14,7 +14,7 @@ pub const Address = struct {
     tag: Tag,
     port: u16,
     v4: [4]u8 = .{ 0, 0, 0, 0 },
-    v6: [16]u8 = .{0} ** 16,
+    v6: [16]u8 = @splat(0),
 
     pub fn ipv4(a: [4]u8, port: u16) Address {
         return .{ .tag = .ipv4, .port = port, .v4 = a };
@@ -83,7 +83,7 @@ pub const UdpSocket = struct {
     /// The socket is created with AF_INET6 and IPV6_V6ONLY disabled so that
     /// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) work transparently.
     pub fn bindIpv6DualStack(io: std.Io, port: u16) !UdpSocket {
-        const in6_any: [16]u8 = .{0} ** 16; // ::
+        const in6_any: [16]u8 = @splat(0); // ::
         var address = std.Io.net.IpAddress{ .ip6 = .{ .bytes = in6_any, .port = port } };
         const socket = try address.bind(io, .{
             .mode = .dgram,

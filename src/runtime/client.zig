@@ -29,12 +29,12 @@ test "client runtime answers an authenticated probe after socket handoff" {
         .insecure_skip_verify = true,
     });
     defer client.deinit();
-    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
-    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
+    const key: quicz.connectivity.punch_wire.Key = @splat(0x42);
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
     try client.retainPunchResponder(try .init(
         key,
         attempt_id,
-        .{0xa1} ** 16,
+        @splat(0xa1),
         peer.address,
         @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
         500,
@@ -42,12 +42,12 @@ test "client runtime answers an authenticated probe after socket handoff" {
     const probe = quicz.connectivity.punch_wire.encode(key, .{
         .kind = .probe,
         .attempt_id = attempt_id,
-        .nonce = .{0xb2} ** 16,
+        .nonce = @splat(0xb2),
     });
     const delayed_ack = quicz.connectivity.punch_wire.encode(key, .{
         .kind = .acknowledgement,
         .attempt_id = attempt_id,
-        .nonce = .{0xa1} ** 16,
+        .nonce = @splat(0xa1),
     });
     try client.startTasks();
     const destination = std.Io.net.IpAddress{ .ip4 = .loopback(client.localPort()) };
@@ -86,7 +86,7 @@ const queued_datagram_pool_size = 16;
 /// pointer, so a partial slice of a pooled buffer is returned correctly.
 const DatagramPool = struct {
     buffers: [queued_datagram_pool_size][]u8 = undefined,
-    free: [queued_datagram_pool_size]bool = .{true} ** queued_datagram_pool_size,
+    free: [queued_datagram_pool_size]bool = @splat(true),
     mutex: std.atomic.Mutex = .unlocked,
 
     fn init(allocator: std.mem.Allocator) DatagramPool {
@@ -437,7 +437,7 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                         if (std.mem.allEqual(u8, &address.bytes, 0)) address.bytes = .{ 127, 0, 0, 1 };
                     },
                     .ip6 => |*address| {
-                        if (std.mem.allEqual(u8, &address.bytes, 0)) address.bytes = .{0} ** 15 ++ .{1};
+                        if (std.mem.allEqual(u8, &address.bytes, 0)) address.bytes = @as([15]u8, @splat(0)) ++ .{1};
                     },
                 }
                 {
@@ -1356,7 +1356,7 @@ test "runtime client datagram limits preserve legacy configuration and defaults"
     try std.testing.expect(Client == ClientForTuple(endpoint.Udp4Tuple));
     try std.testing.expect(IPv6Client == ClientForTupleWithDatagramLimit(endpoint.Udp6Tuple, 1200));
     try std.testing.expect(LimitedClient.Config == Client.Config);
-    try std.testing.expectEqual(@as(usize, 10), std.meta.fields(Client.Config).len);
+    try std.testing.expectEqual(@as(usize, 10), @typeInfo(Client.Config).@"struct".field_names.len);
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

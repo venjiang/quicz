@@ -109,7 +109,7 @@ test "SessionCache store and retrieve" {
     const nonce = try std.testing.allocator.dupe(u8, "nonce1");
     try cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{1} ** 32,
+        .psk = @as([32]u8, @splat(1)),
         .lifetime_sec = 3600,
         .age_add = 12345,
         .nonce = nonce,
@@ -136,7 +136,7 @@ test "SessionCache ticket expiry" {
     const nonce = try std.testing.allocator.dupe(u8, "nonce2");
     try cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{2} ** 32,
+        .psk = @as([32]u8, @splat(2)),
         .lifetime_sec = 100,
         .age_add = 0,
         .nonce = nonce,
@@ -158,7 +158,7 @@ test "SessionCache prune expired" {
     const n1 = try std.testing.allocator.dupe(u8, "n1");
     try cache.store(.{
         .server_id = id1,
-        .psk = [_]u8{1} ** 32,
+        .psk = @as([32]u8, @splat(1)),
         .lifetime_sec = 100,
         .age_add = 0,
         .nonce = n1,
@@ -170,7 +170,7 @@ test "SessionCache prune expired" {
     const n2 = try std.testing.allocator.dupe(u8, "n2");
     try cache.store(.{
         .server_id = id2,
-        .psk = [_]u8{2} ** 32,
+        .psk = @as([32]u8, @splat(2)),
         .lifetime_sec = 3600,
         .age_add = 0,
         .nonce = n2,
@@ -192,7 +192,7 @@ test "SessionCache duplicate server_id replaces" {
     const n1 = try std.testing.allocator.dupe(u8, "old");
     try cache.store(.{
         .server_id = id1,
-        .psk = [_]u8{1} ** 32,
+        .psk = @as([32]u8, @splat(1)),
         .lifetime_sec = 100,
         .age_add = 111,
         .nonce = n1,
@@ -204,7 +204,7 @@ test "SessionCache duplicate server_id replaces" {
     const n2 = try std.testing.allocator.dupe(u8, "new");
     try cache.store(.{
         .server_id = id2,
-        .psk = [_]u8{2} ** 32,
+        .psk = @as([32]u8, @splat(2)),
         .lifetime_sec = 200,
         .age_add = 222,
         .nonce = n2,

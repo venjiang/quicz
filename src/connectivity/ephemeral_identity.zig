@@ -201,12 +201,12 @@ fn element(allocator: std.mem.Allocator, tag: u8, content: []const u8) ![]u8 {
 }
 
 test "ephemeral identity is a valid self-signed Host certificate" {
-    var key_pair = try Ed25519.KeyPair.generateDeterministic(.{0x42} ** Ed25519.KeyPair.seed_length);
+    var key_pair = try Ed25519.KeyPair.generateDeterministic(@splat(0x42));
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair.secret_key));
     var identity = try generateFromKeyPair(
         std.testing.allocator,
         &key_pair,
-        .{0x21} ** 16,
+        @splat(0x21),
         1_800_000_000,
         600,
     );

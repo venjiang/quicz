@@ -385,9 +385,9 @@ test "H3Connection GOAWAY" {
 }
 
 test "H3 error codes" {
-    try std.testing.expectEqual(@as(u64, 0x0100), @intFromEnum(ErrorCode.no_error));
-    try std.testing.expectEqual(@as(u64, 0x0101), @intFromEnum(ErrorCode.general_protocol_error));
-    try std.testing.expectEqual(@as(u64, 0x010c), @intFromEnum(ErrorCode.request_cancelled));
+    try std.testing.expectEqual(@as(u64, 0x0100), @backingInt(ErrorCode.no_error));
+    try std.testing.expectEqual(@as(u64, 0x0101), @backingInt(ErrorCode.general_protocol_error));
+    try std.testing.expectEqual(@as(u64, 0x010c), @backingInt(ErrorCode.request_cancelled));
 }
 
 test "Settings encode/decode roundtrip" {

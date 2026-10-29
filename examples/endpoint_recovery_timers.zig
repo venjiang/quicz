@@ -115,7 +115,7 @@ pub fn main() !void {
     _ = try closing_conn.recordPacketSentInSpace(.application, 42, 100);
     try endpoint_lifecycle.armRecoveryTimerFromConnection(closing_connection_id, &closing_conn);
     try require(endpoint_lifecycle.recoveryTimerCount() == 1);
-    try closing_conn.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "done");
+    try closing_conn.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "done");
     try endpoint_lifecycle.armRecoveryTimerFromConnection(closing_connection_id, &closing_conn);
     const closing_disarmed = endpoint_lifecycle.recoveryTimerCount() == 0 and closing_conn.lossDetectionTimerDeadline() == null;
     try require(closing_disarmed);

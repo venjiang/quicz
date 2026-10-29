@@ -932,7 +932,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(!client.hasHandshakeProtectionKeys());
     try require(!server.hasHandshakeProtectionKeys());
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "manual close");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "manual close");
     try require(client.connectionState() == .closing);
     const close_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -961,7 +961,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     const server_close_error_code = switch (server.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| blk: {
             try require(close.error_code == 0);
-            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.stream));
+            try require(close.frame_type == @backingInt(quicz.frame.FrameType.stream));
             try require(std.mem.eql(u8, close.reason_phrase, "manual close"));
             break :blk close.error_code;
         },

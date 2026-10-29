@@ -387,7 +387,7 @@ pub fn main(init: std.process.Init) !void {
     const migrated_server_path = try udp4Tuple(server_socket.address, migrated_client_socket.address);
 
     // ─── crypto material + Initial secrets ───
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };

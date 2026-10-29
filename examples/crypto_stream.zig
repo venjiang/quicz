@@ -413,7 +413,7 @@ pub fn main() !void {
     const compatible_selected = compatible_progress.peer_compatible_version_selected orelse return error.UnexpectedState;
     const compatible_peer = compatible_server.peerVersionInformation() orelse return error.UnexpectedState;
     std.debug.print("[crypto] backend_compatible_version selected=0x{x} peer_versions={} peer_tp_applied={} peer_max_data={}\n", .{
-        @intFromEnum(compatible_selected),
+        @backingInt(compatible_selected),
         compatible_peer.available_versions.len,
         compatible_progress.peer_transport_parameters_applied,
         compatible_server.peer_max_data,
@@ -512,7 +512,7 @@ pub fn main() !void {
     switch (close_client.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| {
             if (close.error_code != quicz.transport_error.codeValue(.transport_parameter_error)) return error.UnexpectedState;
-            if (close.frame_type != @intFromEnum(quicz.frame.FrameType.crypto)) return error.UnexpectedState;
+            if (close.frame_type != @backingInt(quicz.frame.FrameType.crypto)) return error.UnexpectedState;
             std.debug.print("[crypto] backend_tp_protected_close bytes={} error={} frame_type={} reason={s} output_pulled={} sender={s} receiver={s}\n", .{
                 close_packet.len,
                 close.error_code,

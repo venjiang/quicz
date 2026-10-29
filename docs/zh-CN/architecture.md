@@ -118,8 +118,8 @@ installed-key 包收发和 key phase 状态。它接收已经安装好的密钥�
 ### TLS integration boundary
 
 TLS 集成边界支持两条路径：(1) 纯 Zig TLS 1.3 实现（src/tls/tls13.zig，9524 行，222 测试），支持 ECDSA P-256、X25519、AES-128-GCM、AES-256-GCM、ChaCha20-Poly1305、ALPN、SNI 和证书链验证，无 C 依赖；(2) 遗留 C-ABI TlsBackend/CryptoBackend adapter 用于 OpenSSL 互通测试。
-构建脚本使用 Zig 0.16 推荐的 `addTranslateC` + `@import("c")` 路径，不手写 C ABI 的
-`extern fn`/`extern struct`。
+在 Zig 0.17 中，构建脚本使用官方 `translate-c` 包翻译 C header。
+示例通过 `@import("c")` 导入翻译后的模块。
 
 TLS backend 的职责：
 

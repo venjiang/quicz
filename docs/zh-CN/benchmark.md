@@ -7,7 +7,7 @@ secnetperf 风格微基准，测量 loopback UDP 上的原始 QUIC 传输性能�
 - **协议**：QUIC v1，安装 1-RTT 密钥（绕过 TLS 握手，仅测传输层）
 - **套接字**：loopback UDP，8900 字节 datagram（macOS UDP 上限 9000B）
 - **I/O 层**：std.Io.Threaded（跨平台，Linux 自动启用 sendmmsg 批量发送）
-- **构建**：`zig build-exe -OReleaseFast`
+- **构建**：`zig build-exe -Ofast`
 - **平台**：Apple M 系列 macOS，Zig 0.16（std.Io 跨平台，Linux 由 std.Io 自动适配 io_uring/sendmmsg，不另测）
 - **拥塞控制**：CUBIC（RFC 8312/9438）
 - **Pacer**：Token bucket，ns 精度（loopback 下 srtt ~1μs 不截断）

@@ -429,9 +429,9 @@ fn deriveAes128PacketProtectionKeysWithLabels(
 ) Aes128PacketProtectionKeys {
     var keys: Aes128PacketProtectionKeys = .{
         .secret = secret,
-        .key = [_]u8{0} ** chacha20_key_len,
+        .key = @as([chacha20_key_len]u8, @splat(0)),
         .iv = hkdfExpandLabel(secret, labels.iv, iv_len),
-        .hp = [_]u8{0} ** chacha20_hp_key_len,
+        .hp = @as([chacha20_hp_key_len]u8, @splat(0)),
     };
     const key_bytes = hkdfExpandLabel(secret, labels.key, aes_128_key_len);
     @memcpy(keys.key[0..aes_128_key_len], &key_bytes);
@@ -538,7 +538,7 @@ pub fn chacha20HeaderProtectionMask(
     const counter = std.mem.readInt(u32, sample[0..4], .little);
     var nonce: [12]u8 = undefined;
     @memcpy(nonce[0..], sample[4..16]);
-    var mask: [header_protection_mask_len]u8 = [_]u8{0} ** header_protection_mask_len;
+    var mask: [header_protection_mask_len]u8 = @as([header_protection_mask_len]u8, @splat(0));
     const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
     ChaCha20IETF.stream(&mask, counter, hp_key, nonce);
     return mask;
@@ -683,7 +683,7 @@ pub fn encodeRetryPacketWithIntegrity(
     _ = try retryIntegrityProfileForVersion(retry.version);
 
     var tagged_retry = retry;
-    tagged_retry.integrity_tag = [_]u8{0} ** aead_tag_len;
+    tagged_retry.integrity_tag = @as([aead_tag_len]u8, @splat(0));
 
     const datagram = try allocator.alloc(u8, try retryPacketLen(tagged_retry));
     errdefer allocator.free(datagram);
@@ -1147,7 +1147,7 @@ fn retryIntegrityProfileForDatagram(retry_without_integrity_tag: []const u8) Pro
     if ((retry_without_integrity_tag[0] & 0x80) == 0) return error.InvalidPayloadLength;
     if ((retry_without_integrity_tag[0] & 0x40) == 0) return error.InvalidPayloadLength;
 
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big));
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big)));
     return retryIntegrityProfileForVersion(version);
 }
 
@@ -1162,7 +1162,7 @@ fn parseProtectedLongPrefix(datagram: []const u8) !ProtectedLongPrefix {
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, &version_buf, .big)));
     const packet_type = packet.longHeaderPacketTypeFromBits(version, packet_type_bits);
     if (packet_type == .retry) return error.UnsupportedPacketType;
 
@@ -1292,10 +1292,10 @@ test "deriveInitialSecrets matches RFC 9369 Appendix A.1 vectors" {
 
 test "deriveInitialSecrets rejects unsupported versions and invalid CID length" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-    const unknown_version: packet.Version = @enumFromInt(0x0a0a0a0a);
+    const unknown_version: packet.Version = @fromBackingInt(@intCast(0x0a0a0a0a));
     try std.testing.expectError(error.UnsupportedVersion, deriveInitialSecrets(unknown_version, &dcid));
 
-    const long_dcid = [_]u8{0xaa} ** 21;
+    const long_dcid = @as([21]u8, @splat(0xaa));
     try std.testing.expectError(error.InvalidConnectionIdLength, deriveInitialSecrets(.v1, &long_dcid));
     try std.testing.expectError(error.InvalidConnectionIdLength, deriveInitialSecrets(.v2, &long_dcid));
 }
@@ -1828,7 +1828,7 @@ test "encodeRetryPacketWithIntegrity produces verifiable Retry packet" {
         .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd },
         .scid = &[_]u8{ 0x10, 0x20, 0x30, 0x40 },
         .token = "token",
-        .integrity_tag = [_]u8{0} ** aead_tag_len,
+        .integrity_tag = @as([aead_tag_len]u8, @splat(0)),
     };
 
     const datagram = try encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
@@ -1862,12 +1862,12 @@ test "encodeRetryPacketWithIntegrity produces verifiable Retry packet" {
     try std.testing.expectError(error.AuthenticationFailed, parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, tampered));
 
     var unknown_retry = retry;
-    unknown_retry.version = @enumFromInt(0x0a0a0a0a);
+    unknown_retry.version = @fromBackingInt(@intCast(0x0a0a0a0a));
     try std.testing.expectError(error.UnsupportedVersion, encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, unknown_retry));
 }
 
 test "retry integrity validates input bounds" {
-    const long_original_dcid = [_]u8{0xaa} ** 21;
+    const long_original_dcid = @as([21]u8, @splat(0xaa));
     const retry_without_tag = [_]u8{ 0xff, 0x00 };
     try std.testing.expectError(error.InvalidConnectionIdLength, retryIntegrityTag(std.testing.allocator, &long_original_dcid, &retry_without_tag));
 
@@ -1882,7 +1882,7 @@ test "retry integrity validates input bounds" {
     const oversized_retry: []const u8 = retry_prefix[0..].ptr[0..std.math.maxInt(usize)];
     try std.testing.expectError(error.InvalidPayloadLength, retryIntegrityTag(std.testing.allocator, &original_dcid, oversized_retry));
 
-    const too_short_retry = [_]u8{0xff} ** aead_tag_len;
+    const too_short_retry = @as([aead_tag_len]u8, @splat(0xff));
     try std.testing.expectError(error.InvalidPayloadLength, verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &too_short_retry));
 }
 
@@ -1892,7 +1892,7 @@ test "payload protection validates buffer lengths" {
     const associated_data = [_]u8{0xc0};
     const plaintext = [_]u8{0x06};
     var empty_ciphertext = [_]u8{};
-    var tag: [aead_tag_len]u8 = [_]u8{0} ** aead_tag_len;
+    var tag: [aead_tag_len]u8 = @as([aead_tag_len]u8, @splat(0));
     try std.testing.expectError(error.InvalidPayloadLength, protectAes128Payload(secrets.client, 0, &associated_data, &plaintext, &empty_ciphertext, &tag));
 
     const ciphertext = [_]u8{0x00};
@@ -1916,7 +1916,7 @@ test "protected long header length rejects token overflow" {
 }
 
 test "protected long header length rejects oversized connection IDs" {
-    const oversized_cid = [_]u8{0xaa} ** (max_connection_id_len + 1);
+    const oversized_cid = @as([(max_connection_id_len + 1)]u8, @splat(0xaa));
     const header = packet.LongHeader{
         .packet_type = .initial,
         .version = .v1,
@@ -1940,7 +1940,7 @@ pub fn chacha20Nonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
 }
 
 test "ChaCha20-Poly1305 packet protection roundtrip" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = deriveForCipher(secret, .v1, .chacha20_poly1305);
 
     const plaintext = "Hello ChaCha20 QUIC!";
@@ -1960,7 +1960,7 @@ test "ChaCha20-Poly1305 packet protection roundtrip" {
 }
 
 test "ChaCha20-Poly1305 wrong packet number fails authentication" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = deriveForCipher(secret, .v1, .chacha20_poly1305);
 
     const plaintext = "test data";
@@ -1979,7 +1979,7 @@ test "ChaCha20-Poly1305 wrong packet number fails authentication" {
 }
 
 test "ChaCha20-Poly1305 tampered ciphertext fails authentication" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = deriveForCipher(secret, .v1, .chacha20_poly1305);
 
     const plaintext = "test data";
@@ -1999,7 +1999,7 @@ test "ChaCha20-Poly1305 tampered ciphertext fails authentication" {
 }
 
 test "ChaCha20 header protection mask is deterministic" {
-    const hp_key = [_]u8{0xAB} ** 32;
+    const hp_key = @as([32]u8, @splat(0xAB));
     const sample = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10 };
 
     const mask1 = chacha20HeaderProtectionMask(hp_key, sample);
@@ -2011,7 +2011,7 @@ test "ChaCha20 header protection mask is deterministic" {
 }
 
 test "ChaCha20 vs AES-128-GCM produce different ciphertext" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const aes_keys = deriveAes128PacketProtectionKeys(secret);
     const chacha_keys = deriveForCipher(secret, .v1, .chacha20_poly1305);
 
@@ -2037,8 +2037,8 @@ test "ChaCha20 vs AES-128-GCM produce different ciphertext" {
 }
 
 test "CipherSuite enum values" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(CipherSuite.aes_128_gcm));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(CipherSuite.chacha20_poly1305));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(CipherSuite.aes_128_gcm));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(CipherSuite.chacha20_poly1305));
 }
 
 // ── AES-256-GCM packet protection (RFC 9001 §5.3) ──
@@ -2095,7 +2095,7 @@ pub fn unprotectAes256Payload(
 }
 
 test "AES-256-GCM packet protection roundtrip" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = deriveAes256PacketProtectionKeys(secret);
 
     const plaintext = "Hello AES-256-GCM QUIC!";
@@ -2112,7 +2112,7 @@ test "AES-256-GCM packet protection roundtrip" {
 }
 
 test "AES-256-GCM wrong packet number fails" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = deriveAes256PacketProtectionKeys(secret);
 
     const plaintext = "test";
@@ -2128,7 +2128,7 @@ test "AES-256-GCM wrong packet number fails" {
 }
 
 test "AES-256-GCM keys differ from AES-128-GCM keys" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const aes128 = deriveAes128PacketProtectionKeys(secret);
     const aes256 = deriveAes256PacketProtectionKeys(secret);
     // Different cipher suites

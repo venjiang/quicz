@@ -9,9 +9,9 @@ const ServerConnection = quicz.runtime.server.ServerConnection;
 const PunchAttempt = quicz.connectivity.punch_attempt.PunchAttempt;
 const punch_driver = quicz.connectivity.punch_driver;
 const alpn = [_][]const u8{"quicz-mobile-latency-v1"};
-const benchmark_key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
-const benchmark_attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
-const benchmark_host_nonce: quicz.connectivity.punch_wire.Nonce = .{0xb2} ** 16;
+const benchmark_key: quicz.connectivity.punch_wire.Key = @splat(0x42);
+const benchmark_attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
+const benchmark_host_nonce: quicz.connectivity.punch_wire.Nonce = @splat(0xb2);
 
 fn acceptAuthenticatedPunch(io: std.Io, socket: std.Io.net.Socket) !void {
     var attempt = try PunchAttempt.init(

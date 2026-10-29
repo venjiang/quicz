@@ -88,10 +88,10 @@ pub fn main() !void {
     const host_port = host_socket.address.ip4.port;
     const app_candidate = app_socket.address;
     const host_candidate = host_socket.address;
-    const attempt_id: punch_wire.AttemptId = .{0x11} ** 16;
-    const key: punch_wire.Key = .{0x42} ** 32;
-    var app_attempt = try PunchAttempt.init(key, attempt_id, .{0xa1} ** 16, .{});
-    var host_attempt = try PunchAttempt.init(key, attempt_id, .{0xb2} ** 16, .{});
+    const attempt_id: punch_wire.AttemptId = @splat(0x11);
+    const key: punch_wire.Key = @splat(0x42);
+    var app_attempt = try PunchAttempt.init(key, attempt_id, @splat(0xa1), .{});
+    var host_attempt = try PunchAttempt.init(key, attempt_id, @splat(0xb2), .{});
     const now_seconds: u64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
     var identity = try quicz.connectivity.ephemeral_identity.generate(allocator, io, now_seconds);
     defer identity.deinit(allocator);

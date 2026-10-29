@@ -423,7 +423,7 @@ fn isVersionNegotiationDatagram(datagram: []const u8) bool {
 
 fn isRetryDatagram(datagram: []const u8) bool {
     if (datagram.len < 5 or (datagram[0] & 0xc0) != 0xc0) return false;
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
     const type_bits: u2 = @intCast((datagram[0] >> 4) & 0x03);
     return packet.longHeaderPacketTypeFromBits(version, type_bits) == .retry;
 }
@@ -529,7 +529,7 @@ test "Tls13ClientTransport selects a fresh v1 attempt after Version Negotiation"
     var scratch: [8192]u8 = undefined;
     const initial = try transport.begin(1, &scratch);
     defer std.testing.allocator.free(initial);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(packet.Version.v2)), std.mem.readInt(u32, initial[1..5], .big));
+    try std.testing.expectEqual(@as(u32, @backingInt(packet.Version.v2)), std.mem.readInt(u32, initial[1..5], .big));
 
     const server_versions = [_]packet.Version{.v1};
     var vnp_buf: [64]u8 = undefined;
@@ -579,14 +579,14 @@ test "Tls13ClientTransport sends to the newest peer connection ID" {
     );
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x44} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x44));
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const reset_token = [_]u8{0x55} ** 16;
+    const reset_token = @as([16]u8, @splat(0x55));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -622,14 +622,14 @@ test "Tls13ClientTransport closes with protected application output and deadline
     );
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x64} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x64));
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
-    const reset_token = [_]u8{0x65} ** 16;
+    const reset_token = @as([16]u8, @splat(0x65));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{

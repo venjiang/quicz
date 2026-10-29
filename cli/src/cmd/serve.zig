@@ -338,7 +338,7 @@ fn connectionWantsClose(head: []const u8) bool {
         const line = std.mem.trim(u8, raw, "\r");
         if (std.ascii.startsWithIgnoreCase(line, "connection:")) {
             const value = std.mem.trim(u8, line["connection:".len..], " \t");
-            return std.ascii.indexOfIgnoreCase(value, "close") != null;
+            return std.ascii.findIgnoreCase(value, "close") != null;
         }
     }
     return false;
@@ -391,7 +391,7 @@ fn sendHttp11Response(
 ) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    const status: std.http.Status = @enumFromInt(@as(u10, @intCast(status_code)));
+    const status: std.http.Status = @fromBackingInt(@intCast(@as(u10, @intCast(status_code))));
     const phrase = status.phrase() orelse "Unknown";
     try w.print("HTTP/1.1 {d} {s}\r\n", .{ status_code, phrase });
     for (extra_headers) |h| {

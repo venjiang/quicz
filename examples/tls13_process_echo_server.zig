@@ -33,7 +33,7 @@ const echo_payloads = [_][]const u8{ "hello", "world" };
 const interop_echo_stream_ids = [_]u64{ 0, 4, 8, 12 };
 const interop_echo_payloads = [_][]const u8{ "hello", "world", "again", "more" };
 const echo_total_bytes: usize = 10;
-const flow_control_payload = [_]u8{'f'} ** 12_288;
+const flow_control_payload = @as([12_288]u8, @splat('f'));
 /// Active server certificate (DER) and private key: overridden by CERT/KEY
 /// environment variables (PEM, loaded via quicz.tls_pem), otherwise the
 /// embedded test pair.

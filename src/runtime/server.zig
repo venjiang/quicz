@@ -253,12 +253,12 @@ test "server runtime answers an authenticated probe after socket handoff" {
     const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(io);
-    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
-    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
+    const key: quicz.connectivity.punch_wire.Key = @splat(0x42);
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
     const responder = try quicz.connectivity.punch_responder.PunchResponder.init(
         key,
         attempt_id,
-        .{0xb2} ** 16,
+        @splat(0xb2),
         peer.address,
         @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
         500,
@@ -275,12 +275,12 @@ test "server runtime answers an authenticated probe after socket handoff" {
     const probe = quicz.connectivity.punch_wire.encode(key, .{
         .kind = .probe,
         .attempt_id = attempt_id,
-        .nonce = .{0xa1} ** 16,
+        .nonce = @splat(0xa1),
     });
     const delayed_ack = quicz.connectivity.punch_wire.encode(key, .{
         .kind = .acknowledgement,
         .attempt_id = attempt_id,
-        .nonce = .{0xb2} ** 16,
+        .nonce = @splat(0xb2),
     });
     try server.start();
     try peer.send(io, &server.socket.address, &delayed_ack);
@@ -308,8 +308,8 @@ test "server runtime isolates authenticated probes for concurrent attempts" {
     var responders = try quicz.connectivity.punch_responder.PunchResponderRegistry.init(std.testing.allocator, 2);
     defer responders.deinit();
     const now: i64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
-    try responders.register(try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, first_peer.address, now, 5_000));
-    try responders.register(try .init(.{0x42} ** 32, .{0x22} ** 16, .{0xa2} ** 16, second_peer.address, now, 5_000));
+    try responders.register(try .init(@splat(0x41), @splat(0x11), @splat(0xa1), first_peer.address, now, 5_000));
+    try responders.register(try .init(@splat(0x42), @splat(0x22), @splat(0xa2), second_peer.address, now, 5_000));
     var server = try Server.init(std.testing.allocator, io, .{
         .port = 0,
         .alpn = &.{},
@@ -320,15 +320,15 @@ test "server runtime isolates authenticated probes for concurrent attempts" {
     });
     defer server.deinit();
     try server.start();
-    const first_probe = quicz.connectivity.punch_wire.encode(.{0x41} ** 32, .{
+    const first_probe = quicz.connectivity.punch_wire.encode(@splat(0x41), .{
         .kind = .probe,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0xb1} ** 16,
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0xb1),
     });
-    const second_probe = quicz.connectivity.punch_wire.encode(.{0x42} ** 32, .{
+    const second_probe = quicz.connectivity.punch_wire.encode(@splat(0x42), .{
         .kind = .probe,
-        .attempt_id = .{0x22} ** 16,
-        .nonce = .{0xb2} ** 16,
+        .attempt_id = @splat(0x22),
+        .nonce = @splat(0xb2),
     });
     try first_peer.send(io, &server.socket.address, &first_probe);
     try second_peer.send(io, &server.socket.address, &second_probe);
@@ -336,11 +336,11 @@ test "server runtime isolates authenticated probes for concurrent attempts" {
     var second_buffer: [128]u8 = undefined;
     const first_ack = try first_peer.receiveTimeout(io, &first_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(500) } });
     const second_ack = try second_peer.receiveTimeout(io, &second_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(500) } });
-    const first_message = try quicz.connectivity.punch_wire.decode(.{0x41} ** 32, first_ack.data);
-    const second_message = try quicz.connectivity.punch_wire.decode(.{0x42} ** 32, second_ack.data);
+    const first_message = try quicz.connectivity.punch_wire.decode(@splat(0x41), first_ack.data);
+    const second_message = try quicz.connectivity.punch_wire.decode(@splat(0x42), second_ack.data);
     try std.testing.expectEqual(@as([16]u8, @splat(0x11)), first_message.attempt_id);
     try std.testing.expectEqual(@as([16]u8, @splat(0x22)), second_message.attempt_id);
-    try std.testing.expect(responders.remove(.{0x11} ** 16));
+    try std.testing.expect(responders.remove(@splat(0x11)));
     try first_peer.send(io, &server.socket.address, &first_probe);
     try std.testing.expectError(error.Timeout, first_peer.receiveTimeout(io, &first_buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }));
 }
@@ -428,7 +428,7 @@ const receive_batch_size = 64;
 /// pointer, so a partial slice of a pooled buffer is returned correctly.
 const DatagramPool = struct {
     buffers: [queued_datagram_pool_size][]u8 = undefined,
-    free: [queued_datagram_pool_size]bool = .{true} ** queued_datagram_pool_size,
+    free: [queued_datagram_pool_size]bool = @splat(true),
     mutex: std.atomic.Mutex = .unlocked,
 
     fn init(allocator: std.mem.Allocator) DatagramPool {

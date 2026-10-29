@@ -140,7 +140,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
     try ack_range_server.validatePeerAddress();
 
     const invalid_ack_range_payload = [_]u8{
-        @intFromEnum(quicz.frame.FrameType.ack),
+        @backingInt(quicz.frame.FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x00, // no additional ACK ranges
@@ -162,7 +162,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
     try ack_ecn_range_server.validatePeerAddress();
 
     const invalid_ack_ecn_range_payload = [_]u8{
-        @intFromEnum(quicz.frame.FrameType.ack_ecn),
+        @backingInt(quicz.frame.FrameType.ack_ecn),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x00, // no additional ACK ranges
@@ -185,7 +185,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
 
     var invalid_streams_blocked_bidi: [16]u8 = undefined;
     var streams_blocked_bidi_out = fixedWriter(&invalid_streams_blocked_bidi);
-    try streams_blocked_bidi_out.writer().writeByte(@intFromEnum(quicz.frame.FrameType.streams_blocked_bidi));
+    try streams_blocked_bidi_out.writer().writeByte(@backingInt(quicz.frame.FrameType.streams_blocked_bidi));
     try quicz.packet.encodeVarInt(streams_blocked_bidi_out.writer(), (@as(u64, 1) << 60) + 1);
     try requireError(
         error.InvalidPacket,
@@ -204,7 +204,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
 
     var invalid_streams_blocked_uni: [16]u8 = undefined;
     var streams_blocked_uni_out = fixedWriter(&invalid_streams_blocked_uni);
-    try streams_blocked_uni_out.writer().writeByte(@intFromEnum(quicz.frame.FrameType.streams_blocked_uni));
+    try streams_blocked_uni_out.writer().writeByte(@backingInt(quicz.frame.FrameType.streams_blocked_uni));
     try quicz.packet.encodeVarInt(streams_blocked_uni_out.writer(), (@as(u64, 1) << 60) + 1);
     try requireError(
         error.InvalidPacket,
@@ -221,7 +221,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
     defer initial_server.deinit();
     try initial_server.validatePeerAddress();
 
-    const handshake_done = [_]u8{@intFromEnum(quicz.frame.FrameType.handshake_done)};
+    const handshake_done = [_]u8{@backingInt(quicz.frame.FrameType.handshake_done)};
     try requireError(
         error.InvalidPacket,
         initial_server.processDatagramInSpaceOrClose(.initial, 0, &handshake_done),
@@ -240,7 +240,7 @@ fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
     try server.validatePeerAddress();
 
     const ack_payload = [_]u8{
-        @intFromEnum(quicz.frame.FrameType.ack),
+        @backingInt(quicz.frame.FrameType.ack),
         0,
         0,
         0,
@@ -588,7 +588,7 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
     defer handshake_done_server.deinit();
     try handshake_done_server.validatePeerAddress();
 
-    const handshake_done_payload = [_]u8{@intFromEnum(quicz.frame.FrameType.handshake_done)};
+    const handshake_done_payload = [_]u8{@backingInt(quicz.frame.FrameType.handshake_done)};
     try requireError(
         error.InvalidPacket,
         handshake_done_server.processDatagramOrClose(0, &handshake_done_payload),
@@ -619,7 +619,7 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
     const cid2 = [_]u8{ 0xc0, 0, 0, 2 };
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** quicz.packet.stateless_reset_token_len;
+    const token2 = @as([quicz.packet.stateless_reset_token_len]u8, @splat(0xa5));
 
     var cid_payload: [96]u8 = undefined;
     out = fixedWriter(&cid_payload);
@@ -757,7 +757,7 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
     defer server.deinit();
     try server.validatePeerAddress();
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "protected done");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "protected done");
     const protected_close = (try client.pollProtectedShortDatagram(0, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer gpa.free(protected_close);
     try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, protected_close);
@@ -811,7 +811,7 @@ fn protectedLongCloseExample(gpa: std.mem.Allocator) !void {
 
     try initial_client.closeConnection(
         quicz.transport_error.codeValue(.no_error),
-        @intFromEnum(quicz.frame.FrameType.crypto),
+        @backingInt(quicz.frame.FrameType.crypto),
         "protected initial close",
     );
     const initial_close = (try initial_client.pollProtectedLongDatagram(
@@ -842,7 +842,7 @@ fn protectedLongCloseExample(gpa: std.mem.Allocator) !void {
 
     try handshake_server.closeConnection(
         quicz.transport_error.codeValue(.internal_error),
-        @intFromEnum(quicz.frame.FrameType.crypto),
+        @backingInt(quicz.frame.FrameType.crypto),
         "protected handshake close",
     );
     const handshake_close = (try handshake_server.pollProtectedLongDatagram(
@@ -875,7 +875,7 @@ fn protectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
 
     var initial_plaintext: [1200]u8 = undefined;
     @memset(&initial_plaintext, 0);
-    initial_plaintext[0] = @intFromEnum(quicz.frame.FrameType.handshake_done);
+    initial_plaintext[0] = @backingInt(quicz.frame.FrameType.handshake_done);
 
     const invalid_initial = try quicz.protection.protectLongPacketAes128(gpa, .{
         .version = .v1,
@@ -961,7 +961,7 @@ fn protectedClosedStateDiscardExample(gpa: std.mem.Allocator) !void {
     var closing = try quicz.Connection.init(gpa, .client, .{});
     defer closing.deinit();
 
-    try closing.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "closing discard");
+    try closing.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "closing discard");
     const closing_initial_next = closing.nextPeerPacketNumber(.initial);
     const closing_application_next = closing.nextPeerPacketNumber(.application);
     if (try closing.processProtectedLongDatagramOrClose(19, .{
@@ -1079,7 +1079,7 @@ pub fn main() !void {
     defer server.deinit();
     try server.validatePeerAddress();
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "done");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "done");
     var datagram: [128]u8 = undefined;
     const connection_close = try pollRequired(&client, &datagram);
     try printConnectionClose(gpa, connection_close);

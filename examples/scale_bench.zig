@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     try server.serve(&echoHandler);
 
     const t0 = std.Io.Timestamp.now(io, .awake);
-    var results: [num_clients]Result = .{Result{}} ** num_clients;
+    var results: [num_clients]Result = @splat(Result{});
     var group: std.Io.Group = .init;
     for (0..num_clients) |i| {
         try group.concurrent(io, clientTask, .{ io, allocator, i, &results });

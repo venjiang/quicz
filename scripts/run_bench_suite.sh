@@ -1,7 +1,7 @@
 #!/bin/bash
 # quicz benchmark suite — standardized baseline recording.
 #
-# Builds every benchmark (ReleaseFast), runs them in a fixed order, and
+# Builds every benchmark (fast), runs them in a fixed order, and
 # records platform metadata, commit, and full per-benchmark output under
 # bench_results/<UTC timestamp>_<commit>.log. Committed result files are
 # the comparable performance baseline; re-run after changes and diff.
@@ -26,13 +26,13 @@ LOG="$OUT_DIR/${STAMP}_${COMMIT}.log"
     echo "# os: $(uname -sm)"
     echo "# cpu: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
     echo "# zig: $(zig version)"
-    echo "# optimize: ReleaseFast (bench modules force it in build.zig)"
+    echo "# optimize: fast (bench modules force it in build.zig)"
 } > "$LOG"
 cat "$LOG"
 
 echo ""
-echo "building all benchmarks (ReleaseFast)..."
-if ! zig build -Doptimize=ReleaseFast --global-cache-dir .zig-cache/global; then
+echo "building all benchmarks (fast)..."
+if ! "${ZIG:-zig}" build -Doptimize=fast --global-cache-dir .zig-cache/global; then
     echo "build failed" | tee -a "$LOG"
     exit 1
 fi

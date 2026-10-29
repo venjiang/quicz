@@ -115,7 +115,7 @@ pub fn main() !void {
     const supported_versions = [_]quicz.packet.Version{ .v1, .v2 };
     const reset_prefix = [_]u8{ 0x40, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x99 };
 
-    const unsupported_version: quicz.packet.Version = @enumFromInt(0xfa_ce_b0_0c);
+    const unsupported_version: quicz.packet.Version = @fromBackingInt(@intCast(0xfa_ce_b0_0c));
     const client_versions = [_]quicz.packet.Version{ .v2, .v1, unsupported_version };
     const original_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
     const client_initial_scid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
@@ -304,7 +304,7 @@ pub fn main() !void {
     switch (malformed_close.frame) {
         .connection_close => |close| {
             try require(close.error_code == quicz.transport_error.codeValue(.transport_parameter_error));
-            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.crypto));
+            try require(close.frame_type == @backingInt(quicz.frame.FrameType.crypto));
             try require(std.mem.eql(u8, close.reason_phrase, "transport parameters"));
         },
         else => return error.UnexpectedState,
@@ -322,9 +322,9 @@ pub fn main() !void {
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
-        @intFromEnum(selected_version),
+        @backingInt(selected_version),
         followup_original_dcid.len,
-        @intFromEnum(followup_peer_version.chosen_version),
+        @backingInt(followup_peer_version.chosen_version),
         server_transport_parameter_bytes.len,
         quicz.transport_error.codeValue(.transport_parameter_error),
         followup_timer_count,

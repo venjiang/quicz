@@ -85,7 +85,7 @@ Build the mobile boundary:
 ```bash
 zig build mobile-static \
   -Dtarget=aarch64-ios \
-  -Doptimize=ReleaseSafe \
+  -Doptimize=safe \
   --prefix /tmp/quicz-ios
 ```
 

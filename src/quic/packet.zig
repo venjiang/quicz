@@ -15,7 +15,7 @@ pub const Version = enum(u32) {
 /// advertise or send unsupported versions without those values ever becoming
 /// real protocol versions.
 pub fn isReservedVersion(version: Version) bool {
-    return (@intFromEnum(version) & 0x0f0f0f0f) == 0x0a0a0a0a;
+    return (@backingInt(version) & 0x0f0f0f0f) == 0x0a0a0a0a;
 }
 
 pub const PacketType = enum(u2) {
@@ -163,7 +163,7 @@ pub fn longHeaderPacketTypeBits(version: Version, packet_type: PacketType) u2 {
             .handshake => 0b11,
             .retry => 0b00,
         },
-        else => @intFromEnum(packet_type),
+        else => @backingInt(packet_type),
     };
 }
 
@@ -176,7 +176,7 @@ pub fn longHeaderPacketTypeFromBits(version: Version, bits: u2) PacketType {
             0b10 => .zero_rtt,
             0b11 => .handshake,
         },
-        else => @enumFromInt(bits),
+        else => @fromBackingInt(@intCast(bits)),
     };
 }
 
@@ -415,11 +415,11 @@ fn validateVersionNegotiationCidLen(len: usize) PacketError!void {
 }
 
 fn validateVersionNegotiationVersion(version: Version) PacketError!void {
-    if (@intFromEnum(version) == 0) return error.InvalidVersionList;
+    if (@backingInt(version) == 0) return error.InvalidVersionList;
 }
 
 fn validateVersionedPacketVersion(version: Version) PacketError!void {
-    if (@intFromEnum(version) == 0) return error.InvalidVersionNegotiation;
+    if (@backingInt(version) == 0) return error.InvalidVersionNegotiation;
 }
 
 fn validateLengthVarInt(value: u64) PacketError!void {
@@ -476,7 +476,7 @@ pub fn encodeLongHeaderWithPacketNumberEncoding(
 
     try writer.writeByte(first_byte);
 
-    const version = @as(u32, @intFromEnum(header.version));
+    const version = @as(u32, @backingInt(header.version));
     var version_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_buf, version, .big);
     try writer.writeAll(&version_buf);
@@ -526,7 +526,7 @@ fn parseLongHeaderInternal(
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
-    const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const version: Version = @fromBackingInt(@intCast(std.mem.readInt(u32, &version_buf, .big)));
     try validateVersionedPacketVersion(version);
     const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
     if (packet_type == .retry) return error.UnsupportedPacketType;
@@ -806,7 +806,7 @@ pub fn encodeVersionNegotiationPacket(writer: anytype, packet: VersionNegotiatio
     try writer.writeAll(packet.scid);
 
     for (packet.versions) |version_value| {
-        const raw_version = @as(u32, @intFromEnum(version_value));
+        const raw_version = @as(u32, @backingInt(version_value));
         var version_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &version_buf, raw_version, .big);
         try writer.writeAll(&version_buf);
@@ -844,7 +844,7 @@ pub fn parseVersionNegotiationPacket(data: []const u8, allocator: std.mem.Alloca
 
     for (versions) |*version_value| {
         try reader.readNoEof(&version_buf);
-        version_value.* = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+        version_value.* = @fromBackingInt(@intCast(std.mem.readInt(u32, &version_buf, .big)));
         try validateVersionNegotiationVersion(version_value.*);
     }
 
@@ -868,7 +868,7 @@ pub fn encodeRetryPacket(writer: anytype, retry: RetryPacket) !void {
     const type_bits = longHeaderPacketTypeBits(retry.version, .retry);
     try writer.writeByte(0x80 | 0x40 | (@as(u8, @intCast(type_bits)) << 4)); // Long + fixed + Retry + zero unused bits.
 
-    const raw_version = @as(u32, @intFromEnum(retry.version));
+    const raw_version = @as(u32, @backingInt(retry.version));
     var version_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_buf, raw_version, .big);
     try writer.writeAll(&version_buf);
@@ -895,7 +895,7 @@ pub fn parseRetryPacket(data: []const u8, allocator: std.mem.Allocator) !RetryPa
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
-    const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const version: Version = @fromBackingInt(@intCast(std.mem.readInt(u32, &version_buf, .big)));
     try validateVersionedPacketVersion(version);
     const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
     if (packet_type != .retry) return error.InvalidRetryPacket;
@@ -1372,13 +1372,13 @@ test "encode/parse version negotiation packet roundtrip with long connection ids
 }
 
 test "reserved version helper matches QUIC greasing pattern" {
-    try std.testing.expect(isReservedVersion(@enumFromInt(0x0a0a0a0a)));
-    try std.testing.expect(isReservedVersion(@enumFromInt(0x1a2a3a4a)));
-    try std.testing.expect(isReservedVersion(@enumFromInt(0xfafafafa)));
+    try std.testing.expect(isReservedVersion(@fromBackingInt(@intCast(0x0a0a0a0a))));
+    try std.testing.expect(isReservedVersion(@fromBackingInt(@intCast(0x1a2a3a4a))));
+    try std.testing.expect(isReservedVersion(@fromBackingInt(@intCast(0xfafafafa))));
     try std.testing.expect(!isReservedVersion(Version.v1));
     try std.testing.expect(!isReservedVersion(Version.v2));
-    try std.testing.expect(!isReservedVersion(@enumFromInt(0x00000000)));
-    try std.testing.expect(!isReservedVersion(@enumFromInt(0xfaceb00c)));
+    try std.testing.expect(!isReservedVersion(@fromBackingInt(@intCast(0x00000000))));
+    try std.testing.expect(!isReservedVersion(@fromBackingInt(@intCast(0xfaceb00c))));
 }
 
 test "version negotiation parser ignores unused first-byte bits" {
@@ -1446,7 +1446,7 @@ test "version negotiation packet rejects zero supported versions" {
 
     var raw: [32]u8 = undefined;
     var writer = buffer.fixedWriter(&raw);
-    const zero_versions = [_]Version{@enumFromInt(0)};
+    const zero_versions = [_]Version{@fromBackingInt(@intCast(0))};
     try std.testing.expectError(error.InvalidVersionList, encodeVersionNegotiationPacket(writer.writer(), .{
         .dcid = &[_]u8{0xaa},
         .scid = &[_]u8{0xbb},
@@ -1732,7 +1732,7 @@ test "retry packet validates connection id lengths and allocation failures" {
 
 test "retry packet rejects zero version" {
     const input = RetryPacket{
-        .version = @enumFromInt(0),
+        .version = @fromBackingInt(@intCast(0)),
         .dcid = &[_]u8{0xaa},
         .scid = &[_]u8{0xbb},
         .token = &[_]u8{0xcc},
@@ -1842,7 +1842,7 @@ test "long header rejects non-zero reserved bits" {
 
 test "versioned long headers reject zero version" {
     const input = LongHeader{
-        .version = @enumFromInt(0),
+        .version = @fromBackingInt(@intCast(0)),
         .dcid = &[_]u8{0xaa},
         .scid = &[_]u8{0xbb},
         .packet_type = .initial,

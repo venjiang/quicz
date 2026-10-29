@@ -212,11 +212,11 @@ fn require(condition: bool) ExampleError!void {
 }
 
 fn tlsStatus(status: anytype) quicz.TlsBackendStatus {
-    return @enumFromInt(@as(c_int, @intCast(status)));
+    return @fromBackingInt(@intCast(@as(c_int, @intCast(status))));
 }
 
 fn cPacketSpace(space: quicz.TlsBackendPacketSpace) c.enum_quicz_tls_backend_packet_space {
-    return @intCast(@intFromEnum(space));
+    return @intCast(@backingInt(space));
 }
 
 fn statusIsOk(status: anytype) bool {
@@ -1122,7 +1122,7 @@ fn verifyAdapterApplicationSocketEcho(
     const server_inflight_after_final_ack = server.bytesInFlight(.application);
     try require(server_inflight_after_final_ack == 0);
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "adapter close");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "adapter close");
     try require(client.connectionState() == .closing);
     const close_datagram = (try loop.client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         adapter_client_handle,
@@ -1151,7 +1151,7 @@ fn verifyAdapterApplicationSocketEcho(
     const server_close_error_code = switch (server.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| blk: {
             try require(close.error_code == 0);
-            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.stream));
+            try require(close.frame_type == @backingInt(quicz.frame.FrameType.stream));
             try require(std.mem.eql(u8, close.reason_phrase, "adapter close"));
             break :blk close.error_code;
         },

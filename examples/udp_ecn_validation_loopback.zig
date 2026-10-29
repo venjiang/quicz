@@ -166,9 +166,9 @@ pub fn main() !void {
     var client_receive_buf: [1500]u8 = undefined;
 
     const ping_payload = [_]u8{
-        @intFromEnum(quicz.frame.FrameType.ping),
-        @intFromEnum(quicz.frame.FrameType.padding),
-        @intFromEnum(quicz.frame.FrameType.padding),
+        @backingInt(quicz.frame.FrameType.ping),
+        @backingInt(quicz.frame.FrameType.padding),
+        @backingInt(quicz.frame.FrameType.padding),
     };
     const ecn_ping = try protectShortPacket(allocator, &server_dcid, 0, secrets.client, &ping_payload);
     defer allocator.free(ecn_ping);

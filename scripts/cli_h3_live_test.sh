@@ -13,7 +13,7 @@ if [ "${1:-}" = "--skip-live" ]; then
 fi
 
 cd cli
-zig build
+"${ZIG:-zig}" build
 
 check_live() {
   local name="$1" url="$2"
