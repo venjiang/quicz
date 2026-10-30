@@ -18,6 +18,9 @@ jobs:
           echo "$PWD/zig-aarch64-macos-0.17.0" >> $GITHUB_PATH
       - name: Unit tests
         run: zig build test --summary all
+      - name: CLI unit tests
+        working-directory: cli
+        run: zig build test --summary all
       - name: Format check
         run: zig fmt --check build.zig src examples
 

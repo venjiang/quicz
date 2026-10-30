@@ -82,6 +82,7 @@ test "read accepts encrypted close notify as EOF" {
     var plaintext: [32]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try stream.read(&plaintext));
     try std.testing.expectEqual(@as(usize, 0), try stream.read(&plaintext));
+    try std.testing.expect(!stream.write_closed);
 }
 
 const HandshakeType = struct {
@@ -445,6 +446,7 @@ pub const TlsStream = struct {
     write_key: [16]u8,
     write_iv: [12]u8,
     write_seq: u64 = 0,
+    // Record or I/O failure also terminates output, without a graceful alert.
     write_closed: bool = false,
     read_key: [16]u8,
     read_iv: [12]u8,
@@ -588,9 +590,11 @@ pub const TlsStream = struct {
         };
     }
 
-    /// Read decrypted application data; returns 0 on EOF/close.
+    /// Read decrypted application data. Peer close_notify returns 0.
+    /// Record and I/O errors terminate output and propagate unchanged.
     pub fn read(self: *TlsStream, buf: []u8) !usize {
         if (self.read_closed) return 0;
+        errdefer self.write_closed = true;
         if (self.dec_start < self.dec_end) {
             const available = self.dec_end - self.dec_start;
             const n = @min(available, buf.len);
@@ -628,8 +632,10 @@ pub const TlsStream = struct {
         return error.UnexpectedMessage;
     }
 
+    /// Write bounded application records. I/O errors terminate output.
     pub fn write(self: *TlsStream, data: []const u8) !void {
         if (self.write_closed) return error.StreamClosed;
+        errdefer self.write_closed = true;
         var rec: [record_max + 64]u8 = undefined;
         var offset: usize = 0;
         while (offset < data.len) {
@@ -641,7 +647,7 @@ pub const TlsStream = struct {
         try self.out.flush();
     }
 
-    /// Send close_notify before the socket closes. Repeated calls do not send another alert.
+    /// Send close_notify unless output already ended or failed. Repeated calls do not send another alert.
     pub fn end(self: *TlsStream) !void {
         if (self.write_closed) return;
         self.write_closed = true;
@@ -700,6 +706,94 @@ test "read rejects a TLSInnerPlaintext that exceeds the limit through padding" {
     var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
     var plaintext: [record_max]u8 = undefined;
     try std.testing.expectError(error.RecordOversize, stream.read(&plaintext));
+    try stream.end();
+    try std.testing.expectEqual(@as(u64, 0), stream.write_seq);
+    try std.testing.expectError(error.StreamClosed, stream.write("late"));
+}
+
+test "fatal read errors suppress close notify and later writes" {
+    const Failure = enum { authentication, record_size, alert, content_type, truncated };
+    for (std.enums.values(Failure)) |failure| {
+        var ciphertext: [128]u8 = undefined;
+        const secret: [16]u8 = @splat(1);
+        const iv: [12]u8 = @splat(2);
+        var sequence: u64 = 0;
+        var len: usize = 0;
+        const expected: anyerror = switch (failure) {
+            .authentication => blk: {
+                len = sealRecord(&ciphertext, ContentType.application_data, "request", secret, iv, &sequence);
+                ciphertext[len - 1] ^= 1;
+                break :blk error.DecryptionFailed;
+            },
+            .record_size => blk: {
+                writeRecordHeader(&ciphertext, ContentType.application_data, record_max + 257);
+                len = 5;
+                break :blk error.RecordOversize;
+            },
+            .alert => blk: {
+                len = sealRecord(&ciphertext, ContentType.alert, &.{ 2, 20 }, secret, iv, &sequence);
+                break :blk error.TlsAlert;
+            },
+            .content_type => blk: {
+                len = sealRecord(&ciphertext, ContentType.handshake, &.{1}, secret, iv, &sequence);
+                break :blk error.UnexpectedMessage;
+            },
+            .truncated => blk: {
+                ciphertext[0] = ContentType.application_data;
+                len = 1;
+                break :blk error.EndOfStream;
+            },
+        };
+        var in = std.Io.Reader.fixed(ciphertext[0..len]);
+        var reply: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&reply);
+        var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
+        var plaintext: [128]u8 = undefined;
+        try std.testing.expectError(expected, stream.read(&plaintext));
+        try std.testing.expect(stream.write_closed);
+        try stream.end();
+        try stream.end();
+        try std.testing.expectEqual(@as(usize, 0), out.end);
+        try std.testing.expectEqual(@as(u64, 0), stream.write_seq);
+        try std.testing.expectError(error.StreamClosed, stream.write("late"));
+    }
+}
+
+test "failed application write or flush suppresses close notify and output retries" {
+    const Sink = struct {
+        writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+        calls: usize = 0,
+
+        fn drain(writer: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @alignCast(@fieldParentPtr("writer", writer));
+            self.calls += 1;
+            return error.WriteFailed;
+        }
+    };
+    for ([_]bool{ false, true }) |buffered| {
+        var in = std.Io.Reader.fixed(&.{});
+        var sink: Sink = .{};
+        var ciphertext: [128]u8 = undefined;
+        if (buffered) sink.writer.buffer = &ciphertext;
+        var stream: TlsStream = .{
+            .in = &in,
+            .out = &sink.writer,
+            .write_key = @splat(1),
+            .write_iv = @splat(2),
+            .read_key = @splat(3),
+            .read_iv = @splat(4),
+        };
+        try std.testing.expectError(error.WriteFailed, stream.write("response"));
+        try std.testing.expect(stream.write_closed);
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+        const sequence_after_failure = stream.write_seq;
+        try stream.end();
+        try stream.end();
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+        try std.testing.expectEqual(sequence_after_failure, stream.write_seq);
+        try std.testing.expectError(error.StreamClosed, stream.write("late"));
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    }
 }
 
 test "end sends one encrypted close notify and rejects further writes" {
