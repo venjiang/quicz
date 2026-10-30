@@ -176,6 +176,28 @@ Recovery 在丢包或 PTO 后重传 `HANDSHAKE_DONE`，直到在途副本或保�
 连接保留最近 32 个已判丢副本的 packet number，不保留整包缓冲。
 收到匹配的 ACK 后，连接取消待发副本。其他副本之后丢失时，不再重新排队该帧。
 
+客户端 transport 在接收密钥尚不可用时，最多暂存 32 个受保护包。
+每个包拥有独立副本，长度不超过配置的 `max_datagram_size`。
+默认配置下，包副本合计不超过 43200 字节。队列满时丢弃新到达的包。
+
+TLS 安装密钥后，transport 先处理暂存的 Handshake 包，再处理 1-RTT 包。
+现有 TLS backend 只在验证服务端 Finished 后提供客户端 1-RTT 密钥。
+暂存期间不确认报文，也不推进 packet number。
+
+有效 Retry 会清空旧队列。接受 Version Negotiation 后，旧 attempt 及其保留包被废弃。
+连接仍 active 时，被忽略的 Version Negotiation 不改变队列。新 attempt 携带的协商历史不会使自己的新包失效。
+Transport 关闭、idle 到期和 deinit 会释放保留副本。认证后的 frame 错误和证书错误仍按原路径返回。
+Endpoint 的 deadline、reset、close 和 VN 路径在连接停用或旧 attempt 被替代后释放队列，包括错误返回。
+直接驱动借用 Connection 的 owner 使用 `discardObsoletePackets()` 完成同一清理。
+乱序、缓冲所有权和清理回归位于 `src/quic/tls13_client_reordering_tests.zig`。
+该处理遵循 [RFC 9001 第 4.1.4 节](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.4) 的加密级别暂存模型。
+
+客户端 runtime 在应用出站之前，也会排空 Initial 和 Handshake 出站。
+因此，即使 TLS 仍等待后续握手字节，也能确认已经处理的对应空间报文。
+Initial 密钥仍由 original 或 Retry DCID 派生，与包头当前 peer CID 分开处理。
+附路由的 poll 同步 recovery 状态，并复用失效包清理。
+`src/runtime/client.zig` 的线路回归在 TLS 完成前解密检查两类 ACK。
+
 ### 1-RTT stream path
 
 1. 应用或示例打开 stream 并写入数据。

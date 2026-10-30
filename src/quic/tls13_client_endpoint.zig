@@ -120,6 +120,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             datagram: []const u8,
             route: endpoint.RouteResult,
         ) !ReceiveResult {
+            defer self.transport.discardObsoletePackets();
             if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
                 if (self.transport.connection.processStatelessResetDatagram(now_nanos, datagram)) |sequence_number| {
                     try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
@@ -414,6 +415,19 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             return result;
         }
 
+        /// Poll route-bound Initial/Handshake output and mirror recovery state.
+        pub fn pollHandshakeDatagramWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const datagram = try self.transport.pollHandshakeDatagram(now_nanos);
+            errdefer if (datagram) |bytes| self.transport.allocator.free(bytes);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return if (datagram) |bytes| .{ .datagram = bytes, .path = path } else null;
+        }
+
         /// Select the next client transport lifecycle deadline.
         pub fn nextDeadline(self: *const Self) ?client_transport.ClientTransportDeadline {
             return self.transport.nextDeadline();
@@ -424,6 +438,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             self: *Self,
             now_nanos: i64,
         ) !?client_transport.ClientTransportDeadline {
+            defer self.transport.discardObsoletePackets();
             const deadline = self.transport.nextDeadline() orelse return null;
             if (deadline.deadline() > now_nanos) return null;
 
@@ -577,6 +592,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             followup_local_initial_source_connection_id: []const u8,
             route_options: endpoint.ClientInitialRouteOptions,
         ) !?endpoint_lifecycle.EndpointVersionNegotiationFollowupResult {
+            defer self.transport.discardObsoletePackets();
             return self.lifecycle.processVersionNegotiationFollowupDatagram(
                 self.connection_id,
                 followup_connection_id,
@@ -852,6 +868,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             reason: []const u8,
             now_nanos: i64,
         ) !?ApplicationDatagramPathResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
             try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
@@ -869,6 +886,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             reason: []const u8,
             now_nanos: i64,
         ) !?ApplicationDatagramPathResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
             try self.transport.connection.closeApplication(application_error_code, reason);
@@ -888,6 +906,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             now_nanos: i64,
             out: []ApplicationDatagramPathResult,
         ) !CloseDatagramPathDrainResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
             if (out.len == 0) return error.BufferTooSmall;
@@ -906,6 +925,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             now_nanos: i64,
             out: []ApplicationDatagramPathResult,
         ) !CloseDatagramPathDrainResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
             if (out.len == 0) return error.BufferTooSmall;
@@ -923,6 +943,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
 
         /// Retire the registered route after the close deadline has elapsed.
         pub fn retireAtCloseDeadline(self: *Self, now_nanos: i64) !?endpoint_lifecycle.EndpointConnectionRetireResult {
+            defer self.transport.discardObsoletePackets();
             return self.lifecycle.checkCloseTimeoutsAndRetireConnection(
                 self.connection_id,
                 &self.transport.connection,

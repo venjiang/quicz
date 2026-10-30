@@ -229,6 +229,31 @@ Recovery retransmits `HANDSHAKE_DONE` after loss or PTO until an ACK covers an i
 The connection retains the packet numbers of the 32 most recently declared-lost copies, without retaining their packet buffers.
 A matching ACK cancels pending copies and prevents later loss of another copy from queuing the frame again.
 
+The client transport retains up to 32 protected packets while their receive keys are unavailable.
+Each entry owns a copy of the protected packet. Packet length cannot exceed the configured `max_datagram_size`.
+The default limit permits 43200 packet bytes. The transport discards new arrivals when the queue is full.
+
+After TLS installs keys, the transport processes queued Handshake packets before queued 1-RTT packets.
+The owned TLS backend supplies client 1-RTT keys only after it validates the server Finished.
+The queue does not acknowledge packets or advance packet numbers before decryption.
+
+A valid Retry clears the old queue. Accepted Version Negotiation abandons the old attempt and its retained packets.
+Ignored Version Negotiation on an active connection leaves the queue unchanged.
+The negotiated-version history of a fresh attempt does not invalidate its new packets.
+Transport close, idle expiry, and deinitialization release retained copies.
+Endpoint deadline, reset, close, and VN paths discard packets after shutdown or supersession, including error returns.
+Owners that drive a borrowed Connection directly use `discardObsoletePackets()` for this cleanup.
+
+Authenticated frame errors and certificate failures keep their existing error paths.
+See `src/quic/tls13_client_reordering_tests.zig` for the ordering, ownership, and cleanup regressions.
+This follows the encryption-level buffering model in [RFC 9001, Section 4.1.4](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.4).
+
+The client runtime also drains Initial and Handshake output before polling application output.
+It can therefore acknowledge processed packets while TLS still waits for later handshake bytes.
+Initial keys use the original or Retry DCID, independently of the packet header's current peer CID.
+The route-bound poll mirrors recovery state and uses the same obsolete-packet cleanup.
+The wire regression in `src/runtime/client.zig` decrypts both ACK spaces before TLS completes.
+
 ### 1-RTT Stream Path
 
 1. The application or example opens a stream and writes data.

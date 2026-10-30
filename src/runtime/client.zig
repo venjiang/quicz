@@ -16,6 +16,111 @@ const quic_packet = quicz.packet;
 
 const log = std.log.scoped(.quicz_runtime);
 
+test "runtime client sends Initial and Handshake ACKs before TLS completes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    const alpn = [_][]const u8{"h3"};
+    var client = try Client.init(allocator, io, .{
+        .server_port = peer.address.getPort(),
+        .server_name = "localhost",
+        .alpn = &alpn,
+        .insecure_skip_verify = true,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{});
+    defer server.deinit();
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+    const private_key = @as([32]u8, @splat(0x55));
+    const certificate = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xde, 0xad, 0xbe, 0xef };
+    var backend = quicz.tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&certificate},
+        .private_key_bytes = &private_key,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+    const transport = &client.client.transport;
+    const keys = try quicz.protection.deriveInitialSecrets(.v1, &transport.original_destination_connection_id);
+    const now = client.nowNanos();
+    const initial = try client.client.begin(now, &client.scratch);
+    defer allocator.free(initial);
+    client.handshake_started = true;
+    try server.recordPeerAddressBytesReceived(initial.len);
+    try server.processProtectedLongDatagramInSpace(.initial, now + 1, keys.client, initial);
+    _ = try server.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &client.scratch);
+    const server_initial = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        now + 2,
+        &transport.local_source_connection_id,
+        &server_scid,
+        &.{},
+        keys.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer allocator.free(server_initial);
+    client.processDatagram(peer.address, server_initial);
+    try server.sendPingInSpace(.handshake);
+    const ping = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        now + 3,
+        &transport.local_source_connection_id,
+        &server_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer allocator.free(ping);
+    client.processDatagram(peer.address, ping);
+    try std.testing.expect(!transport.backend.hs.isComplete());
+    var acknowledged_initial = false;
+    var acknowledged_handshake = false;
+    var received_bytes: [8192]u8 = undefined;
+    while (!acknowledged_initial or !acknowledged_handshake) {
+        const received = try peer.receiveTimeout(io, &received_bytes, .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(200),
+        } });
+        var offset: usize = 0;
+        while (offset < received.data.len) {
+            const info = try quicz.protection.peekProtectedLongPacketInfo(received.data[offset..]);
+            try std.testing.expectEqualSlices(u8, &server_scid, info.dcid);
+            const end = offset + info.len;
+            const space: quicz.PacketNumberSpace = switch (info.packet_type) {
+                .initial => .initial,
+                .handshake => .handshake,
+                else => return error.TestUnexpectedResult,
+            };
+            if (space == .initial) {
+                var opened = try quicz.protection.unprotectLongPacketAes128(
+                    allocator,
+                    keys.client,
+                    received.data[offset..end],
+                    server.nextPeerPacketNumber(.initial),
+                );
+                defer quicz.protection.deinitProtectedLongPacket(&opened, allocator);
+                var frame_offset: usize = 0;
+                var saw_ack = false;
+                while (frame_offset < opened.packet.plaintext.len) {
+                    var decoded = try quicz.frame.decodeFrameSlice(opened.packet.plaintext[frame_offset..], allocator);
+                    defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+                    if (decoded.frame == .ack) {
+                        try std.testing.expectEqual(@as(u64, 0), decoded.frame.ack.largest_acknowledged);
+                        try std.testing.expectEqual(@as(u64, 0), decoded.frame.ack.first_ack_range);
+                        saw_ack = true;
+                    }
+                    frame_offset += decoded.len;
+                }
+                try std.testing.expect(saw_ack);
+            }
+            try server.processProtectedLongDatagramInSpace(space, client.nowNanos(), if (space == .initial) keys.client else server.peer_handshake_keys.?, received.data[offset..end]);
+            if (space == .initial) acknowledged_initial = true else acknowledged_handshake = true;
+            offset = end;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+}
+
 test "client runtime answers an authenticated probe after socket handoff" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1243,6 +1348,16 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
             if (conn.isClosingOrClosed()) {
                 if (conn.connectionState() == .closing and conn.closeDeadline() == null) self.sendClosePacket();
                 return;
+            }
+            var handshake_iterations: usize = 0;
+            while (handshake_iterations < 16) : (handshake_iterations += 1) {
+                const outgoing = self.client.pollHandshakeDatagramWithRoutePath(self.nowNanos()) catch |err| {
+                    if (err != error.ConnectionClosed) log.debug("client: handshake output: {}", .{err});
+                    break;
+                } orelse break;
+                defer self.allocator.free(outgoing.datagram);
+                self.socket.send(self.io, &self.server_address, outgoing.datagram) catch |err|
+                    log.debug("client: handshake output send: {}", .{err});
             }
             var out: [16]TlsEndpoint.ApplicationDatagramPathResult = undefined;
             var iterations: usize = 0;
