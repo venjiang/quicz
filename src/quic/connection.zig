@@ -793,6 +793,10 @@ pub const Connection = struct {
     handshake_confirmed: bool,
     pending_handshake_done: bool,
     handshake_done_sent: bool,
+    handshake_done_acked: bool,
+    // Retain only PN metadata after loss, with oldest-copy eviction when full.
+    lost_handshake_done_packet_numbers: [32]u64,
+    lost_handshake_done_count: usize,
     peer_close: ?PeerClose,
     pending_close: ?PendingCloseFrame,
     state: ConnectionState,
@@ -964,6 +968,9 @@ pub const Connection = struct {
             .handshake_confirmed = false,
             .pending_handshake_done = false,
             .handshake_done_sent = false,
+            .handshake_done_acked = false,
+            .lost_handshake_done_packet_numbers = undefined,
+            .lost_handshake_done_count = 0,
             .peer_close = null,
             .pending_close = null,
             .state = .active,
@@ -2052,7 +2059,7 @@ pub const Connection = struct {
             .dcid = client_source_connection_id,
             .scid = retry_source_connection_id,
             .token = token,
-            .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+            .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
         };
         const datagram = protection.encodeRetryPacketWithIntegrity(
             self.allocator,
@@ -2107,7 +2114,7 @@ pub const Connection = struct {
         };
         defer packet.deinitRetryPacket(&retry, self.allocator);
 
-        if (@intFromEnum(retry.version) != @intFromEnum(self.config.chosen_version)) return error.InvalidPacket;
+        if (@backingInt(retry.version) != @backingInt(self.config.chosen_version)) return error.InvalidPacket;
         try self.validateOriginalDestinationConnectionIdForRecord(original_destination_connection_id);
         if (self.original_destination_connection_id_len == null) {
             try validateInitialDestinationConnectionIdLength(original_destination_connection_id);
@@ -2858,7 +2865,7 @@ pub const Connection = struct {
                 if (transport_error.transportParameterErrorCode(err)) |code| {
                     try self.closeConnection(
                         transport_error.codeValue(code),
-                        @intFromEnum(frame.FrameType.crypto),
+                        @backingInt(frame.FrameType.crypto),
                         "transport parameters",
                     );
                     return error.InvalidPacket;
@@ -2872,7 +2879,7 @@ pub const Connection = struct {
             error.VersionNegotiationError => {
                 try self.closeConnection(
                     transport_error.codeValue(.version_negotiation_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "version negotiation",
                 );
                 return error.InvalidPacket;
@@ -2880,7 +2887,7 @@ pub const Connection = struct {
             error.InvalidPacket => {
                 try self.closeConnection(
                     transport_error.codeValue(.transport_parameter_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "transport parameters",
                 );
                 return error.InvalidPacket;
@@ -2909,7 +2916,7 @@ pub const Connection = struct {
                 if (transport_error.transportParameterErrorCode(err)) |code| {
                     try self.closeConnection(
                         transport_error.codeValue(code),
-                        @intFromEnum(frame.FrameType.crypto),
+                        @backingInt(frame.FrameType.crypto),
                         "transport parameters",
                     );
                     return error.InvalidPacket;
@@ -2926,7 +2933,7 @@ pub const Connection = struct {
             error.VersionNegotiationError => {
                 try self.closeConnection(
                     transport_error.codeValue(.version_negotiation_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "version negotiation",
                 );
                 return error.InvalidPacket;
@@ -2934,7 +2941,7 @@ pub const Connection = struct {
             error.InvalidPacket => {
                 try self.closeConnection(
                     transport_error.codeValue(.transport_parameter_error),
-                    @intFromEnum(frame.FrameType.crypto),
+                    @backingInt(frame.FrameType.crypto),
                     "transport parameters",
                 );
                 return error.InvalidPacket;
@@ -2963,7 +2970,7 @@ pub const Connection = struct {
                 if (!version_information.containsAvailableVersion(version_information.chosen_version)) {
                     return error.InvalidPacket;
                 }
-                if (@intFromEnum(version_information.chosen_version) != @intFromEnum(self.config.chosen_version)) {
+                if (@backingInt(version_information.chosen_version) != @backingInt(self.config.chosen_version)) {
                     return error.VersionNegotiationError;
                 }
             },
@@ -2972,7 +2979,7 @@ pub const Connection = struct {
                     return error.VersionNegotiationError;
                 }
                 if (self.version_negotiation_selected_version) |selected| {
-                    if (@intFromEnum(version_information.chosen_version) != @intFromEnum(selected)) {
+                    if (@backingInt(version_information.chosen_version) != @backingInt(selected)) {
                         return error.VersionNegotiationError;
                     }
                     if (version_information.available_versions.len == 0) {
@@ -2983,7 +2990,7 @@ pub const Connection = struct {
                         version_information.available_versions,
                         version_information.chosen_version,
                     ) orelse return error.VersionNegotiationError;
-                    if (@intFromEnum(preferred) != @intFromEnum(selected)) {
+                    if (@backingInt(preferred) != @backingInt(selected)) {
                         return error.VersionNegotiationError;
                     }
                 }
@@ -3073,7 +3080,7 @@ pub const Connection = struct {
             version_information,
             compatibilities,
         ) orelse return error.VersionNegotiationError;
-        if (@intFromEnum(selected) != @intFromEnum(self.config.chosen_version)) {
+        if (@backingInt(selected) != @backingInt(self.config.chosen_version)) {
             return error.VersionNegotiationError;
         }
         return selected;
@@ -3088,7 +3095,7 @@ pub const Connection = struct {
             try self.validatePeerVersionInformation(version_information);
         } else if (self.side == .client) {
             if (self.version_negotiation_selected_version) |selected| {
-                if (@intFromEnum(selected) != @intFromEnum(packet.Version.v1)) return error.VersionNegotiationError;
+                if (@backingInt(selected) != @backingInt(packet.Version.v1)) return error.VersionNegotiationError;
             }
         }
     }
@@ -3561,8 +3568,8 @@ pub const Connection = struct {
     /// Process one unencrypted packet payload and queue CONNECTION_CLOSE on classified peer errors.
     ///
     /// This is the Application-space counterpart to
-    /// `processDatagramForPacketTypeOrClose()`. Existing callers that need
-    /// pure rollback behavior can continue using `processDatagram()`.
+    /// `processDatagramForPacketTypeOrClose()`. The throwing receive path does
+    /// not add a close. Frames processed before an error can still change state.
     pub fn processDatagramOrClose(
         self: *Connection,
         now_nanos: i64,
@@ -3671,7 +3678,7 @@ pub const Connection = struct {
                 if (offset > 0) break;
                 return error.InvalidPacket;
             };
-            if (@intFromEnum(info.version) != @intFromEnum(self.config.chosen_version) or info.len == 0) {
+            if (@backingInt(info.version) != @backingInt(self.config.chosen_version) or info.len == 0) {
                 if (offset > 0) break;
                 return error.InvalidPacket;
             }
@@ -3693,7 +3700,7 @@ pub const Connection = struct {
         var processed_count: usize = 0;
         while (offset < coalesced_end) {
             const info = protection.peekProtectedLongPacketInfo(datagram[offset..]) catch return error.InvalidPacket;
-            if (@intFromEnum(info.version) != @intFromEnum(self.config.chosen_version) or info.len == 0) return error.InvalidPacket;
+            if (@backingInt(info.version) != @backingInt(self.config.chosen_version) or info.len == 0) return error.InvalidPacket;
             const route = protectedLongPacketRouteFor(keys, info.packet_type) orelse return error.InvalidPacket;
             try self.processProtectedLongDatagramWithRoute(
                 route,
@@ -3844,7 +3851,7 @@ pub const Connection = struct {
         defer protection.deinitProtectedLongPacket(&decoded, self.allocator);
 
         if (decoded.len != datagram.len) return error.InvalidPacket;
-        if (@intFromEnum(decoded.packet.header.version) != @intFromEnum(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
+        if (@backingInt(decoded.packet.header.version) != @backingInt(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
             return error.InvalidPacket;
         }
         // RFC 9000 §13.1: packets with an already-received or below-window
@@ -4125,9 +4132,9 @@ pub const Connection = struct {
     ///
     /// The key-phase state supplies current and next receive keys. It advances
     /// only after the packet authenticates and the decrypted frame payload is
-    /// accepted, so failed datagrams do not mutate peer key-phase state. Real
-    /// TLS traffic-secret production, key-update confirmation, and old-key
-    /// discard remain future endpoint/TLS integration work. Successful
+    /// accepted. Failed authentication does not advance key generations.
+    /// Retention deadlines still expire under the supplied clock.
+    /// This path supports both caller-owned and installed receive state. Successful
     /// server-side receive also discards installed 0-RTT receive keys.
     pub fn processProtectedShortDatagramWithKeyPhaseState(
         self: *Connection,
@@ -4164,6 +4171,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_nanos)) return;
+        _ = key_phase_state.discardExpiredPrevious(now_nanos);
         try self.validateReceivedUdpDatagramSize(datagram);
 
         const packet_space = self.packetNumberSpace(.application);
@@ -4178,19 +4186,7 @@ pub const Connection = struct {
             expected_packet_number,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.KeyUpdateError => {
-                // The packet's revealed key phase matches a previous
-                // generation whose keys were already discarded past the PTO
-                // retain window: the peer is protecting packets with keys
-                // older than the retained generation (RFC 9001 §6.5). Surface
-                // this as a KEY_UPDATE_ERROR transport close.
-                self.closeConnection(
-                    transport_error.codeValue(.key_update_error),
-                    0,
-                    "packet protected with discarded key",
-                ) catch {};
-                return error.InvalidPacket;
-            },
+            // A key-phase bit without authentication cannot prove a peer violation.
             else => return error.InvalidPacket,
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
@@ -6739,6 +6735,7 @@ pub const Connection = struct {
                 .crypto_frame = sent_crypto_frame,
                 .reset_stream_frame = built.sent_reset_stream_frame,
                 .stop_sending_frame = built.sent_stop_sending_frame,
+                .handshake_done = built.consume_handshake_done,
             });
             sent_crypto_frame = null;
         }
@@ -7125,7 +7122,7 @@ pub const Connection = struct {
     /// selected packet type, or classified semantic frame-processing failures,
     /// this wrapper queues a transport CONNECTION_CLOSE with the RFC 9000 close
     /// code before returning `InvalidPacket`. Existing callers that need pure
-    /// rollback behavior can continue using `processDatagramForPacketType()`.
+    /// error reporting without a close can use `processDatagramForPacketType()`.
     pub fn processDatagramForPacketTypeOrClose(
         self: *Connection,
         packet_type: FramePacketType,
@@ -8140,7 +8137,7 @@ pub const Connection = struct {
                     if (err == error.CryptoError and cryptoBackendDrivePolicyClosesOnError(peer_transport_parameter_policy)) {
                         try self.closeConnection(
                             transport_error.cryptoErrorCode(80),
-                            @intFromEnum(frame.FrameType.crypto),
+                            @backingInt(frame.FrameType.crypto),
                             "crypto error",
                         );
                         return error.InvalidPacket;
@@ -8226,6 +8223,9 @@ pub const Connection = struct {
         const backend_confirmed = backend.isHandshakeConfirmed();
         if (backend_confirmed and !self.handshake_confirmed) {
             try self.confirmHandshake();
+        }
+        if (backend_confirmed and self.side == .server and self.hasOneRttProtectionKeys() and !self.handshake_done_sent) {
+            self.pending_handshake_done = true;
         }
         const handshake_no_output_pending = self.handshake_packet_space.crypto_send_queue.items.len == 0;
         if (backend_confirmed and handshake_outbound_chunks == 0 and handshake_no_output_pending) {
@@ -8809,6 +8809,15 @@ pub const Connection = struct {
         var newly_acked_ect0: u64 = 0;
         var newly_acked_ect1: u64 = 0;
         var local_key_update_acked = false;
+        var newly_acked_handshake_done = false;
+        if (space == .application and !self.handshake_done_acked) {
+            for (self.lost_handshake_done_packet_numbers[0..self.lost_handshake_done_count]) |packet_number| {
+                if (ackFrameContains(ack, packet_number)) {
+                    newly_acked_handshake_done = true;
+                    break;
+                }
+            }
+        }
         const congestion_window_utilized = packet_space.recovery_state.isCongestionWindowUtilized();
 
         var i: usize = 0;
@@ -8840,10 +8849,19 @@ pub const Connection = struct {
                 .ect0 => newly_acked_ect0 += 1,
                 .ect1 => newly_acked_ect1 += 1,
             }
+            if (removed.handshake_done) {
+                newly_acked_handshake_done = true;
+            }
             markSentPacketAckedOnStreams(self, removed);
             removed.deinit(self.allocator);
         }
 
+        // A late ACK can confirm the frame without acknowledging any in-flight bytes.
+        if (newly_acked_handshake_done) {
+            self.handshake_done_acked = true;
+            self.pending_handshake_done = false;
+            self.lost_handshake_done_count = 0;
+        }
         if (acked_bytes == 0) return;
 
         const ecn_result = self.validateEcnAck(
@@ -9104,6 +9122,16 @@ pub const Connection = struct {
             }
 
             var removed = packet_space.sent_packets.orderedRemove(i);
+            if (removed.handshake_done and !self.handshake_done_acked) {
+                const retained = &self.lost_handshake_done_packet_numbers;
+                if (self.lost_handshake_done_count == retained.len) {
+                    std.mem.copyForwards(u64, retained[0 .. retained.len - 1], retained[1..]);
+                    self.lost_handshake_done_count -= 1;
+                }
+                retained[self.lost_handshake_done_count] = removed.packet_number;
+                self.lost_handshake_done_count += 1;
+                self.pending_handshake_done = true;
+            }
             result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_nanos.*);
             removed.deinit(self.allocator);
         }
@@ -9314,6 +9342,10 @@ pub const Connection = struct {
         if (space != .application) return false;
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
+            if (sent_packet.handshake_done and !self.handshake_done_acked) {
+                self.pending_handshake_done = true;
+                return true;
+            }
             if (sent_packet.reset_stream_frame) |reset| {
                 if (resetStreamFrameAlreadyAcked(self, reset)) continue;
                 self.pending_reset_streams.append(self.allocator, reset) catch return error.OutOfMemory;
@@ -9849,6 +9881,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .sent_time_nanos = now_nanos,
             .bytes = encoded_len,
+            .handshake_done = true,
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 

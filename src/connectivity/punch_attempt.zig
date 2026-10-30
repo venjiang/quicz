@@ -167,10 +167,10 @@ test "punch diagnostics separate rejected proofs without changing validation" {
 }
 
 test "both authenticated directions are required before validation" {
-    const key: wire.Key = .{0x42} ** 32;
-    const attempt_id: wire.AttemptId = .{0x11} ** 16;
-    var app = try PunchAttempt.init(key, attempt_id, .{0xa1} ** 16, .{});
-    var host = try PunchAttempt.init(key, attempt_id, .{0xb2} ** 16, .{});
+    const key: wire.Key = @splat(0x42);
+    const attempt_id: wire.AttemptId = @splat(0x11);
+    var app = try PunchAttempt.init(key, attempt_id, @splat(0xa1), .{});
+    var host = try PunchAttempt.init(key, attempt_id, @splat(0xb2), .{});
     const app_probe = app.nextProbe(0).?;
     const host_probe = host.nextProbe(0).?;
 
@@ -189,9 +189,9 @@ test "both authenticated directions are required before validation" {
 
 test "retry schedule is bounded to five attempts" {
     var attempt = try PunchAttempt.init(
-        .{0x42} ** 32,
-        .{0x11} ** 16,
-        .{0xa1} ** 16,
+        @splat(0x42),
+        @splat(0x11),
+        @splat(0xa1),
         .{ .initial_retry_ms = 100, .maximum_retry_ms = 250, .max_attempts = 5 },
     );
     try std.testing.expect(attempt.nextProbe(0) != null);
@@ -208,27 +208,27 @@ test "retry schedule is bounded to five attempts" {
 }
 
 test "old attempt and wrong acknowledgement nonce are rejected" {
-    const key: wire.Key = .{0x42} ** 32;
-    var attempt = try PunchAttempt.init(key, .{0x11} ** 16, .{0xa1} ** 16, .{});
+    const key: wire.Key = @splat(0x42);
+    var attempt = try PunchAttempt.init(key, @splat(0x11), @splat(0xa1), .{});
     _ = attempt.nextProbe(0).?;
     const old_attempt = wire.encode(key, .{
         .kind = .probe,
-        .attempt_id = .{0x10} ** 16,
-        .nonce = .{0xb2} ** 16,
+        .attempt_id = @splat(0x10),
+        .nonce = @splat(0xb2),
     });
     try std.testing.expectError(error.AttemptMismatch, attempt.receive(&old_attempt));
     const wrong_ack = wire.encode(key, .{
         .kind = .acknowledgement,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0xff} ** 16,
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0xff),
     });
     try std.testing.expectError(error.NonceMismatch, attempt.receive(&wrong_ack));
 }
 
 test "probe retransmission remains idempotent" {
-    const key: wire.Key = .{0x42} ** 32;
-    var app = try PunchAttempt.init(key, .{0x11} ** 16, .{0xa1} ** 16, .{});
-    var host = try PunchAttempt.init(key, .{0x11} ** 16, .{0xb2} ** 16, .{});
+    const key: wire.Key = @splat(0x42);
+    var app = try PunchAttempt.init(key, @splat(0x11), @splat(0xa1), .{});
+    var host = try PunchAttempt.init(key, @splat(0x11), @splat(0xb2), .{});
     const first = app.nextProbe(0).?;
     const second = app.nextProbe(100).?;
     const first_ack = (try host.receive(&first)).acknowledgement.?;
@@ -237,7 +237,7 @@ test "probe retransmission remains idempotent" {
 }
 
 test "reflected local probe cannot authenticate a peer" {
-    var attempt = try PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{});
+    var attempt = try PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{});
     const probe = attempt.nextProbe(0).?;
     try std.testing.expectError(error.NonceMismatch, attempt.receive(&probe));
     try std.testing.expect(!attempt.peer_probe_received);

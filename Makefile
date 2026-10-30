@@ -24,14 +24,14 @@ quicz: # Build the quicz CLI
 	@echo "built: $(QUICZ)"
 
 .PHONY: install
-install: # Build (ReleaseFast) and install the quicz CLI to $(PREFIX)/bin (PREFIX=/usr/local)
+install: # Build (fast) and install the quicz CLI to $(PREFIX)/bin (PREFIX=/usr/local)
 	@if [ -e "$(PREFIX)/bin" ] && [ ! -w "$(PREFIX)/bin" ]; then \
 		echo "error: $(PREFIX)/bin is not writable"; \
 		echo "       use a user-writable prefix, e.g.: make install PREFIX=\$$HOME/.local"; \
 		exit 1; \
 	fi
 	@mkdir -p "$(PREFIX)/bin"
-	cd $(CLI_DIR) && $(ZIG) build -Doptimize=ReleaseFast --prefix $(PREFIX)
+	cd $(CLI_DIR) && $(ZIG) build -Doptimize=fast --prefix $(PREFIX)
 	@echo "installed: $(PREFIX)/bin/quicz"
 
 .PHONY: install-local

@@ -112,7 +112,7 @@ pub fn main() !void {
         std.mem.eql(u8, plaintext, opened_packet.packet.plaintext),
     });
     std.debug.print("[initial-keys] v2_connection_initial version=0x{x} packet_type={s} bytes={} opened={}\n", .{
-        @intFromEnum(v2_info.version),
+        @backingInt(v2_info.version),
         @tagName(v2_info.packet_type),
         v2_connection_initial.len,
         opened_v2_connection_initial.packet.header.version == .v2,

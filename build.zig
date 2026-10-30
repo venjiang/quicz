@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Translator = @import("translate_c").Translator;
 
-const required_zig_version = "0.16.0";
+const required_zig_version = "0.17.0";
 
 // Build script for the current Zig stable template.
 // - Builds the current example executables.
@@ -16,6 +17,7 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const translate_c = b.dependency("translate_c", .{});
 
     // Shared quicz module (library logic lives in src/lib.zig).
     // link_libc: the library uses std.c / std.heap.c_allocator (fuzz targets,
@@ -43,7 +45,7 @@ pub fn build(b: *std.Build) void {
     const quicz_bench_mod = b.addModule("quicz_bench", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
 
     const lib = b.addLibrary(.{
@@ -61,9 +63,23 @@ pub fn build(b: *std.Build) void {
             .{ .name = "quicz", .module = quicz_mod },
         },
     });
+    const mobile_zig_lib: ?std.Build.LazyPath = if (target.result.os.tag == .ios) blk: {
+        // Zig 0.17.0 routes iOS process replacement through unsupported spawning.
+        // Keep the POSIX path in a build-local copy, without changing the installed standard library.
+        const patch_threaded = b.addSystemCommand(&.{
+            "sed",
+            "s/if (is_darwin) if (t\\.spawnDarwin(/if (is_darwin and process.can_spawn) if (t.spawnDarwin(/",
+        });
+        patch_threaded.addFileArg(std.Build.LazyPath.zig_lib.path(b, "std/Io/Threaded.zig"));
+        const ios_stdlib = b.addWriteFiles();
+        _ = ios_stdlib.addCopyDirectory(.zig_lib, "", .{ .exclude_extensions = &.{"Threaded.zig"} });
+        _ = ios_stdlib.addCopyFile(patch_threaded.captureStdOut(.{}), "std/Io/Threaded.zig");
+        break :blk ios_stdlib.getDirectory();
+    } else null;
     const mobile_abi_lib = b.addLibrary(.{
         .name = "quicz_mobile",
         .root_module = mobile_abi_mod,
+        .zig_lib_dir = mobile_zig_lib,
     });
     const install_mobile_abi = b.addInstallArtifact(mobile_abi_lib, .{});
     const install_mobile_header = b.addInstallFileWithDir(
@@ -109,8 +125,8 @@ pub fn build(b: *std.Build) void {
         "Run the blocking mobile C ABI against the native QUIC server",
     );
     run_mobile_abi_loopback.dependOn(&b.addRunArtifact(mobile_abi_loopback).step);
-    const mobile_ipv6_header = b.addTranslateC(.{
-        .root_source_file = b.path("include/quicz_mobile.h"),
+    const mobile_ipv6_header: Translator = .init(translate_c, .{
+        .c_source_file = b.path("include/quicz_mobile.h"),
         .target = target,
         .optimize = optimize,
     });
@@ -124,7 +140,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_mod },
                 .{ .name = "quicz_mobile", .module = mobile_abi_mod },
-                .{ .name = "quicz_mobile_c", .module = mobile_ipv6_header.createModule() },
+                .{ .name = "quicz_mobile_c", .module = mobile_ipv6_header.mod },
             },
         }),
     });
@@ -181,7 +197,7 @@ pub fn build(b: *std.Build) void {
         "Run the QUIC echo server for iOS latency measurements",
     );
     const run_mobile_latency_server_command = b.addRunArtifact(mobile_latency_server);
-    if (b.args) |args| run_mobile_latency_server_command.addArgs(args);
+    run_mobile_latency_server_command.addPassthruArgs();
     run_mobile_latency_server.dependOn(&run_mobile_latency_server_command.step);
 
     // Echo server executable
@@ -379,7 +395,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/congestion_bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -395,7 +411,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/quic_bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -411,7 +427,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/quic_bench_hs.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -427,7 +443,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/quic_bench_simple.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -443,7 +459,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/quic_bench_datagram.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -459,7 +475,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/quic_bench_profile.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "quicz", .module = quicz_bench_mod },
             },
@@ -541,9 +557,7 @@ pub fn build(b: *std.Build) void {
     const run_interop_runtime_client = b.step("run-interop-runtime-client", "Run runtime-based interop client");
     const run_interop_runtime_client_cmd = b.addRunArtifact(exe_interop_runtime_client);
     run_interop_runtime_client.dependOn(&run_interop_runtime_client_cmd.step);
-    if (b.args) |args| {
-        run_interop_runtime_client_cmd.addArgs(args);
-    }
+    run_interop_runtime_client_cmd.addPassthruArgs();
 
     // Runtime-based interop server (validates production API path)
     const exe_interop_runtime_server = b.addExecutable(.{
@@ -561,9 +575,7 @@ pub fn build(b: *std.Build) void {
     const run_interop_runtime_server = b.step("run-interop-runtime-server", "Run runtime-based interop server");
     const run_interop_runtime_server_cmd = b.addRunArtifact(exe_interop_runtime_server);
     run_interop_runtime_server.dependOn(&run_interop_runtime_server_cmd.step);
-    if (b.args) |args| {
-        run_interop_runtime_server_cmd.addArgs(args);
-    }
+    run_interop_runtime_server_cmd.addPassthruArgs();
 
     // zig build run-fuzz — run the fuzz harness
     const exe_fuzz = b.addExecutable(.{
@@ -581,9 +593,7 @@ pub fn build(b: *std.Build) void {
     const run_fuzz = b.step("run-fuzz", "Run QUIC fuzz harness");
     const run_fuzz_cmd = b.addRunArtifact(exe_fuzz);
     run_fuzz.dependOn(&run_fuzz_cmd.step);
-    if (b.args) |args| {
-        run_fuzz_cmd.addArgs(args);
-    }
+    run_fuzz_cmd.addPassthruArgs();
 
     // Codec roundtrip executable
     const exe_codec = b.addExecutable(.{
@@ -795,18 +805,16 @@ pub fn build(b: *std.Build) void {
     const run_stability_bench = b.step("run-stability-bench", "Long-run stability benchmark (multi-connection, multi-stream, leak-checked)");
     const run_stability_bench_cmd = b.addRunArtifact(exe_stability_bench);
     run_stability_bench.dependOn(&run_stability_bench_cmd.step);
-    if (b.args) |args| {
-        run_stability_bench_cmd.addArgs(args);
-    }
+    run_stability_bench_cmd.addPassthruArgs();
 
     const exe_scale_bench = b.addExecutable(.{
         .name = "quicz-scale-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/scale_bench.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = .fast,
             .imports = &.{
-                .{ .name = "quicz", .module = quicz_mod },
+                .{ .name = "quicz", .module = quicz_bench_mod },
             },
         }),
     });
@@ -938,12 +946,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const translate_tls_c_abi_adapter = b.addTranslateC(.{
-        .root_source_file = b.path("examples/tls_c_abi_demo_backend.h"),
+    const translate_tls_c_abi_adapter: Translator = .init(translate_c, .{
+        .c_source_file = b.path("examples/tls_c_abi_demo_backend.h"),
         .target = target,
         .optimize = optimize,
     });
-    exe_tls_c_abi_adapter.root_module.addImport("c", translate_tls_c_abi_adapter.createModule());
+    exe_tls_c_abi_adapter.root_module.addImport("c", translate_tls_c_abi_adapter.mod);
     exe_tls_c_abi_adapter.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_c_abi_demo_backend.c"),
         .flags = &.{},
@@ -960,12 +968,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const translate_tls_openssl_probe = b.addTranslateC(.{
-        .root_source_file = b.path("examples/tls_openssl_probe.h"),
+    const translate_tls_openssl_probe: Translator = .init(translate_c, .{
+        .c_source_file = b.path("examples/tls_openssl_probe.h"),
         .target = target,
         .optimize = optimize,
     });
-    exe_tls_openssl_probe.root_module.addImport("c", translate_tls_openssl_probe.createModule());
+    exe_tls_openssl_probe.root_module.addImport("c", translate_tls_openssl_probe.mod);
     exe_tls_openssl_probe.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_probe.c"),
         .flags = &.{},
@@ -988,12 +996,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const translate_tls_openssl_backend_adapter = b.addTranslateC(.{
-        .root_source_file = b.path("examples/tls_openssl_backend_adapter.h"),
+    const translate_tls_openssl_backend_adapter: Translator = .init(translate_c, .{
+        .c_source_file = b.path("examples/tls_openssl_backend_adapter.h"),
         .target = target,
         .optimize = optimize,
     });
-    exe_tls_openssl_backend_adapter.root_module.addImport("c", translate_tls_openssl_backend_adapter.createModule());
+    exe_tls_openssl_backend_adapter.root_module.addImport("c", translate_tls_openssl_backend_adapter.mod);
     exe_tls_openssl_backend_adapter.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_backend_adapter.c"),
         .flags = &.{},
@@ -1020,12 +1028,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const translate_tls_openssl_pair_transcript = b.addTranslateC(.{
-        .root_source_file = b.path("examples/tls_openssl_pair_transcript.h"),
+    const translate_tls_openssl_pair_transcript: Translator = .init(translate_c, .{
+        .c_source_file = b.path("examples/tls_openssl_pair_transcript.h"),
         .target = target,
         .optimize = optimize,
     });
-    exe_tls_openssl_pair_transcript.root_module.addImport("c", translate_tls_openssl_pair_transcript.createModule());
+    exe_tls_openssl_pair_transcript.root_module.addImport("c", translate_tls_openssl_pair_transcript.mod);
     exe_tls_openssl_pair_transcript.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_pair_transcript.c"),
         .flags = &.{},
@@ -1601,18 +1609,14 @@ pub fn build(b: *std.Build) void {
     const run_server_cmd = b.addRunArtifact(exe_server);
     run_server.dependOn(&run_server_cmd.step);
     run_server_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_server_cmd.addArgs(args);
-    }
+    run_server_cmd.addPassthruArgs();
 
     // zig build run-client
     const run_client = b.step("run-client", "Run quicz echo client");
     const run_client_cmd = b.addRunArtifact(exe_client);
     run_client.dependOn(&run_client_cmd.step);
     run_client_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_client_cmd.addArgs(args);
-    }
+    run_client_cmd.addPassthruArgs();
 
     const run_tls13_process_interop = b.step(
         "run-tls13-process-interop",
@@ -1629,9 +1633,7 @@ pub fn build(b: *std.Build) void {
     const run_interop_external_client_cmd = b.addRunArtifact(exe_interop_external_client);
     run_interop_external_client.dependOn(&run_interop_external_client_cmd.step);
     run_interop_external_client_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_interop_external_client_cmd.addArgs(args);
-    }
+    run_interop_external_client_cmd.addPassthruArgs();
 
     // zig build run-interop-client-standalone (no OpenSSL dependency)
     const run_interop_client_standalone = b.step(
@@ -1640,9 +1642,7 @@ pub fn build(b: *std.Build) void {
     );
     const run_interop_client_standalone_cmd = b.addRunArtifact(exe_interop_client);
     run_interop_client_standalone.dependOn(&run_interop_client_standalone_cmd.step);
-    if (b.args) |args| {
-        run_interop_client_standalone_cmd.addArgs(args);
-    }
+    run_interop_client_standalone_cmd.addPassthruArgs();
 
     // zig build run-interop-external (standalone, no OpenSSL dependency)
     const run_interop_standalone = b.step(
@@ -1651,477 +1651,371 @@ pub fn build(b: *std.Build) void {
     );
     const run_interop_standalone_cmd = b.addRunArtifact(exe_interop_external_client);
     run_interop_standalone.dependOn(&run_interop_standalone_cmd.step);
-    if (b.args) |args| {
-        run_interop_standalone_cmd.addArgs(args);
-    }
+    run_interop_standalone_cmd.addPassthruArgs();
 
     // zig build run-codec
     const run_codec = b.step("run-codec", "Run quicz codec roundtrip example");
     const run_codec_cmd = b.addRunArtifact(exe_codec);
     run_codec.dependOn(&run_codec_cmd.step);
     run_codec_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_codec_cmd.addArgs(args);
-    }
+    run_codec_cmd.addPassthruArgs();
 
     // zig build run-transport-parameters
     const run_transport_parameters = b.step("run-transport-parameters", "Run quicz transport parameters example");
     const run_transport_parameters_cmd = b.addRunArtifact(exe_transport_parameters);
     run_transport_parameters.dependOn(&run_transport_parameters_cmd.step);
     run_transport_parameters_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_transport_parameters_cmd.addArgs(args);
-    }
+    run_transport_parameters_cmd.addPassthruArgs();
 
     // zig build run-flow-control
     const run_flow_control = b.step("run-flow-control", "Run quicz flow-control example");
     const run_flow_control_cmd = b.addRunArtifact(exe_flow_control);
     run_flow_control.dependOn(&run_flow_control_cmd.step);
     run_flow_control_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_flow_control_cmd.addArgs(args);
-    }
+    run_flow_control_cmd.addPassthruArgs();
 
     // zig build run-uni-stream
     const run_uni_stream = b.step("run-uni-stream", "Run quicz unidirectional stream example");
     const run_uni_stream_cmd = b.addRunArtifact(exe_uni_stream);
     run_uni_stream.dependOn(&run_uni_stream_cmd.step);
     run_uni_stream_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_uni_stream_cmd.addArgs(args);
-    }
+    run_uni_stream_cmd.addPassthruArgs();
 
     // zig build run-stream-reset
     const run_stream_reset = b.step("run-stream-reset", "Run quicz stream reset example");
     const run_stream_reset_cmd = b.addRunArtifact(exe_stream_reset);
     run_stream_reset.dependOn(&run_stream_reset_cmd.step);
     run_stream_reset_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_stream_reset_cmd.addArgs(args);
-    }
+    run_stream_reset_cmd.addPassthruArgs();
 
     // zig build run-stop-sending
     const run_stop_sending = b.step("run-stop-sending", "Run quicz STOP_SENDING example");
     const run_stop_sending_cmd = b.addRunArtifact(exe_stop_sending);
     run_stop_sending.dependOn(&run_stop_sending_cmd.step);
     run_stop_sending_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_stop_sending_cmd.addArgs(args);
-    }
+    run_stop_sending_cmd.addPassthruArgs();
 
     // zig build run-crypto-stream
     const run_crypto_stream = b.step("run-crypto-stream", "Run quicz crypto stream example");
     const run_crypto_stream_cmd = b.addRunArtifact(exe_crypto_stream);
     run_crypto_stream.dependOn(&run_crypto_stream_cmd.step);
     run_crypto_stream_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_crypto_stream_cmd.addArgs(args);
-    }
+    run_crypto_stream_cmd.addPassthruArgs();
 
     // zig build run-tls-backend-adapter
     const run_tls_backend_adapter = b.step("run-tls-backend-adapter", "Run quicz TLS backend adapter example");
     const run_tls_backend_adapter_cmd = b.addRunArtifact(exe_tls_backend_adapter);
     run_tls_backend_adapter.dependOn(&run_tls_backend_adapter_cmd.step);
     run_tls_backend_adapter_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tls_backend_adapter_cmd.addArgs(args);
-    }
+    run_tls_backend_adapter_cmd.addPassthruArgs();
 
     // zig build run-tls-c-abi-adapter
     const run_tls_c_abi_adapter = b.step("run-tls-c-abi-adapter", "Run quicz TLS C ABI adapter example");
     const run_tls_c_abi_adapter_cmd = b.addRunArtifact(exe_tls_c_abi_adapter);
     run_tls_c_abi_adapter.dependOn(&run_tls_c_abi_adapter_cmd.step);
     run_tls_c_abi_adapter_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tls_c_abi_adapter_cmd.addArgs(args);
-    }
+    run_tls_c_abi_adapter_cmd.addPassthruArgs();
 
     // zig build run-tls-openssl-probe
     const run_tls_openssl_probe = b.step("run-tls-openssl-probe", "Run quicz OpenSSL QUIC TLS API probe");
     const run_tls_openssl_probe_cmd = b.addRunArtifact(exe_tls_openssl_probe);
     run_tls_openssl_probe.dependOn(&run_tls_openssl_probe_cmd.step);
     run_tls_openssl_probe_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tls_openssl_probe_cmd.addArgs(args);
-    }
+    run_tls_openssl_probe_cmd.addPassthruArgs();
 
     // zig build run-tls-openssl-backend-adapter
     const run_tls_openssl_backend_adapter = b.step("run-tls-openssl-backend-adapter", "Run quicz OpenSSL-backed TLS backend adapter example");
     const run_tls_openssl_backend_adapter_cmd = b.addRunArtifact(exe_tls_openssl_backend_adapter);
     run_tls_openssl_backend_adapter.dependOn(&run_tls_openssl_backend_adapter_cmd.step);
     run_tls_openssl_backend_adapter_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tls_openssl_backend_adapter_cmd.addArgs(args);
-    }
+    run_tls_openssl_backend_adapter_cmd.addPassthruArgs();
 
     // zig build run-tls-openssl-pair-transcript
     const run_tls_openssl_pair_transcript = b.step("run-tls-openssl-pair-transcript", "Run quicz OpenSSL client/server TLS transcript example");
     const run_tls_openssl_pair_transcript_cmd = b.addRunArtifact(exe_tls_openssl_pair_transcript);
     run_tls_openssl_pair_transcript.dependOn(&run_tls_openssl_pair_transcript_cmd.step);
     run_tls_openssl_pair_transcript_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_tls_openssl_pair_transcript_cmd.addArgs(args);
-    }
+    run_tls_openssl_pair_transcript_cmd.addPassthruArgs();
 
     // zig build run-graceful-close
     const run_graceful_close = b.step("run-graceful-close", "Run quicz graceful close example");
     const run_graceful_close_cmd = b.addRunArtifact(exe_graceful_close);
     run_graceful_close.dependOn(&run_graceful_close_cmd.step);
     run_graceful_close_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_graceful_close_cmd.addArgs(args);
-    }
+    run_graceful_close_cmd.addPassthruArgs();
 
     // zig build run-idle-timeout
     const run_idle_timeout = b.step("run-idle-timeout", "Run quicz idle timeout example");
     const run_idle_timeout_cmd = b.addRunArtifact(exe_idle_timeout);
     run_idle_timeout.dependOn(&run_idle_timeout_cmd.step);
     run_idle_timeout_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_idle_timeout_cmd.addArgs(args);
-    }
+    run_idle_timeout_cmd.addPassthruArgs();
 
     // zig build run-packet-spaces
     const run_packet_spaces = b.step("run-packet-spaces", "Run quicz packet-number-space example");
     const run_packet_spaces_cmd = b.addRunArtifact(exe_packet_spaces);
     run_packet_spaces.dependOn(&run_packet_spaces_cmd.step);
     run_packet_spaces_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_packet_spaces_cmd.addArgs(args);
-    }
+    run_packet_spaces_cmd.addPassthruArgs();
 
     // zig build run-ecn-validation
     const run_ecn_validation = b.step("run-ecn-validation", "Run quicz ECN validation example");
     const run_ecn_validation_cmd = b.addRunArtifact(exe_ecn_validation);
     run_ecn_validation.dependOn(&run_ecn_validation_cmd.step);
     run_ecn_validation_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_ecn_validation_cmd.addArgs(args);
-    }
+    run_ecn_validation_cmd.addPassthruArgs();
 
     // zig build run-loss-recovery
     const run_loss_recovery = b.step("run-loss-recovery", "Run quicz loss recovery example");
     const run_loss_recovery_cmd = b.addRunArtifact(exe_loss_recovery);
     run_loss_recovery.dependOn(&run_loss_recovery_cmd.step);
     run_loss_recovery_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_loss_recovery_cmd.addArgs(args);
-    }
+    run_loss_recovery_cmd.addPassthruArgs();
 
     // zig build run-pto-recovery
     const run_pto_recovery = b.step("run-pto-recovery", "Run quicz PTO recovery example");
     const run_pto_recovery_cmd = b.addRunArtifact(exe_pto_recovery);
     run_pto_recovery.dependOn(&run_pto_recovery_cmd.step);
     run_pto_recovery_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_pto_recovery_cmd.addArgs(args);
-    }
+    run_pto_recovery_cmd.addPassthruArgs();
 
     // zig build run-endpoint-recovery-timers
     const run_endpoint_recovery_timers = b.step("run-endpoint-recovery-timers", "Run quicz endpoint recovery timer example");
     const run_endpoint_recovery_timers_cmd = b.addRunArtifact(exe_endpoint_recovery_timers);
     run_endpoint_recovery_timers.dependOn(&run_endpoint_recovery_timers_cmd.step);
     run_endpoint_recovery_timers_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_endpoint_recovery_timers_cmd.addArgs(args);
-    }
+    run_endpoint_recovery_timers_cmd.addPassthruArgs();
 
     // zig build run-path-validation
     const run_path_validation = b.step("run-path-validation", "Run quicz path validation example");
     const run_path_validation_cmd = b.addRunArtifact(exe_path_validation);
     run_path_validation.dependOn(&run_path_validation_cmd.step);
     run_path_validation_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_path_validation_cmd.addArgs(args);
-    }
+    run_path_validation_cmd.addPassthruArgs();
 
     // zig build run-address-validation
     const run_address_validation = b.step("run-address-validation", "Run quicz address validation example");
     const run_address_validation_cmd = b.addRunArtifact(exe_address_validation);
     run_address_validation.dependOn(&run_address_validation_cmd.step);
     run_address_validation_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_address_validation_cmd.addArgs(args);
-    }
+    run_address_validation_cmd.addPassthruArgs();
 
     // zig build run-udp-address-validation-loopback
     const run_udp_address_validation_loopback = b.step("run-udp-address-validation-loopback", "Run quicz UDP address validation loopback example");
     const run_udp_address_validation_loopback_cmd = b.addRunArtifact(exe_udp_address_validation_loopback);
     run_udp_address_validation_loopback.dependOn(&run_udp_address_validation_loopback_cmd.step);
     run_udp_address_validation_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_address_validation_loopback_cmd.addArgs(args);
-    }
+    run_udp_address_validation_loopback_cmd.addPassthruArgs();
 
     // zig build run-retry-token
     const run_retry_token = b.step("run-retry-token", "Run quicz Retry token example");
     const run_retry_token_cmd = b.addRunArtifact(exe_retry_token);
     run_retry_token.dependOn(&run_retry_token_cmd.step);
     run_retry_token_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_retry_token_cmd.addArgs(args);
-    }
+    run_retry_token_cmd.addPassthruArgs();
 
     // zig build run-connection-ids
     const run_connection_ids = b.step("run-connection-ids", "Run quicz connection ID example");
     const run_connection_ids_cmd = b.addRunArtifact(exe_connection_ids);
     run_connection_ids.dependOn(&run_connection_ids_cmd.step);
     run_connection_ids_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_connection_ids_cmd.addArgs(args);
-    }
+    run_connection_ids_cmd.addPassthruArgs();
 
     // zig build run-stateless-reset
     const run_stateless_reset = b.step("run-stateless-reset", "Run quicz stateless reset example");
     const run_stateless_reset_cmd = b.addRunArtifact(exe_stateless_reset);
     run_stateless_reset.dependOn(&run_stateless_reset_cmd.step);
     run_stateless_reset_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_stateless_reset_cmd.addArgs(args);
-    }
+    run_stateless_reset_cmd.addPassthruArgs();
 
     // zig build run-initial-keys
     const run_initial_keys = b.step("run-initial-keys", "Run quicz Initial key derivation example");
     const run_initial_keys_cmd = b.addRunArtifact(exe_initial_keys);
     run_initial_keys.dependOn(&run_initial_keys_cmd.step);
     run_initial_keys_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_initial_keys_cmd.addArgs(args);
-    }
+    run_initial_keys_cmd.addPassthruArgs();
 
     // zig build run-endpoint-routing
     const run_endpoint_routing = b.step("run-endpoint-routing", "Run quicz endpoint routing example");
     const run_endpoint_routing_cmd = b.addRunArtifact(exe_endpoint_routing);
     run_endpoint_routing.dependOn(&run_endpoint_routing_cmd.step);
     run_endpoint_routing_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_endpoint_routing_cmd.addArgs(args);
-    }
+    run_endpoint_routing_cmd.addPassthruArgs();
 
     // zig build run-udp-endpoint-loopback
     const run_udp_endpoint_loopback = b.step("run-udp-endpoint-loopback", "Run quicz UDP endpoint loopback example");
     const run_udp_endpoint_loopback_cmd = b.addRunArtifact(exe_udp_endpoint_loopback);
     run_udp_endpoint_loopback.dependOn(&run_udp_endpoint_loopback_cmd.step);
     run_udp_endpoint_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_endpoint_loopback_cmd.addArgs(args);
-    }
+    run_udp_endpoint_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-zero-cid-loopback
     const run_udp_zero_cid_loopback = b.step("run-udp-zero-cid-loopback", "Run quicz UDP zero-length CID loopback example");
     const run_udp_zero_cid_loopback_cmd = b.addRunArtifact(exe_udp_zero_cid_loopback);
     run_udp_zero_cid_loopback.dependOn(&run_udp_zero_cid_loopback_cmd.step);
     run_udp_zero_cid_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_zero_cid_loopback_cmd.addArgs(args);
-    }
+    run_udp_zero_cid_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-preferred-address-loopback
     const run_udp_preferred_address_loopback = b.step("run-udp-preferred-address-loopback", "Run quicz UDP preferred-address loopback example");
     const run_udp_preferred_address_loopback_cmd = b.addRunArtifact(exe_udp_preferred_address_loopback);
     run_udp_preferred_address_loopback.dependOn(&run_udp_preferred_address_loopback_cmd.step);
     run_udp_preferred_address_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_preferred_address_loopback_cmd.addArgs(args);
-    }
+    run_udp_preferred_address_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-replacement-cid-loopback
     const run_udp_replacement_cid_loopback = b.step("run-udp-replacement-cid-loopback", "Run quicz UDP replacement CID loopback example");
     const run_udp_replacement_cid_loopback_cmd = b.addRunArtifact(exe_udp_replacement_cid_loopback);
     run_udp_replacement_cid_loopback.dependOn(&run_udp_replacement_cid_loopback_cmd.step);
     run_udp_replacement_cid_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_replacement_cid_loopback_cmd.addArgs(args);
-    }
+    run_udp_replacement_cid_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-connection-ids-loopback
     const run_udp_connection_ids_loopback = b.step("run-udp-connection-ids-loopback", "Run quicz UDP connection ID loopback example");
     const run_udp_connection_ids_loopback_cmd = b.addRunArtifact(exe_udp_connection_ids_loopback);
     run_udp_connection_ids_loopback.dependOn(&run_udp_connection_ids_loopback_cmd.step);
     run_udp_connection_ids_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_connection_ids_loopback_cmd.addArgs(args);
-    }
+    run_udp_connection_ids_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-flow-control-loopback
     const run_udp_flow_control_loopback = b.step("run-udp-flow-control-loopback", "Run quicz UDP flow-control loopback example");
     const run_udp_flow_control_loopback_cmd = b.addRunArtifact(exe_udp_flow_control_loopback);
     run_udp_flow_control_loopback.dependOn(&run_udp_flow_control_loopback_cmd.step);
     run_udp_flow_control_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_flow_control_loopback_cmd.addArgs(args);
-    }
+    run_udp_flow_control_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-spin-bit-loopback
     const run_udp_spin_bit_loopback = b.step("run-udp-spin-bit-loopback", "Run quicz UDP spin-bit loopback example");
     const run_udp_spin_bit_loopback_cmd = b.addRunArtifact(exe_udp_spin_bit_loopback);
     run_udp_spin_bit_loopback.dependOn(&run_udp_spin_bit_loopback_cmd.step);
     run_udp_spin_bit_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_spin_bit_loopback_cmd.addArgs(args);
-    }
+    run_udp_spin_bit_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-ecn-validation-loopback
     const run_udp_ecn_validation_loopback = b.step("run-udp-ecn-validation-loopback", "Run quicz UDP ECN validation loopback example");
     const run_udp_ecn_validation_loopback_cmd = b.addRunArtifact(exe_udp_ecn_validation_loopback);
     run_udp_ecn_validation_loopback.dependOn(&run_udp_ecn_validation_loopback_cmd.step);
     run_udp_ecn_validation_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_ecn_validation_loopback_cmd.addArgs(args);
-    }
+    run_udp_ecn_validation_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-pto-recovery-loopback
     const run_udp_pto_recovery_loopback = b.step("run-udp-pto-recovery-loopback", "Run quicz UDP PTO recovery loopback example");
     const run_udp_pto_recovery_loopback_cmd = b.addRunArtifact(exe_udp_pto_recovery_loopback);
     run_udp_pto_recovery_loopback.dependOn(&run_udp_pto_recovery_loopback_cmd.step);
     run_udp_pto_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_pto_recovery_loopback_cmd.addArgs(args);
-    }
+    run_udp_pto_recovery_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-loss-recovery-loopback
     const run_udp_loss_recovery_loopback = b.step("run-udp-loss-recovery-loopback", "Run quicz UDP loss recovery loopback example");
     const run_udp_loss_recovery_loopback_cmd = b.addRunArtifact(exe_udp_loss_recovery_loopback);
     run_udp_loss_recovery_loopback.dependOn(&run_udp_loss_recovery_loopback_cmd.step);
     run_udp_loss_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_loss_recovery_loopback_cmd.addArgs(args);
-    }
+    run_udp_loss_recovery_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-stream-retransmission-loopback
     const run_udp_stream_retransmission_loopback = b.step("run-udp-stream-retransmission-loopback", "Run quicz UDP STREAM retransmission loopback example");
     const run_udp_stream_retransmission_loopback_cmd = b.addRunArtifact(exe_udp_stream_retransmission_loopback);
     run_udp_stream_retransmission_loopback.dependOn(&run_udp_stream_retransmission_loopback_cmd.step);
     run_udp_stream_retransmission_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_stream_retransmission_loopback_cmd.addArgs(args);
-    }
+    run_udp_stream_retransmission_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-congestion-recovery-loopback
     const run_udp_congestion_recovery_loopback = b.step("run-udp-congestion-recovery-loopback", "Run quicz UDP congestion recovery loopback example");
     const run_udp_congestion_recovery_loopback_cmd = b.addRunArtifact(exe_udp_congestion_recovery_loopback);
     run_udp_congestion_recovery_loopback.dependOn(&run_udp_congestion_recovery_loopback_cmd.step);
     run_udp_congestion_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_congestion_recovery_loopback_cmd.addArgs(args);
-    }
+    run_udp_congestion_recovery_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-protected-loopback
     const run_udp_protected_loopback = b.step("run-udp-protected-loopback", "Run quicz UDP protected-packet loopback example");
     const run_udp_protected_loopback_cmd = b.addRunArtifact(exe_udp_protected_loopback);
     run_udp_protected_loopback.dependOn(&run_udp_protected_loopback_cmd.step);
     run_udp_protected_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_protected_loopback_cmd.addArgs(args);
-    }
+    run_udp_protected_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-handshake-keys-loopback
     const run_udp_handshake_keys_loopback = b.step("run-udp-handshake-keys-loopback", "Run quicz UDP Handshake keys loopback example");
     const run_udp_handshake_keys_loopback_cmd = b.addRunArtifact(exe_udp_handshake_keys_loopback);
     run_udp_handshake_keys_loopback.dependOn(&run_udp_handshake_keys_loopback_cmd.step);
     run_udp_handshake_keys_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_handshake_keys_loopback_cmd.addArgs(args);
-    }
+    run_udp_handshake_keys_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-crypto-stream-loopback
     const run_udp_crypto_stream_loopback = b.step("run-udp-crypto-stream-loopback", "Run quicz UDP CryptoBackend CRYPTO stream loopback example");
     const run_udp_crypto_stream_loopback_cmd = b.addRunArtifact(exe_udp_crypto_stream_loopback);
     run_udp_crypto_stream_loopback.dependOn(&run_udp_crypto_stream_loopback_cmd.step);
     run_udp_crypto_stream_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_crypto_stream_loopback_cmd.addArgs(args);
-    }
+    run_udp_crypto_stream_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-zero-rtt-loopback
     const run_udp_zero_rtt_loopback = b.step("run-udp-zero-rtt-loopback", "Run quicz UDP 0-RTT loopback example");
     const run_udp_zero_rtt_loopback_cmd = b.addRunArtifact(exe_udp_zero_rtt_loopback);
     run_udp_zero_rtt_loopback.dependOn(&run_udp_zero_rtt_loopback_cmd.step);
     run_udp_zero_rtt_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_zero_rtt_loopback_cmd.addArgs(args);
-    }
+    run_udp_zero_rtt_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-one-rtt-loopback
     const run_udp_one_rtt_loopback = b.step("run-udp-one-rtt-loopback", "Run quicz UDP 1-RTT loopback example");
     const run_udp_one_rtt_loopback_cmd = b.addRunArtifact(exe_udp_one_rtt_loopback);
     run_udp_one_rtt_loopback.dependOn(&run_udp_one_rtt_loopback_cmd.step);
     run_udp_one_rtt_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_one_rtt_loopback_cmd.addArgs(args);
-    }
+    run_udp_one_rtt_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-echo-loopback
     const run_udp_echo_loopback = b.step("run-udp-echo-loopback", "Run quicz UDP echo loopback example");
     const run_udp_echo_loopback_cmd = b.addRunArtifact(exe_udp_echo_loopback);
     run_udp_echo_loopback.dependOn(&run_udp_echo_loopback_cmd.step);
     run_udp_echo_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_echo_loopback_cmd.addArgs(args);
-    }
+    run_udp_echo_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-crypto-backend-loopback
     const run_udp_crypto_backend_loopback = b.step("run-udp-crypto-backend-loopback", "Run quicz UDP CryptoBackend loopback example");
     const run_udp_crypto_backend_loopback_cmd = b.addRunArtifact(exe_udp_crypto_backend_loopback);
     run_udp_crypto_backend_loopback.dependOn(&run_udp_crypto_backend_loopback_cmd.step);
     run_udp_crypto_backend_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_crypto_backend_loopback_cmd.addArgs(args);
-    }
+    run_udp_crypto_backend_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-handshake-done-loopback
     const run_udp_handshake_done_loopback = b.step("run-udp-handshake-done-loopback", "Run quicz UDP HANDSHAKE_DONE loopback example");
     const run_udp_handshake_done_loopback_cmd = b.addRunArtifact(exe_udp_handshake_done_loopback);
     run_udp_handshake_done_loopback.dependOn(&run_udp_handshake_done_loopback_cmd.step);
     run_udp_handshake_done_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_handshake_done_loopback_cmd.addArgs(args);
-    }
+    run_udp_handshake_done_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-key-update-loopback
     const run_udp_key_update_loopback = b.step("run-udp-key-update-loopback", "Run quicz UDP key update loopback example");
     const run_udp_key_update_loopback_cmd = b.addRunArtifact(exe_udp_key_update_loopback);
     run_udp_key_update_loopback.dependOn(&run_udp_key_update_loopback_cmd.step);
     run_udp_key_update_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_key_update_loopback_cmd.addArgs(args);
-    }
+    run_udp_key_update_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-path-validation-loopback
     const run_udp_path_validation_loopback = b.step("run-udp-path-validation-loopback", "Run quicz UDP path validation loopback example");
     const run_udp_path_validation_loopback_cmd = b.addRunArtifact(exe_udp_path_validation_loopback);
     run_udp_path_validation_loopback.dependOn(&run_udp_path_validation_loopback_cmd.step);
     run_udp_path_validation_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_path_validation_loopback_cmd.addArgs(args);
-    }
+    run_udp_path_validation_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-retry-loopback
     const run_udp_retry_loopback = b.step("run-udp-retry-loopback", "Run quicz UDP Retry loopback example");
     const run_udp_retry_loopback_cmd = b.addRunArtifact(exe_udp_retry_loopback);
     run_udp_retry_loopback.dependOn(&run_udp_retry_loopback_cmd.step);
     run_udp_retry_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_retry_loopback_cmd.addArgs(args);
-    }
+    run_udp_retry_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-close-lifecycle-loopback
     const run_udp_close_lifecycle_loopback = b.step("run-udp-close-lifecycle-loopback", "Run quicz UDP close lifecycle loopback example");
     const run_udp_close_lifecycle_loopback_cmd = b.addRunArtifact(exe_udp_close_lifecycle_loopback);
     run_udp_close_lifecycle_loopback.dependOn(&run_udp_close_lifecycle_loopback_cmd.step);
     run_udp_close_lifecycle_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_close_lifecycle_loopback_cmd.addArgs(args);
-    }
+    run_udp_close_lifecycle_loopback_cmd.addPassthruArgs();
 
     // zig build run-udp-stateless-reset-loopback
     const run_udp_stateless_reset_loopback = b.step("run-udp-stateless-reset-loopback", "Run quicz UDP stateless reset loopback example");
     const run_udp_stateless_reset_loopback_cmd = b.addRunArtifact(exe_udp_stateless_reset_loopback);
     run_udp_stateless_reset_loopback.dependOn(&run_udp_stateless_reset_loopback_cmd.step);
     run_udp_stateless_reset_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_udp_stateless_reset_loopback_cmd.addArgs(args);
-    }
+    run_udp_stateless_reset_loopback_cmd.addPassthruArgs();
 
     const lib_tests = b.addTest(.{
         .name = "quicz-tests",
@@ -2206,17 +2100,18 @@ pub fn build(b: *std.Build) void {
     const run_interop_client_cmd = b.addRunArtifact(exe_interop_client);
     run_interop_client.dependOn(&run_interop_client_cmd.step);
     run_interop_client_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_interop_client_cmd.addArgs(args);
-    }
+    run_interop_client_cmd.addPassthruArgs();
 
     // zig build run-interop-event-loopback -- [TESTCASE]
     const run_interop_event_loopback = b.step("run-interop-event-loopback", "Run event-driven interop loopback (TESTCASE: handshake/transfer/loss/congestion/persistent/key-update/path/stream-control/stream-limit)");
     const run_interop_event_loopback_cmd = b.addRunArtifact(exe_interop_event_loopback);
     run_interop_event_loopback.dependOn(&run_interop_event_loopback_cmd.step);
     run_interop_event_loopback_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_interop_event_loopback_cmd.addArgs(args);
+    run_interop_event_loopback_cmd.addPassthruArgs();
+
+    const interop_build = b.step("interop-build", "Build the QUIC and HTTP/3 interop matrix binaries");
+    for ([_]*std.Build.Step.Compile{ exe_interop_runtime_client, exe_interop_runtime_server, exe_h3_server, exe_h3_external_client }) |artifact| {
+        interop_build.dependOn(&b.addInstallArtifact(artifact, .{}).step);
     }
 
     const test_step = b.step("test", "Run quicz unit tests");

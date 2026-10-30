@@ -42,7 +42,7 @@ exe.root_module.addImport("quicz", quicz_dep.module("quicz"));
 
 ### I/O runtime (async, `std.Io`)
 
-`quicz.runtime` provides an event-driven server/client on Zig 0.16 `std.Io`
+`quicz.runtime` provides an event-driven server/client on Zig 0.17 `std.Io`
 (threaded). The server spawns an independent handler task per connection
 (std.http model); the client drives an async session.
 
@@ -161,7 +161,15 @@ Full details: [docs/en/benchmark.md](docs/en/benchmark.md)
 
 ## Building
 
-Requires **Zig 0.16.0**.
+Requires **Zig 0.17.0**. If your default `zig` command uses another version,
+invoke your 0.17.0 executable instead. For example, use `zig17 build` or
+`make ZIG=zig17` when that executable is named `zig17`.
+
+For iOS `mobile-static` builds, the build applies a temporary compatibility
+fix to `std.Io.Threaded.processReplace` in a cache-local standard library copy.
+This step uses the POSIX `sed` utility. The installed compiler and standard
+library remain unchanged. Remove this compatibility step after an upstream
+toolchain update passes the device and simulator compilation checks.
 
 ```bash
 zig build                                    # build library

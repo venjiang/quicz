@@ -31,7 +31,7 @@ HTTP/3 完整连接管理（SETTINGS 全参数、GOAWAY、stream 状态机）、
   和 stream state machine 约束。
 - Transport parameters：QUIC 握手期间交换的 transport 配置，例如 stream 限额、
   ACK delay、max UDP payload size、preferred_address 和 version information。
-- TLS backend：外部 TLS 库的 adapter。TLS backend 负责 TLS transcript、traffic secret
+- TLS backend：纯 Zig 实现或外部 TLS 库的集成边界。TLS backend 负责 TLS transcript、traffic secret
   和 QUIC TLS callback；quicz 负责把 CRYPTO bytes 放进包、安装 packet protection key、
   并驱动 transport 状态。
 - Traffic secrets：TLS 产出的 Initial 之后的 Handshake/1-RTT 密钥材料输入。quicz 用它们
@@ -118,8 +118,8 @@ installed-key 包收发和 key phase 状态。它接收已经安装好的密钥�
 ### TLS integration boundary
 
 TLS 集成边界支持两条路径：(1) 纯 Zig TLS 1.3 实现（src/tls/tls13.zig，9524 行，222 测试），支持 ECDSA P-256、X25519、AES-128-GCM、AES-256-GCM、ChaCha20-Poly1305、ALPN、SNI 和证书链验证，无 C 依赖；(2) 遗留 C-ABI TlsBackend/CryptoBackend adapter 用于 OpenSSL 互通测试。
-构建脚本使用 Zig 0.16 推荐的 `addTranslateC` + `@import("c")` 路径，不手写 C ABI 的
-`extern fn`/`extern struct`。
+在 Zig 0.17 中，构建脚本使用官方 `translate-c` 包翻译 C header。
+示例通过 `@import("c")` 导入翻译后的模块。
 
 TLS backend 的职责：
 
@@ -127,7 +127,7 @@ TLS backend 的职责：
 - 从 QUIC CRYPTO frame 消费 TLS handshake bytes；
 - 产出下一段 TLS CRYPTO bytes；
 - 通过 callback 提供 peer transport parameters 和 traffic secrets；
-- 在 TLS 认为握手完成时通知 quicz。
+- 报告 TLS 握手进度和服务端握手确认状态。
 
 quicz 的职责：
 
@@ -169,6 +169,35 @@ timer、投递 stateless reset、清理关闭连接。生产级高层 API 已通
 6. quicz 应用 peer transport parameters、安装 packet protection key，并在边界满足时丢弃旧
    packet number space。
 
+TLS 完成不等于 QUIC 客户端握手确认。
+服务端在 TLS 完成时确认握手。客户端只在收到 `HANDSHAKE_DONE` 后确认握手。
+服务端排队该帧时保留尚未发送的 Handshake CRYPTO。
+Recovery 在丢包或 PTO 后重传 `HANDSHAKE_DONE`，直到在途副本或保留记录中的已判丢副本被 ACK。
+连接保留最近 32 个已判丢副本的 packet number，不保留整包缓冲。
+收到匹配的 ACK 后，连接取消待发副本。其他副本之后丢失时，不再重新排队该帧。
+
+客户端 transport 在接收密钥尚不可用时，最多暂存 32 个受保护包。
+每个包拥有独立副本，长度不超过配置的 `max_datagram_size`。
+默认配置下，包副本合计不超过 43200 字节。队列满时丢弃新到达的包。
+
+TLS 安装密钥后，transport 先处理暂存的 Handshake 包，再处理 1-RTT 包。
+现有 TLS backend 只在验证服务端 Finished 后提供客户端 1-RTT 密钥。
+暂存期间不确认报文，也不推进 packet number。
+
+有效 Retry 会清空旧队列。接受 Version Negotiation 后，旧 attempt 及其保留包被废弃。
+连接仍 active 时，被忽略的 Version Negotiation 不改变队列。新 attempt 携带的协商历史不会使自己的新包失效。
+Transport 关闭、idle 到期和 deinit 会释放保留副本。认证后的 frame 错误和证书错误仍按原路径返回。
+Endpoint 的 deadline、reset、close 和 VN 路径在连接停用或旧 attempt 被替代后释放队列，包括错误返回。
+直接驱动借用 Connection 的 owner 使用 `discardObsoletePackets()` 完成同一清理。
+乱序、缓冲所有权和清理回归位于 `src/quic/tls13_client_reordering_tests.zig`。
+该处理遵循 [RFC 9001 第 4.1.4 节](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.4) 的加密级别暂存模型。
+
+客户端 runtime 在应用出站之前，也会排空 Initial 和 Handshake 出站。
+因此，即使 TLS 仍等待后续握手字节，也能确认已经处理的对应空间报文。
+Initial 密钥仍由 original 或 Retry DCID 派生，与包头当前 peer CID 分开处理。
+附路由的 poll 同步 recovery 状态，并复用失效包清理。
+`src/runtime/client.zig` 的线路回归在 TLS 完成前解密检查两类 ACK。
+
 ### 1-RTT stream path
 
 1. 应用或示例打开 stream 并写入数据。
@@ -183,6 +212,16 @@ timer、投递 stateless reset、清理关闭连接。生产级高层 API 已通
 2. quicz 生成 CONNECTION_CLOSE 或 reset 相关输出。
 3. Endpoint 抑制不应继续发送的 active route，并清理连接路由。
 4. Recovery/timer 不再为已清理 route 产生新的发送副作用。
+
+`runtime.Client.close()` 只排队应用关闭请求，不等待关闭完成。
+调用方可以使用 `waitClosed(timeout_ms)`，保留 socket 直到协议的 closing 或 draining 阶段结束。
+超时或取消只结束本次等待，driver 继续运行。
+等待完成不代表对端已经收到关闭包。
+Driver 在 closing 阶段回应对端数据报，并按指数间隔抑制重复响应。
+Draining 和 closed 阶段不再响应。
+`deinit()` 仍立即取消任务并释放资源。
+需要完成协议关闭阶段时，调用方应先调用 `close()`，再调用 `waitClosed()`，最后调用 `deinit()`。
+移动 C ABI 保持不变。
 
 ## 开发扩展入口
 

@@ -127,8 +127,8 @@ pub fn main() !void {
     var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
     defer server_lifecycle.deinit();
 
-    const token_secret: quicz.address_validation_token.Secret = [_]u8{0x5d} ** quicz.address_validation_token.secret_len;
-    const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0xa7} ** quicz.address_validation_token.nonce_len;
+    const token_secret: quicz.address_validation_token.Secret = @as([quicz.address_validation_token.secret_len]u8, @splat(0x5d));
+    const token_nonce: quicz.address_validation_token.Nonce = @as([quicz.address_validation_token.nonce_len]u8, @splat(0xa7));
     var token_policy = quicz.endpoint.AddressValidationPolicy.init(allocator, token_secret, .{
         .max_previous_secrets = 1,
         .max_replay_entries = 8,

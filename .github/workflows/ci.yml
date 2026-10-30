@@ -11,32 +11,43 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz -o zig.tar.xz
+          curl -L https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
-          echo "$PWD/zig-aarch64-macos-0.16.0" >> $GITHUB_PATH
+          echo "$PWD/zig-aarch64-macos-0.17.0" >> $GITHUB_PATH
       - name: Unit tests
+        run: zig build test --summary all
+      - name: CLI unit tests
+        working-directory: cli
         run: zig build test --summary all
       - name: Format check
         run: zig fmt --check build.zig src examples
+
+      - name: Toolchain script regressions
+        run: sh scripts/test_zig_toolchain_scripts.sh
+
+      - name: iOS mobile static libraries
+        run: |
+          zig build mobile-static -Dtarget=aarch64-ios -Doptimize=safe --prefix "$RUNNER_TEMP/quicz-ios-device"
+          zig build mobile-static -Dtarget=aarch64-ios-simulator -Doptimize=safe --prefix "$RUNNER_TEMP/quicz-ios-simulator"
 
   interop:
     name: Cross-implementation interop (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o zig.tar.xz
+          curl -L https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> $GITHUB_PATH
-      # Build the quicz interop binaries (client + runtime server) and the
+          echo "$PWD/zig-x86_64-linux-0.17.0" >> $GITHUB_PATH
+      # Build the four QUIC and HTTP/3 client/server binaries and the
       # external tools (quic-go / quiche / s2n-quic servers and echo clients).
       # Cargo builds of quiche/s2n take a few minutes; this job is separate so
       # it does not slow the main build-linux job.
       - name: Build quicz interop binaries
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build interop-build -Doptimize=fast
       - name: Build external interop tools (Go + Cargo)
         run: bash scripts/build_interop_tools.sh
       # Forward matrix: quicz client vs external servers (handshake/transfer/verified).
@@ -74,26 +85,26 @@ jobs:
           ./zig-out/bin/quicz-h3-external-client
 
   build-linux:
-    name: Build + E2E (Linux x86_64, ReleaseFast)
+    name: Build + E2E (Linux x86_64, fast)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         run: |
-          curl -L https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o zig.tar.xz
+          curl -L https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-0.16.0" >> $GITHUB_PATH
+          echo "$PWD/zig-x86_64-linux-0.17.0" >> $GITHUB_PATH
       # One run step compiles the library and the cross-platform examples and
       # then exercises a real handshake + HTTP/3 + QPACK round trip on Linux.
       # macOS-only benchmarks and the OpenSSL-3.4 probe adapters are not built
       # on Linux.
       - name: HTTP/3 runtime loopback (real handshake + QPACK)
-        run: zig build run-h3-runtime-loopback -Doptimize=ReleaseFast
+        run: zig build run-h3-runtime-loopback -Doptimize=fast
       # Concurrency + aggregate throughput regression guard (cross-platform).
       # Fails if any of the 8 concurrent real-handshake clients fail.
       - name: Multi-client concurrency + throughput
         run: |
-          output=$(zig build run-multi-client-bench -Doptimize=ReleaseFast 2>&1)
+          output=$(zig build run-multi-client-bench -Doptimize=fast 2>&1)
           echo "$output"
           echo "$output" | grep -q "ok=8/8" || exit 1
       # Stability guard: sustained multi-stream transfer must complete without
@@ -102,7 +113,7 @@ jobs:
       # without reaching the 256-stream boundary; fails on any stream error.
       - name: Stability (sustained transfer)
         run: |
-          output=$(zig build run-stability-bench -Doptimize=ReleaseFast -- 60000 2>&1)
+          output=$(zig build run-stability-bench -Doptimize=fast -- 60000 2>&1)
           echo "$output" | tail -5
           echo "$output" | grep -q "ok=true" || exit 1
       # Fuzz regression guard: 20k iterations of the standalone fuzz harness
@@ -111,7 +122,7 @@ jobs:
       # is left to local `zig build run-fuzz -- 100000` runs.
       - name: Fuzz regression
         run: |
-          output=$(zig build run-fuzz -Doptimize=ReleaseFast -- 20000 2>&1)
+          output=$(zig build run-fuzz -Doptimize=fast -- 20000 2>&1)
           echo "$output"
           echo "$output" | grep -q "no crashes" || exit 1
       - name: Format check

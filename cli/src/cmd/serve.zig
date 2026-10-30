@@ -303,6 +303,9 @@ fn handleHttp11Connection(stream: std.Io.net.Stream, port: u16, tls_config: tls_
         std.debug.print("serve: TLS handshake failed: {s}\n", .{@errorName(err)});
         return;
     };
+    defer tls_stream.end() catch |err| {
+        if (common.g_verbose) std.debug.print("serve: TLS close failed: {s}\n", .{@errorName(err)});
+    };
     handleHttp11Tls(&tls_stream, port);
 }
 
@@ -338,7 +341,7 @@ fn connectionWantsClose(head: []const u8) bool {
         const line = std.mem.trim(u8, raw, "\r");
         if (std.ascii.startsWithIgnoreCase(line, "connection:")) {
             const value = std.mem.trim(u8, line["connection:".len..], " \t");
-            return std.ascii.indexOfIgnoreCase(value, "close") != null;
+            return std.ascii.findIgnoreCase(value, "close") != null;
         }
     }
     return false;
@@ -391,7 +394,7 @@ fn sendHttp11Response(
 ) !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    const status: std.http.Status = @enumFromInt(@as(u10, @intCast(status_code)));
+    const status: std.http.Status = @fromBackingInt(@intCast(@as(u10, @intCast(status_code))));
     const phrase = status.phrase() orelse "Unknown";
     try w.print("HTTP/1.1 {d} {s}\r\n", .{ status_code, phrase });
     for (extra_headers) |h| {

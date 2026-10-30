@@ -64,5 +64,5 @@ try server.serveH3(.{}, handleRequest);
 
 - `zig build test --summary all` — 1883 单元测试。
 - `zig build run-stability-bench -- 60000` — 持续传输，无错误/泄漏。
-- `zig build run-h3-runtime-loopback -Doptimize=ReleaseFast` — 真实握手 + H3/QPACK 往返。
+- `zig build run-h3-runtime-loopback -Doptimize=fast` — 真实握手 + H3/QPACK 往返。
 - CI（`.github/workflows/ci.yml`）跑单元测试、跨实现互通矩阵（quic-go / quiche / s2n-quic，正向 + 反向）、双向 HTTP/3 互通（go quic-go）、fuzz 回归与稳定性守卫。

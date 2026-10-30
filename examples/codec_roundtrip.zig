@@ -216,7 +216,7 @@ fn quicV2LongHeaderTypeBits(allocator: std.mem.Allocator) !void {
         .dcid = &[_]u8{0xca},
         .scid = &[_]u8{0xbe},
         .token = &[_]u8{0x01},
-        .integrity_tag = [_]u8{0} ** 16,
+        .integrity_tag = @as([16]u8, @splat(0)),
     };
 
     var initial_raw: [64]u8 = undefined;
@@ -288,7 +288,7 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     try require(parsed.versions[0] == .v1);
     try require(parsed.versions[1] == .v2);
 
-    const reserved_version: quicz.packet.Version = @enumFromInt(0x1a2a3a4a);
+    const reserved_version: quicz.packet.Version = @fromBackingInt(@intCast(0x1a2a3a4a));
     const client_versions = [_]quicz.packet.Version{ reserved_version, .v2, .v1 };
     const negotiated_versions = [_]quicz.packet.Version{ reserved_version, .v2 };
     var negotiated_raw: [64]u8 = undefined;
@@ -372,8 +372,8 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
 
     std.debug.print("[codec] version negotiation versions={} selected=0x{x} compatible_selected=0x{x} reserved_skipped={} downgrade_checked={} downgrade_close=0x{x}\n", .{
         parsed.versions.len,
-        @intFromEnum(selected),
-        @intFromEnum(compatible_selected),
+        @backingInt(selected),
+        @backingInt(compatible_selected),
         selected != reserved_version,
         followup.versionNegotiationSelectedVersion() == .v2,
         downgrade_close_code,
@@ -556,8 +556,8 @@ fn transportErrorMapping() !void {
         .data = "",
     } }, .initial) orelse return error.UnexpectedRoundtrip;
 
-    try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.protocol_violation)));
-    try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.version_negotiation_error)));
+    try require(quicz.transport_error.isKnownCode(@backingInt(quicz.transport_error.TransportErrorCode.protocol_violation)));
+    try require(quicz.transport_error.isKnownCode(@backingInt(quicz.transport_error.TransportErrorCode.version_negotiation_error)));
     try require(quicz.transport_error.isCryptoErrorCode(code));
     try require(decoded_alert != null);
     try require(decoded_alert.? == tls_alert);

@@ -2,7 +2,7 @@
 set -eu
 
 output_path=${1:-zig-out/QuiczMobile.xcframework}
-optimize=${QUICZ_OPTIMIZE:-ReleaseSafe}
+optimize=${QUICZ_OPTIMIZE:-safe}
 
 if [ -e "$output_path" ]; then
     echo "output already exists: $output_path" >&2
@@ -12,11 +12,11 @@ fi
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/quicz-mobile.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 
-zig build mobile-static \
+"${ZIG:-zig}" build mobile-static \
     -Dtarget=aarch64-ios \
     -Doptimize="$optimize" \
     --prefix "$temporary_root/device"
-zig build mobile-static \
+"${ZIG:-zig}" build mobile-static \
     -Dtarget=aarch64-ios-simulator \
     -Doptimize="$optimize" \
     --prefix "$temporary_root/simulator"

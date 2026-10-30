@@ -5,7 +5,7 @@
 # that directory, which also holds build.sh (see the trailing COPY).
 FROM gcr.io/oss-fuzz-base/base-builder
 
-# Zig 0.16.0 is shipped per-arch; pick the tarball matching the builder arch.
+# Zig 0.17.0 is shipped per-arch; pick the tarball matching the builder arch.
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
         wget xz-utils ca-certificates; \
@@ -14,7 +14,7 @@ RUN set -eux; \
         aarch64) ZIG_ARCH=aarch64-linux ;; \
         *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    wget -q "https://ziglang.org/download/0.16.0/zig-${ZIG_ARCH}-0.16.0.tar.xz" -O /tmp/zig.tar.xz; \
+    wget -q "https://ziglang.org/download/0.17.0/zig-${ZIG_ARCH}-0.17.0.tar.xz" -O /tmp/zig.tar.xz; \
     tar -xJf /tmp/zig.tar.xz -C /opt; \
     ln -s /opt/zig-*/zig /usr/local/bin/zig; \
     zig version

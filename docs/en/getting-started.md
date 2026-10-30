@@ -10,7 +10,7 @@ endpoints, and a sans-IO core. This guide uses the top two; the lower layers
 are documented in [API Layers](api-layers.md) with a comparison to
 s2n-quic / quic-go / quinn / quiche / msquic / quic-zig.
 
-Prerequisites: Zig 0.16.0. The library is pure Zig — no C dependencies.
+Prerequisites: Zig 0.17.0. The library uses pure Zig and has no C library dependencies.
 
 ## 1. Add the dependency
 
@@ -189,7 +189,7 @@ The examples bundle a local test-only P-256 key pair (see any
 - **macOS / arm64**: ECDSA P-256 certificates work.
 - **Linux x86_64**: Zig 0.16's `std.crypto` has a known codegen bug for
   P-256/P-384/Ed25519 signature verification. Use **RSA certificates** and a
-  **Release** build (`-Doptimize=ReleaseFast`). An OpenSSL-generated RSA
+  **Release** build (`-Doptimize=fast`). An OpenSSL-generated RSA
   certificate verifies correctly on Linux.
 
 `Server.Config` supports `bind_addr` (default `127.0.0.1`); set it to

@@ -156,6 +156,14 @@ pub fn main() !void {
         .active_migration_disabled = true,
     });
 
+    const confirmation = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(server_handle, &server, 0, &client_dcid)) orelse return error.UnexpectedState;
+    defer allocator.free(confirmation);
+    try server_socket.send(io, &client_socket.address, confirmation);
+    var confirmation_buf: [1500]u8 = undefined;
+    const confirmed = try receiveDatagram(io, &client_socket, &confirmation_buf);
+    _ = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(client_handle, &client, confirmed.path, 0, confirmed.data);
+    try require(client.handshakeConfirmed());
+
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, "udp backend one rtt", true);
     const stream_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -228,7 +236,7 @@ pub fn main() !void {
         const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
             server_handle,
             &server,
-            2 + @as(i64, @intCast(echo_datagram_count)),
+            client_stream_timer.timer.deadline_nanos + 2 + @as(i64, @intCast(echo_datagram_count)),
             &client_dcid,
         )) orelse return error.UnexpectedState;
         defer allocator.free(echo_datagram);
@@ -240,7 +248,7 @@ pub fn main() !void {
             client_handle,
             &client,
             echo_received.path,
-            5 + @as(i64, @intCast(echo_datagram_count)),
+            client_stream_timer.timer.deadline_nanos + 5 + @as(i64, @intCast(echo_datagram_count)),
             echo_received.data,
         );
         try require(echo_route.connection_id == client_handle);

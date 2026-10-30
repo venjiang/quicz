@@ -17,6 +17,15 @@ const Tls13Backend = tls13_backend.Tls13Backend;
 const Error = transport_types.Error;
 const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
 const ClientTransportError = Error || protection.ProtectionError || packet.PacketError || error{EndOfStream};
+const max_undecryptable_packets = 32;
+const UndecryptablePacket = struct {
+    space: transport_types.PacketNumberSpace,
+    bytes: []u8,
+};
+
+test {
+    _ = @import("tls13_client_reordering_tests.zig");
+}
 
 /// One deadline that a TLS-owned client socket loop must observe.
 pub const ClientTransportDeadline = union(enum) {
@@ -48,6 +57,8 @@ pub const Tls13ClientTransport = struct {
     server_initial_keys: protection.Aes128PacketProtectionKeys,
     retry_received: bool = false,
     handshake_finished_sent: bool = false,
+    undecryptable_packets: [max_undecryptable_packets]UndecryptablePacket = undefined,
+    undecryptable_count: usize = 0,
 
     /// Create one client transport with stable Initial connection IDs.
     pub fn init(
@@ -73,6 +84,7 @@ pub const Tls13ClientTransport = struct {
     }
 
     pub fn deinit(self: *Tls13ClientTransport) void {
+        self.clearUndecryptablePackets();
         self.connection.deinit();
     }
 
@@ -136,6 +148,7 @@ pub const Tls13ClientTransport = struct {
         now_nanos: i64,
     ) ClientTransportError!?[]u8 {
         try self.connection.closeConnection(application_error_code, frame_type, reason);
+        self.clearUndecryptablePackets();
         return self.pollApplicationDatagram(now_nanos);
     }
 
@@ -147,6 +160,7 @@ pub const Tls13ClientTransport = struct {
         now_nanos: i64,
     ) ClientTransportError!?[]u8 {
         try self.connection.closeApplication(application_error_code, reason);
+        self.clearUndecryptablePackets();
         return self.pollApplicationDatagram(now_nanos);
     }
 
@@ -160,10 +174,30 @@ pub const Tls13ClientTransport = struct {
         self: *Tls13ClientTransport,
         now_nanos: i64,
     ) ClientTransportError!?[]u8 {
+        defer self.discardObsoletePackets();
         const peer_connection_id = self.connection.peerDestinationConnectionId() orelse return error.InvalidPacket;
         return self.connection.pollProtectedShortDatagramWithInstalledKeys(
             now_nanos,
             peer_connection_id,
+        );
+    }
+
+    /// Poll Initial and Handshake output, including ACKs before TLS completes.
+    pub fn pollHandshakeDatagram(self: *Tls13ClientTransport, now_nanos: i64) ClientTransportError!?[]u8 {
+        defer self.discardObsoletePackets();
+        const initial_active = !self.connection.packetNumberSpaceDiscarded(.initial);
+        if (!initial_active and self.connection.local_handshake_keys == null) return null;
+        const initial_dcid = self.connection.retrySourceConnectionId() orelse &self.original_destination_connection_id;
+        const destination = self.connection.peerDestinationConnectionId() orelse initial_dcid;
+        return self.connection.pollProtectedLongDatagram(
+            now_nanos,
+            destination,
+            &self.local_source_connection_id,
+            &.{},
+            .{
+                .initial = if (initial_active) (try protection.deriveInitialSecrets(self.version, initial_dcid)).client else null,
+                .handshake = self.connection.local_handshake_keys,
+            },
         );
     }
 
@@ -178,6 +212,7 @@ pub const Tls13ClientTransport = struct {
         deadline: LossDetectionTimerDeadline,
         now_nanos: i64,
     ) ClientTransportError!?[]u8 {
+        defer self.discardObsoletePackets();
         return switch (deadline.space) {
             .initial => initial: {
                 const dcid = self.connection.retrySourceConnectionId() orelse &self.original_destination_connection_id;
@@ -226,6 +261,7 @@ pub const Tls13ClientTransport = struct {
         self: *Tls13ClientTransport,
         now_nanos: i64,
     ) ClientTransportError!?LossDetectionTimerDeadline {
+        defer self.discardObsoletePackets();
         return self.connection.serviceLossDetectionTimer(now_nanos);
     }
 
@@ -267,6 +303,7 @@ pub const Tls13ClientTransport = struct {
         self: *Tls13ClientTransport,
         now_nanos: i64,
     ) ClientTransportError!?ClientTransportDeadline {
+        defer self.discardObsoletePackets();
         const deadline = self.nextDeadline() orelse return null;
         if (deadline.deadline() > now_nanos) return null;
 
@@ -303,6 +340,7 @@ pub const Tls13ClientTransport = struct {
 
     /// Queue ClientHello and return the first protected Initial datagram.
     pub fn begin(self: *Tls13ClientTransport, now_nanos: i64, scratch: []u8) ClientTransportError![]u8 {
+        defer self.discardObsoletePackets();
         _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
         const initial_keys = try protection.deriveInitialSecrets(self.version, &self.original_destination_connection_id);
         return (try self.connection.pollProtectedLongCryptoDatagramInSpace(
@@ -320,12 +358,15 @@ pub const Tls13ClientTransport = struct {
     /// A Retry returns the reprotected cached ClientHello. Once peer Handshake
     /// CRYPTO produces a client Finished, `outbound_handshake` contains that
     /// protected Handshake datagram. Callers retain and free non-null output.
+    /// Packets awaiting receive keys are copied into a bounded queue. A later
+    /// receive processes them after TLS installs the corresponding keys.
     pub fn receive(
         self: *Tls13ClientTransport,
         now_nanos: i64,
         scratch: []u8,
         datagram: []const u8,
     ) ClientTransportError!ReceiveResult {
+        defer self.discardObsoletePackets();
         if (datagram.len == 0) return error.InvalidPacket;
         if (isZeroOnlyPadding(datagram)) return error.InvalidPacket;
         if (isVersionNegotiationDatagram(datagram)) {
@@ -341,6 +382,7 @@ pub const Tls13ClientTransport = struct {
         if (isRetryDatagram(datagram)) {
             if (self.retry_received) return error.InvalidPacket;
             try self.connection.processRetryDatagram(now_nanos, &self.original_destination_connection_id, datagram);
+            self.clearUndecryptablePackets();
             const retry_scid = self.connection.retrySourceConnectionId() orelse return error.InvalidPacket;
             const retry_keys = try protection.deriveInitialSecrets(self.version, retry_scid);
             self.backend.retryReceived();
@@ -366,12 +408,13 @@ pub const Tls13ClientTransport = struct {
             if (end > datagram.len) return error.InvalidPacket;
             switch (info.packet_type) {
                 .initial => {
-                    try self.connection.processProtectedLongDatagramInSpace(.initial, now_nanos, self.server_initial_keys, datagram[offset..end]);
-                    _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
+                    if (!self.connection.packetNumberSpaceDiscarded(.initial)) {
+                        try self.connection.processProtectedLongDatagramInSpace(.initial, now_nanos, self.server_initial_keys, datagram[offset..end]);
+                        _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
+                    }
                 },
                 .handshake => {
-                    try self.connection.processProtectedHandshakeDatagramWithInstalledKeys(now_nanos, datagram[offset..end]);
-                    _ = try self.connection.driveCryptoBackendInSpace(.handshake, self.backend.cryptoBackend(), scratch);
+                    _ = try self.receiveEncryptedPacket(.handshake, now_nanos, scratch, datagram[offset..end]);
                 },
                 .zero_rtt, .retry => return error.InvalidPacket,
             }
@@ -379,13 +422,9 @@ pub const Tls13ClientTransport = struct {
         }
         var application_processed = false;
         if (offset < datagram.len and !isZeroOnlyPadding(datagram[offset..])) {
-            try self.connection.processProtectedShortDatagramWithInstalledKeysOrClose(
-                now_nanos,
-                self.local_source_connection_id.len,
-                datagram[offset..],
-            );
-            application_processed = true;
+            application_processed = try self.receiveEncryptedPacket(.application, now_nanos, scratch, datagram[offset..]);
         }
+        if (try self.drainUndecryptablePackets(now_nanos, scratch)) application_processed = true;
         var outbound_handshake: ?[]u8 = null;
         if (!self.handshake_finished_sent and self.connection.hasHandshakeProtectionKeys()) {
             if (self.connection.peerInitialSourceConnectionId()) |peer_scid| {
@@ -407,6 +446,86 @@ pub const Tls13ClientTransport = struct {
         return .{ .outbound_handshake = outbound_handshake, .application_processed = application_processed };
     }
 
+    /// Discard retained packets after shutdown or a superseding Version Negotiation.
+    /// Lifecycle owners call this after driving the borrowed Connection directly.
+    pub fn discardObsoletePackets(self: *Tls13ClientTransport) void {
+        // A fresh attempt carries its selected version as history, not as supersession.
+        const superseded = if (self.connection.version_negotiation_selected_version) |selected| selected != self.version else false;
+        if (self.connection.connectionState() != .active or superseded) self.clearUndecryptablePackets();
+    }
+
+    fn clearUndecryptablePackets(self: *Tls13ClientTransport) void {
+        for (self.undecryptable_packets[0..self.undecryptable_count]) |pending| self.allocator.free(pending.bytes);
+        self.undecryptable_count = 0;
+    }
+
+    fn bufferUndecryptablePacket(self: *Tls13ClientTransport, space: transport_types.PacketNumberSpace, bytes: []const u8) Error!void {
+        if (self.undecryptable_count == max_undecryptable_packets or bytes.len > self.connection.config.max_datagram_size) return;
+        self.undecryptable_packets[self.undecryptable_count] = .{
+            .space = space,
+            .bytes = try self.allocator.dupe(u8, bytes),
+        };
+        self.undecryptable_count += 1;
+    }
+
+    fn receiveEncryptedPacket(
+        self: *Tls13ClientTransport,
+        space: transport_types.PacketNumberSpace,
+        now_nanos: i64,
+        scratch: []u8,
+        bytes: []const u8,
+    ) ClientTransportError!bool {
+        if (space == .handshake and self.connection.packetNumberSpaceDiscarded(.handshake)) return false;
+        const keys_available = switch (space) {
+            .initial => unreachable,
+            .handshake => self.connection.peer_handshake_keys != null,
+            // The owned TLS backend exports these keys only after client TLS completes.
+            .application => self.connection.peer_one_rtt_key_phase_state != null,
+        };
+        if (!keys_available and self.connection.connectionState() == .active) {
+            try self.bufferUndecryptablePacket(space, bytes);
+            return false;
+        }
+        switch (space) {
+            .initial => unreachable,
+            .handshake => {
+                try self.connection.processProtectedHandshakeDatagramWithInstalledKeys(now_nanos, bytes);
+                _ = try self.connection.driveCryptoBackendInSpace(.handshake, self.backend.cryptoBackend(), scratch);
+                return false;
+            },
+            .application => {
+                try self.connection.processProtectedShortDatagramWithInstalledKeysOrClose(
+                    now_nanos,
+                    self.local_source_connection_id.len,
+                    bytes,
+                );
+                return true;
+            },
+        }
+    }
+
+    fn drainUndecryptablePackets(self: *Tls13ClientTransport, now_nanos: i64, scratch: []u8) ClientTransportError!bool {
+        var application_processed = false;
+        // Handshake processing can install 1-RTT keys needed by earlier arrivals.
+        for ([_]transport_types.PacketNumberSpace{ .handshake, .application }) |space| {
+            if (space == .handshake and self.connection.peer_handshake_keys == null and !self.connection.packetNumberSpaceDiscarded(.handshake)) continue;
+            if (space == .application and self.connection.peer_one_rtt_key_phase_state == null) continue;
+            var index: usize = 0;
+            while (index < self.undecryptable_count) {
+                const pending = self.undecryptable_packets[index];
+                if (pending.space != space) {
+                    index += 1;
+                    continue;
+                }
+                self.undecryptable_count -= 1;
+                std.mem.copyForwards(UndecryptablePacket, self.undecryptable_packets[index..self.undecryptable_count], self.undecryptable_packets[index + 1 .. self.undecryptable_count + 1]);
+                defer self.allocator.free(pending.bytes);
+                if (try self.receiveEncryptedPacket(space, now_nanos, scratch, pending.bytes)) application_processed = true;
+            }
+        }
+        return application_processed;
+    }
+
     pub const ReceiveResult = struct {
         outbound_initial: ?[]u8 = null,
         outbound_handshake: ?[]u8 = null,
@@ -423,7 +542,7 @@ fn isVersionNegotiationDatagram(datagram: []const u8) bool {
 
 fn isRetryDatagram(datagram: []const u8) bool {
     if (datagram.len < 5 or (datagram[0] & 0xc0) != 0xc0) return false;
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
     const type_bits: u2 = @intCast((datagram[0] >> 4) & 0x03);
     return packet.longHeaderPacketTypeFromBits(version, type_bits) == .retry;
 }
@@ -529,7 +648,7 @@ test "Tls13ClientTransport selects a fresh v1 attempt after Version Negotiation"
     var scratch: [8192]u8 = undefined;
     const initial = try transport.begin(1, &scratch);
     defer std.testing.allocator.free(initial);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(packet.Version.v2)), std.mem.readInt(u32, initial[1..5], .big));
+    try std.testing.expectEqual(@as(u32, @backingInt(packet.Version.v2)), std.mem.readInt(u32, initial[1..5], .big));
 
     const server_versions = [_]packet.Version{.v1};
     var vnp_buf: [64]u8 = undefined;
@@ -579,14 +698,14 @@ test "Tls13ClientTransport sends to the newest peer connection ID" {
     );
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x44} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x44));
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const reset_token = [_]u8{0x55} ** 16;
+    const reset_token = @as([16]u8, @splat(0x55));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -622,14 +741,14 @@ test "Tls13ClientTransport closes with protected application output and deadline
     );
     defer transport.deinit();
 
-    const traffic_secret = [_]u8{0x64} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x64));
     try transport.connection.confirmHandshake();
     try transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
-    const reset_token = [_]u8{0x65} ** 16;
+    const reset_token = @as([16]u8, @splat(0x65));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{

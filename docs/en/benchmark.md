@@ -7,7 +7,7 @@ secnetperf-style micro-benchmarks measuring raw QUIC transport performance over 
 - **Protocol**: QUIC v1, installed 1-RTT keys (bypasses TLS handshake, transport-only)
 - **Socket**: loopback UDP, 8900-byte datagrams (macOS UDP limit 9000B)
 - **I/O layer**: std.Io.Threaded (cross-platform, Linux auto-enables sendmmsg batching)
-- **Build**: `zig build-exe -OReleaseFast`
+- **Build**: `zig build-exe -Ofast`
 - **Platform**: Apple M-series macOS (native) + aarch64 Linux (native container); benchmarks are cross-platform (the `nanoTime()` helper has a Linux `clock_gettime` branch, and all bench artifacts build on Linux). Loopback UDP, ReleaseFast.
 - **Congestion control**: CUBIC (RFC 8312/9438)
 - **Pacer**: Token bucket, ns precision (loopback srtt ~1μs, no truncation)

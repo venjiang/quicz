@@ -872,7 +872,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             &backend_output,
         ),
     );
-    const validation_secret: address_validation_token.Secret = [_]u8{0x55} ** address_validation_token.secret_len;
+    const validation_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x55));
     var validation_policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, validation_secret, .{});
     defer validation_policy.deinit();
     try std.testing.expectError(
@@ -1188,7 +1188,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const stale_close = (try closed_capacity_endpoint.closeWithRoutePath(
         stale_record.handle,
         0,
-        @intFromEnum(frame.FrameType.crypto),
+        @backingInt(frame.FrameType.crypto),
         "done",
         4,
     )) orelse return error.TestUnexpectedResult;
@@ -1539,7 +1539,7 @@ test "Tls13ServerEndpoint pairs stateless endpoint responses with receive path" 
     }
 
     const retired_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
-    const reset_token = [_]u8{0x9a} ** quic_packet.stateless_reset_token_len;
+    const reset_token = @as([quic_packet.stateless_reset_token_len]u8, @splat(0x9a));
     try endpoint_owner.lifecycle.registerConnectionId(77, &retired_cid, path, .{
         .stateless_reset_token = reset_token,
     });
@@ -1729,8 +1729,8 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     }
     try std.testing.expect(record.backend.received_initial);
 
-    const client_hs = [_]u8{0x31} ** protection.traffic_secret_len;
-    const server_hs = [_]u8{0x32} ** protection.traffic_secret_len;
+    const client_hs = @as([protection.traffic_secret_len]u8, @splat(0x31));
+    const server_hs = @as([protection.traffic_secret_len]u8, @splat(0x32));
     try client.installHandshakeTrafficSecrets(.{
         .local = client_hs,
         .peer = server_hs,
@@ -1784,8 +1784,8 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     }
     try std.testing.expect(record.backend.received_handshake);
 
-    const client_1rtt = [_]u8{0x51} ** protection.traffic_secret_len;
-    const server_1rtt = [_]u8{0x52} ** protection.traffic_secret_len;
+    const client_1rtt = @as([protection.traffic_secret_len]u8, @splat(0x51));
+    const server_1rtt = @as([protection.traffic_secret_len]u8, @splat(0x52));
     try client.installOneRttTrafficSecrets(.{
         .local = client_1rtt,
         .peer = server_1rtt,
@@ -2024,8 +2024,8 @@ test "Tls13ServerEndpoint dispatches coalesced long datagrams with installed Han
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(initial_datagram);
 
-    const client_hs = [_]u8{0x41} ** protection.traffic_secret_len;
-    const server_hs = [_]u8{0x42} ** protection.traffic_secret_len;
+    const client_hs = @as([protection.traffic_secret_len]u8, @splat(0x41));
+    const server_hs = @as([protection.traffic_secret_len]u8, @splat(0x42));
     try client.installHandshakeTrafficSecrets(.{
         .local = client_hs,
         .peer = server_hs,
@@ -2193,8 +2193,8 @@ test "Tls13ServerEndpoint routed long route path fails before delivering CRYPTO 
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(initial_datagram);
 
-    const client_hs = [_]u8{0x71} ** protection.traffic_secret_len;
-    const server_hs = [_]u8{0x72} ** protection.traffic_secret_len;
+    const client_hs = @as([protection.traffic_secret_len]u8, @splat(0x71));
+    const server_hs = @as([protection.traffic_secret_len]u8, @splat(0x72));
     try client.installHandshakeTrafficSecrets(.{
         .local = client_hs,
         .peer = server_hs,
@@ -2306,8 +2306,8 @@ test "Tls13ServerEndpoint validates Retry Initial and returns route-bound TLS ou
             if (self.pulled_handshake_secrets) return null;
             self.pulled_handshake_secrets = true;
             return .{
-                .local = [_]u8{0x11} ** protection.traffic_secret_len,
-                .peer = [_]u8{0x22} ** protection.traffic_secret_len,
+                .local = @as([protection.traffic_secret_len]u8, @splat(0x11)),
+                .peer = @as([protection.traffic_secret_len]u8, @splat(0x22)),
             };
         }
     };
@@ -2361,8 +2361,8 @@ test "Tls13ServerEndpoint validates Retry Initial and returns route-bound TLS ou
     var endpoint_owner = TestEndpoint.init(std.testing.allocator);
     defer endpoint_owner.deinit();
 
-    const secret: address_validation_token.Secret = [_]u8{0xf1} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x2c} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xf1));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x2c));
     var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
         .max_previous_secrets = 1,
         .max_replay_entries = 4,
@@ -2534,8 +2534,8 @@ test "Tls13ServerEndpoint validates Retry Initial route before consuming token s
     var endpoint_owner = TestEndpoint.init(std.testing.allocator);
     defer endpoint_owner.deinit();
 
-    const secret: address_validation_token.Secret = [_]u8{0xf2} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x2d} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xf2));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x2d));
     var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
         .max_previous_secrets = 1,
         .max_replay_entries = 4,
@@ -4728,7 +4728,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         no_allocation_allocator.allocator(),
         second_record.handle,
         0,
-        @intFromEnum(frame.FrameType.ping),
+        @backingInt(frame.FrameType.ping),
         "done",
         30,
         &terminal_close_out,
@@ -5480,8 +5480,8 @@ test "Tls13ServerEndpoint receive step reports key discard while reporting input
     record_initialized = true;
     try record.connection.validatePeerAddress();
     try record.connection.confirmHandshake();
-    const local_secret = [_]u8{0x6a} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x6b} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x6a));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x6b));
     try record.connection.installOneRttTrafficSecrets(.{
         .local = local_secret,
         .peer = peer_secret,
@@ -5647,8 +5647,8 @@ test "Tls13ServerEndpoint services key discard deadline without input" {
     record_initialized = true;
     try record.connection.validatePeerAddress();
     try record.connection.confirmHandshake();
-    const local_secret = [_]u8{0x6c} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x6d} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x6c));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x6d));
     try record.connection.installOneRttTrafficSecrets(.{
         .local = local_secret,
         .peer = peer_secret,
@@ -5781,8 +5781,8 @@ test "Tls13ServerEndpoint drains key discard deadline without route path" {
     record_initialized = true;
     try record.connection.validatePeerAddress();
     try record.connection.confirmHandshake();
-    const local_secret = [_]u8{0x6e} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x6f} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x6e));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x6f));
     try record.connection.installOneRttTrafficSecrets(.{
         .local = local_secret,
         .peer = peer_secret,
@@ -6899,7 +6899,7 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expect(queued_server_ping.datagram.len != 0);
 
     const invalid_packet_number = record.connection.nextPeerPacketNumber(.application);
-    const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+    const illegal_plaintext = [_]u8{@backingInt(frame.FrameType.handshake_done)} ++ (@as([31]u8, @splat(0)));
     const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = server_dcid,
         .spin_bit = false,
@@ -6991,7 +6991,7 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
     );
     const IllegalHandshakeDone = struct {
         fn protect(allocator: std.mem.Allocator, dcid: []const u8, packet_number: u64, secret: protection.Aes128PacketProtectionKeys) ![]u8 {
-            const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+            const illegal_plaintext = [_]u8{@backingInt(frame.FrameType.handshake_done)} ++ (@as([31]u8, @splat(0)));
             return protection.protectShortPacketAes128(allocator, .{
                 .dcid = dcid,
                 .spin_bit = false,
@@ -7201,7 +7201,7 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
     try endpoint_owner.lifecycle.registerConnectionId(receive_step_record.handle, receive_step_record.local_id, receive_step_path, .{});
     try endpoint_owner.records.adopt(receive_step_record.handle, receive_step_record);
 
-    const ping_plaintext = [_]u8{@intFromEnum(frame.FrameType.ping)} ++ ([_]u8{0} ** 31);
+    const ping_plaintext = [_]u8{@backingInt(frame.FrameType.ping)} ++ (@as([31]u8, @splat(0)));
     const ping_packet_number = receive_step_record.connection.nextPeerPacketNumber(.application);
     const ping_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = receive_step_record.local_id,
@@ -7321,7 +7321,7 @@ test "Tls13ServerEndpoint bounded receive reports active stateless reset and ret
     };
     const server_dcid = "local";
     const peer_connection_id = [_]u8{ 0xea, 0xeb, 0xec, 0xed };
-    const reset_token = [_]u8{0xbb} ** quic_packet.stateless_reset_token_len;
+    const reset_token = @as([quic_packet.stateless_reset_token_len]u8, @splat(0xbb));
     var empty_backend = EmptyBackend{};
 
     const record = try std.testing.allocator.create(TestRecord);
@@ -7504,7 +7504,7 @@ test "Tls13ServerEndpoint receive step reports active stateless reset and close 
     };
     const server_dcid = "local";
     const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
-    const reset_token = [_]u8{0xbc} ** quic_packet.stateless_reset_token_len;
+    const reset_token = @as([quic_packet.stateless_reset_token_len]u8, @splat(0xbc));
     var empty_backend = EmptyBackend{};
 
     const record = try std.testing.allocator.create(TestRecord);
@@ -7851,7 +7851,7 @@ test "Tls13 endpoints complete certificate-verified local handshake through endp
         delivered_server_flights += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), delivered_server_flights);
-    try std.testing.expect(client.handshakeConfirmed());
+    try std.testing.expect(!client.handshakeConfirmed());
 
     const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
     client_finished_datagram = null;
@@ -7932,7 +7932,14 @@ test "Tls13 endpoints complete certificate-verified local handshake through endp
     for (server_finish_pending_out[0..server_finish_step.pending_drain.datagrams_written]) |outbound| {
         try std.testing.expectEqual(server_handle, outbound.connection_id);
         try std.testing.expect(outbound.path.eql(server_path));
+        const confirmation = try client.receiveWithRoutePath(15, &client_scratch, outbound.datagram);
+        try std.testing.expect(confirmation.outbound_initial == null);
+        try std.testing.expect(confirmation.outbound_handshake == null);
     }
+    const handshake_done = (try server_endpoint.pollDatagramWithRoutePathWithScratch(15, .application)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_done.datagram);
+    _ = try client.receiveWithRoutePath(16, &client_scratch, handshake_done.datagram);
+    try std.testing.expect(client.handshakeConfirmed());
 }
 
 test "Tls13 endpoints complete protected STREAM echo close and route retirement through endpoint routes" {
@@ -8154,7 +8161,7 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
         const r = try client.receiveWithRoutePath(13, &client_scratch, o.datagram);
         if (r.outbound_handshake) |f| client_finished_datagram = f.datagram;
     }
-    try std.testing.expect(client.handshakeConfirmed());
+    try std.testing.expect(!client.handshakeConfirmed());
 
     const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
     client_finished_datagram = null;
@@ -8165,7 +8172,7 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     var fin_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
     var fin_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
     var fin_route_out: [256]u8 = undefined;
-    _ = try server_endpoint.receiveDatagramStepWithRoutePath(
+    const finished = try server_endpoint.receiveDatagramStepWithRoutePath(
         std.testing.allocator,
         server_path,
         14,
@@ -8187,8 +8194,17 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
         &fin_pending_out,
     );
     defer {
-        for (fin_pending_out[0..0]) |o| std.testing.allocator.free(o.datagram);
+        for (fin_pending_out[0..finished.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
     }
+    for (fin_pending_out[0..finished.pending_drain.datagrams_written]) |outbound| {
+        const confirmation = try client.receiveWithRoutePath(15, &client_scratch, outbound.datagram);
+        try std.testing.expect(confirmation.outbound_initial == null);
+        try std.testing.expect(confirmation.outbound_handshake == null);
+    }
+    const handshake_done = (try server_endpoint.pollDatagramWithRoutePathWithScratch(15, .application)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_done.datagram);
+    _ = try client.receiveWithRoutePath(16, &client_scratch, handshake_done.datagram);
+    try std.testing.expect(client.handshakeConfirmed());
     const active_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
     try std.testing.expect(active_record.transport.connection.handshakeConfirmed());
 

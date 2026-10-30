@@ -196,9 +196,9 @@ pub fn encode(allocator: std.mem.Allocator, secret: Secret, context: Context) Er
 
     @memcpy(encoded[0..magic.len], magic);
     var offset: usize = magic.len;
-    encoded[offset] = @intFromEnum(context.kind);
+    encoded[offset] = @backingInt(context.kind);
     offset += 1;
-    std.mem.writeInt(u32, encoded[offset..][0..version_len], @intFromEnum(context.originating_version), .big);
+    std.mem.writeInt(u32, encoded[offset..][0..version_len], @backingInt(context.originating_version), .big);
     offset += version_len;
     std.mem.writeInt(u64, encoded[offset..][0..8], @intCast(context.issued_nanos), .big);
     offset += 8;
@@ -244,10 +244,10 @@ pub fn validateForVersion(
     offset += 1;
     if (kind != expected_kind) return error.InvalidToken;
 
-    const originating_version: packet.Version = @enumFromInt(std.mem.readInt(u32, encoded[offset..][0..version_len], .big));
+    const originating_version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, encoded[offset..][0..version_len], .big)));
     offset += version_len;
     try validateTokenVersion(originating_version);
-    if (@intFromEnum(originating_version) != @intFromEnum(expected_originating_version)) return error.InvalidToken;
+    if (@backingInt(originating_version) != @backingInt(expected_originating_version)) return error.InvalidToken;
 
     const issued_u64 = std.mem.readInt(u64, encoded[offset..][0..8], .big);
     if (issued_u64 > @as(u64, @intCast(std.math.maxInt(i64)))) return error.InvalidToken;
@@ -387,7 +387,7 @@ fn validateContext(context: Context) Error!void {
 }
 
 fn validateTokenVersion(version: packet.Version) Error!void {
-    if (@intFromEnum(version) == 0) return error.InvalidToken;
+    if (@backingInt(version) == 0) return error.InvalidToken;
     if (packet.isReservedVersion(version)) return error.InvalidToken;
 }
 
@@ -413,8 +413,8 @@ fn tokenMac(secret: Secret, body: []const u8, peer_address: []const u8) [mac_len
 }
 
 test "address validation token validates kind, lifetime, and address binding" {
-    const secret: Secret = [_]u8{0x42} ** secret_len;
-    const nonce: Nonce = [_]u8{0x99} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x42));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x99));
     const peer_address = "203.0.113.7:4433";
 
     const encoded = try encode(std.testing.allocator, secret, .{
@@ -441,8 +441,8 @@ test "address validation token validates kind, lifetime, and address binding" {
 }
 
 test "address validation token binds originating QUIC version" {
-    const secret: Secret = [_]u8{0x63} ** secret_len;
-    const nonce: Nonce = [_]u8{0x36} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x63));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x36));
     const peer_address = "203.0.113.63:4433";
 
     const encoded = try encode(std.testing.allocator, secret, .{
@@ -465,11 +465,11 @@ test "address validation token binds originating QUIC version" {
     try std.testing.expectEqual(Kind.new_token, validation.kind);
     try std.testing.expectError(
         error.InvalidToken,
-        validateForVersion(secret, .new_token, @enumFromInt(0), 1_100, peer_address, encoded),
+        validateForVersion(secret, .new_token, @fromBackingInt(@intCast(0)), 1_100, peer_address, encoded),
     );
     try std.testing.expectError(
         error.InvalidToken,
-        validateForVersion(secret, .new_token, @enumFromInt(0x0a0a0a0a), 1_100, peer_address, encoded),
+        validateForVersion(secret, .new_token, @fromBackingInt(@intCast(0x0a0a0a0a)), 1_100, peer_address, encoded),
     );
 
     const secrets = [_]Secret{secret};
@@ -478,7 +478,7 @@ test "address validation token binds originating QUIC version" {
 
     try std.testing.expectError(error.InvalidToken, encode(std.testing.allocator, secret, .{
         .kind = .new_token,
-        .originating_version = @enumFromInt(0),
+        .originating_version = @fromBackingInt(@intCast(0)),
         .issued_nanos = 1_000,
         .lifetime_nanos = 5_000,
         .peer_address = peer_address,
@@ -486,7 +486,7 @@ test "address validation token binds originating QUIC version" {
     }));
     try std.testing.expectError(error.InvalidToken, encode(std.testing.allocator, secret, .{
         .kind = .new_token,
-        .originating_version = @enumFromInt(0x0a0a0a0a),
+        .originating_version = @fromBackingInt(@intCast(0x0a0a0a0a)),
         .issued_nanos = 1_000,
         .lifetime_nanos = 5_000,
         .peer_address = peer_address,
@@ -495,9 +495,9 @@ test "address validation token binds originating QUIC version" {
 }
 
 test "address validation token validates against rotated secrets" {
-    const old_secret: Secret = [_]u8{0x11} ** secret_len;
-    const current_secret: Secret = [_]u8{0x22} ** secret_len;
-    const nonce: Nonce = [_]u8{0x44} ** nonce_len;
+    const old_secret: Secret = @as([secret_len]u8, @splat(0x11));
+    const current_secret: Secret = @as([secret_len]u8, @splat(0x22));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x44));
     const peer_address = "203.0.113.71:4433";
 
     const encoded = try encode(std.testing.allocator, old_secret, .{
@@ -521,8 +521,8 @@ test "address validation token validates against rotated secrets" {
 }
 
 test "address validation token validates and records replay fingerprints" {
-    const secret: Secret = [_]u8{0x62} ** secret_len;
-    const nonce: Nonce = [_]u8{0x26} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x62));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x26));
     const peer_address = "198.51.100.62:4433";
     const secrets = [_]Secret{secret};
     var replay_filter = ReplayFilter.init(std.testing.allocator, 4);
@@ -547,8 +547,8 @@ test "address validation token validates and records replay fingerprints" {
 }
 
 test "address validation token rejects tampering and invalid inputs" {
-    const secret: Secret = [_]u8{0x33} ** secret_len;
-    const nonce: Nonce = [_]u8{0x77} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x33));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x77));
     const peer_address = "198.51.100.4:4433";
 
     const encoded = try encode(std.testing.allocator, secret, .{
@@ -589,8 +589,8 @@ test "address validation token rejects tampering and invalid inputs" {
 }
 
 test "address validation token reports allocation failure" {
-    const secret: Secret = [_]u8{0x55} ** secret_len;
-    const nonce: Nonce = [_]u8{0x11} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x55));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x11));
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
 
     try std.testing.expectError(error.OutOfMemory, encode(failing_allocator.allocator(), secret, .{
@@ -603,8 +603,8 @@ test "address validation token reports allocation failure" {
 }
 
 test "address validation replay filter rejects duplicate token fingerprints" {
-    const secret: Secret = [_]u8{0x24} ** secret_len;
-    const nonce: Nonce = [_]u8{0x12} ** nonce_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x24));
+    const nonce: Nonce = @as([nonce_len]u8, @splat(0x12));
     const peer_address = "203.0.113.30:4433";
     var replay_filter = ReplayFilter.init(std.testing.allocator, 4);
     defer replay_filter.deinit();
@@ -634,11 +634,11 @@ test "address validation replay filter rejects invalid token shape" {
 }
 
 test "address validation replay filter evicts oldest fingerprint at capacity" {
-    const secret: Secret = [_]u8{0x44} ** secret_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x44));
     const peer_address = "198.51.100.44:4433";
-    const nonce_a: Nonce = [_]u8{0x01} ** nonce_len;
-    const nonce_b: Nonce = [_]u8{0x02} ** nonce_len;
-    const nonce_c: Nonce = [_]u8{0x03} ** nonce_len;
+    const nonce_a: Nonce = @as([nonce_len]u8, @splat(0x01));
+    const nonce_b: Nonce = @as([nonce_len]u8, @splat(0x02));
+    const nonce_c: Nonce = @as([nonce_len]u8, @splat(0x03));
     var replay_filter = ReplayFilter.init(std.testing.allocator, 2);
     defer replay_filter.deinit();
 
@@ -681,10 +681,10 @@ test "address validation replay filter evicts oldest fingerprint at capacity" {
 }
 
 test "address validation replay filter exports and restores fingerprint snapshots" {
-    const secret: Secret = [_]u8{0x81} ** secret_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x81));
     const peer_address = "198.51.100.81:4433";
-    const nonce_a: Nonce = [_]u8{0x0a} ** nonce_len;
-    const nonce_b: Nonce = [_]u8{0x0b} ** nonce_len;
+    const nonce_a: Nonce = @as([nonce_len]u8, @splat(0x0a));
+    const nonce_b: Nonce = @as([nonce_len]u8, @splat(0x0b));
     var replay_filter = ReplayFilter.init(std.testing.allocator, 4);
     defer replay_filter.deinit();
 
@@ -726,11 +726,11 @@ test "address validation replay filter exports and restores fingerprint snapshot
 }
 
 test "address validation replay filter restores newest unique snapshot fingerprints" {
-    const secret: Secret = [_]u8{0x82} ** secret_len;
+    const secret: Secret = @as([secret_len]u8, @splat(0x82));
     const peer_address = "198.51.100.82:4433";
-    const nonce_a: Nonce = [_]u8{0x1a} ** nonce_len;
-    const nonce_b: Nonce = [_]u8{0x1b} ** nonce_len;
-    const nonce_c: Nonce = [_]u8{0x1c} ** nonce_len;
+    const nonce_a: Nonce = @as([nonce_len]u8, @splat(0x1a));
+    const nonce_b: Nonce = @as([nonce_len]u8, @splat(0x1b));
+    const nonce_c: Nonce = @as([nonce_len]u8, @splat(0x1c));
 
     const token_a = try encode(std.testing.allocator, secret, .{
         .kind = .new_token,

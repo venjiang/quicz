@@ -13,7 +13,7 @@ if [ "${1:-}" = "--skip-live" ]; then
 fi
 
 cd cli
-zig build
+"${ZIG:-zig}" build
 
 check_live() {
   local name="$1" url="$2"
@@ -38,7 +38,7 @@ check_live() {
 
 if [ "$SKIP_LIVE" -ne 1 ]; then
   check_live "cloudflare-quic.com" "https://cloudflare-quic.com/"
-  check_live "www.fastly.com" "https://www.fastly.com/"
+  check_live "www.litespeedtech.com" "https://www.litespeedtech.com/"
 fi
 
 # Local serve -> h3 round trip with the built-in loopback certificate.

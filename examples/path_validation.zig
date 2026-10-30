@@ -71,19 +71,20 @@ fn retryThenSucceed(allocator: std.mem.Allocator) !void {
     try require(conn.pendingPathChallengeCount() == 0);
     try require(conn.outstandingPathChallengeCount() == 1);
 
-    try conn.checkPathValidationTimeouts(10_000);
+    const retry_at: i64 = @intCast(conn.recovery_state.ptoNs());
+    try conn.checkPathValidationTimeouts(retry_at);
     try require(conn.pendingPathChallengeCount() == 1);
     try require(conn.outstandingPathChallengeCount() == 0);
     try require(conn.failedPathValidationCount() == 0);
 
-    const retry = (try conn.pollTx(10_000, &tx)) orelse return error.UnexpectedState;
+    const retry = (try conn.pollTx(retry_at, &tx)) orelse return error.UnexpectedState;
     try expectPathChallenge(retry, allocator, challenge_data);
     try require(conn.pendingPathChallengeCount() == 0);
     try require(conn.outstandingPathChallengeCount() == 1);
 
     var response_raw: [16]u8 = undefined;
     const response = try encodePathResponse(&response_raw, challenge_data);
-    try conn.processDatagram(10_010, response);
+    try conn.processDatagram(retry_at + 10, response);
     try require(conn.outstandingPathChallengeCount() == 0);
     try require(conn.failedPathValidationCount() == 0);
 
@@ -100,13 +101,14 @@ fn retryThenFail(allocator: std.mem.Allocator) !void {
     var tx: [64]u8 = undefined;
     _ = (try conn.pollTx(0, &tx)) orelse return error.UnexpectedState;
 
-    try conn.checkPathValidationTimeouts(10_000);
-    _ = (try conn.pollTx(10_000, &tx)) orelse return error.UnexpectedState;
+    const retry_after: i64 = @intCast(conn.recovery_state.ptoNs());
+    try conn.checkPathValidationTimeouts(retry_after);
+    _ = (try conn.pollTx(retry_after, &tx)) orelse return error.UnexpectedState;
 
-    try conn.checkPathValidationTimeouts(20_000);
-    _ = (try conn.pollTx(20_000, &tx)) orelse return error.UnexpectedState;
+    try conn.checkPathValidationTimeouts(2 * retry_after);
+    _ = (try conn.pollTx(2 * retry_after, &tx)) orelse return error.UnexpectedState;
 
-    try conn.checkPathValidationTimeouts(30_000);
+    try conn.checkPathValidationTimeouts(3 * retry_after);
     try require(conn.pendingPathChallengeCount() == 0);
     try require(conn.outstandingPathChallengeCount() == 0);
     try require(conn.failedPathValidationCount() == 1);

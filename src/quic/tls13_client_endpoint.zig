@@ -120,6 +120,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             datagram: []const u8,
             route: endpoint.RouteResult,
         ) !ReceiveResult {
+            defer self.transport.discardObsoletePackets();
             if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
                 if (self.transport.connection.processStatelessResetDatagram(now_nanos, datagram)) |sequence_number| {
                     try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
@@ -414,6 +415,19 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             return result;
         }
 
+        /// Poll route-bound Initial/Handshake output and mirror recovery state.
+        pub fn pollHandshakeDatagramWithRoutePath(
+            self: *Self,
+            now_nanos: i64,
+        ) !?ApplicationDatagramPathResult {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const datagram = try self.transport.pollHandshakeDatagram(now_nanos);
+            errdefer if (datagram) |bytes| self.transport.allocator.free(bytes);
+            try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            return if (datagram) |bytes| .{ .datagram = bytes, .path = path } else null;
+        }
+
         /// Select the next client transport lifecycle deadline.
         pub fn nextDeadline(self: *const Self) ?client_transport.ClientTransportDeadline {
             return self.transport.nextDeadline();
@@ -424,6 +438,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             self: *Self,
             now_nanos: i64,
         ) !?client_transport.ClientTransportDeadline {
+            defer self.transport.discardObsoletePackets();
             const deadline = self.transport.nextDeadline() orelse return null;
             if (deadline.deadline() > now_nanos) return null;
 
@@ -577,6 +592,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             followup_local_initial_source_connection_id: []const u8,
             route_options: endpoint.ClientInitialRouteOptions,
         ) !?endpoint_lifecycle.EndpointVersionNegotiationFollowupResult {
+            defer self.transport.discardObsoletePackets();
             return self.lifecycle.processVersionNegotiationFollowupDatagram(
                 self.connection_id,
                 followup_connection_id,
@@ -852,6 +868,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             reason: []const u8,
             now_nanos: i64,
         ) !?ApplicationDatagramPathResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
             try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
@@ -869,6 +886,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             reason: []const u8,
             now_nanos: i64,
         ) !?ApplicationDatagramPathResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
             try self.transport.connection.closeApplication(application_error_code, reason);
@@ -888,6 +906,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             now_nanos: i64,
             out: []ApplicationDatagramPathResult,
         ) !CloseDatagramPathDrainResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
             if (out.len == 0) return error.BufferTooSmall;
@@ -906,6 +925,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
             now_nanos: i64,
             out: []ApplicationDatagramPathResult,
         ) !CloseDatagramPathDrainResult {
+            defer self.transport.discardObsoletePackets();
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
             if (out.len == 0) return error.BufferTooSmall;
@@ -923,6 +943,7 @@ pub fn Tls13ClientEndpointForTuple(comptime Path: type) type {
 
         /// Retire the registered route after the close deadline has elapsed.
         pub fn retireAtCloseDeadline(self: *Self, now_nanos: i64) !?endpoint_lifecycle.EndpointConnectionRetireResult {
+            defer self.transport.discardObsoletePackets();
             return self.lifecycle.checkCloseTimeoutsAndRetireConnection(
                 self.connection_id,
                 &self.transport.connection,
@@ -1219,13 +1240,13 @@ test "Tls13ClientEndpoint reports fixed-bit-clear datagrams as receive errors" {
         try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
     }
 
-    const unknown_cid = [_]u8{0x40} ++ ([_]u8{0xaa} ** 32);
+    const unknown_cid = [_]u8{0x40} ++ (@as([32]u8, @splat(0xaa)));
     try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePath(10, &scratch, &unknown_cid));
     try std.testing.expect(try client.receiveWithRoutePathOrDiscard(10, &scratch, &unknown_cid) == null);
 
-    const other_cid = [_]u8{0xbb} ** 8;
+    const other_cid = @as([8]u8, @splat(0xbb));
     try client.lifecycle.registerConnectionId(30, &other_cid, path, .{ .active_migration_disabled = false });
-    const other_connection = [_]u8{0x40} ++ other_cid ++ ([_]u8{0} ** 24);
+    const other_connection = [_]u8{0x40} ++ other_cid ++ (@as([24]u8, @splat(0)));
     try std.testing.expectError(error.InvalidPacket, client.receiveWithRoutePath(10, &scratch, &other_connection));
     try std.testing.expect(try client.receiveWithRoutePathOrDiscard(10, &scratch, &other_connection) == null);
 
@@ -1259,14 +1280,14 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x44} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x44));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const reset_token = [_]u8{0x55} ** 16;
+    const reset_token = @as([16]u8, @splat(0x55));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1336,14 +1357,14 @@ test "Tls13ClientEndpoint route-bound application poll fails before consuming ou
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x49} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x49));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0x4a, 0x4b, 0x4c, 0x4d };
-    const reset_token = [_]u8{0x4e} ** 16;
+    const reset_token = @as([16]u8, @splat(0x4e));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1430,15 +1451,15 @@ fn clientReceiveKeepsFrameError(comptime classified: bool) !void {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x31} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x32} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x31));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x32));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
         .peer = server_secret,
     });
     const peer_connection_id = [_]u8{ 0xac, 0xad, 0xae, 0xaf };
-    const reset_token = [_]u8{0x75} ** 16;
+    const reset_token = @as([16]u8, @splat(0x75));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1450,7 +1471,7 @@ fn clientReceiveKeepsFrameError(comptime classified: bool) !void {
     try client.transport.connection.processDatagram(0 * ms, writer.getWritten());
     _ = try client.updatePath(new_path);
 
-    const invalid_plaintext = [_]u8{0x1f} ++ ([_]u8{0} ** 31);
+    const invalid_plaintext = [_]u8{0x1f} ++ (@as([31]u8, @splat(0)));
     const invalid_packet_number = client.transport.connection.nextPeerPacketNumber(.application);
     const invalid_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &client_scid,
@@ -1518,15 +1539,15 @@ test "Tls13ClientEndpoint receive close drain reports zero output capacity" {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x33} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x34} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x33));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x34));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
         .peer = server_secret,
     });
     const peer_connection_id = [_]u8{ 0xbc, 0xbd, 0xbe, 0xbf };
-    const reset_token = [_]u8{0x76} ** 16;
+    const reset_token = @as([16]u8, @splat(0x76));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1538,7 +1559,7 @@ test "Tls13ClientEndpoint receive close drain reports zero output capacity" {
     try client.transport.connection.processDatagram(0 * ms, writer.getWritten());
     _ = try client.updatePath(new_path);
 
-    const invalid_plaintext = [_]u8{0x1f} ++ ([_]u8{0} ** 31);
+    const invalid_plaintext = [_]u8{0x1f} ++ (@as([31]u8, @splat(0)));
     const invalid_packet_number = client.transport.connection.nextPeerPacketNumber(.application);
     const invalid_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &client_scid,
@@ -1617,15 +1638,15 @@ test "Tls13ClientEndpoint receive step reports zero receive output capacity" {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x35} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x36} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x35));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x36));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
         .peer = server_secret,
     });
     const peer_connection_id = [_]u8{ 0xcc, 0xcd, 0xce, 0xcf };
-    const reset_token = [_]u8{0x78} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0x78));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1636,7 +1657,7 @@ test "Tls13ClientEndpoint receive step reports zero receive output capacity" {
     } });
     try client.transport.connection.processDatagram(0 * ms, writer.getWritten());
 
-    var plaintext: [32]u8 = [_]u8{0} ** 32;
+    var plaintext: [32]u8 = @as([32]u8, @splat(0));
     var plaintext_writer = buffer.fixedWriter(&plaintext);
     try frame.encodeFrame(plaintext_writer.writer(), .{ .ping = {} });
     const packet_number = client.transport.connection.nextPeerPacketNumber(.application);
@@ -1698,15 +1719,15 @@ test "Tls13ClientEndpoint receive drains route-bound close on frame error" {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x33} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x34} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x33));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x34));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
         .peer = server_secret,
     });
     const peer_connection_id = [_]u8{ 0xac, 0xad, 0xae, 0xaf };
-    const reset_token = [_]u8{0x77} ** 16;
+    const reset_token = @as([16]u8, @splat(0x77));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1718,7 +1739,7 @@ test "Tls13ClientEndpoint receive drains route-bound close on frame error" {
     try client.transport.connection.processDatagram(0 * ms, writer.getWritten());
     _ = try client.updatePath(new_path);
 
-    const invalid_plaintext = [_]u8{0x1f} ++ ([_]u8{0} ** 31);
+    const invalid_plaintext = [_]u8{0x1f} ++ (@as([31]u8, @splat(0)));
     const invalid_packet_number = client.transport.connection.nextPeerPacketNumber(.application);
     const invalid_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &client_scid,
@@ -1764,14 +1785,14 @@ test "Tls13ClientEndpoint receive reports closed state without close output" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x39} ** protection.traffic_secret_len;
+    const traffic_secret = @as([protection.traffic_secret_len]u8, @splat(0x39));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xc9, 0xca, 0xcb, 0xcc };
-    const reset_token = [_]u8{0x79} ** 16;
+    const reset_token = @as([16]u8, @splat(0x79));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1823,14 +1844,14 @@ test "Tls13ClientEndpoint receive does not drain queued application output on ro
     defer client.deinit();
     try client.lifecycle.registerConnectionId(99, &decoy_dcid, path, .{ .active_migration_disabled = false });
 
-    const traffic_secret = [_]u8{0x45} ** protection.traffic_secret_len;
+    const traffic_secret = @as([protection.traffic_secret_len]u8, @splat(0x45));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
-    const reset_token = [_]u8{0x56} ** 16;
+    const reset_token = @as([16]u8, @splat(0x56));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -1972,8 +1993,8 @@ test "Tls13ClientEndpoint services Handshake recovery with committed route outpu
     );
     try client.transport.connection.discardPacketNumberSpace(.initial);
 
-    const client_handshake_secret = [_]u8{0x21} ** protection.traffic_secret_len;
-    const server_handshake_secret = [_]u8{0x22} ** protection.traffic_secret_len;
+    const client_handshake_secret = @as([protection.traffic_secret_len]u8, @splat(0x21));
+    const server_handshake_secret = @as([protection.traffic_secret_len]u8, @splat(0x22));
     try client.transport.connection.installHandshakeTrafficSecrets(.{
         .local = client_handshake_secret,
         .peer = server_handshake_secret,
@@ -2032,14 +2053,14 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x55} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x55));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
-    const reset_token = [_]u8{0x66} ** 16;
+    const reset_token = @as([16]u8, @splat(0x66));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -2102,14 +2123,14 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x57} ** protection.traffic_secret_len;
+    const traffic_secret = @as([protection.traffic_secret_len]u8, @splat(0x57));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
-    const reset_token = [_]u8{0x67} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0x67));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -2195,14 +2216,14 @@ test "Tls13ClientEndpoint receive step drains due recovery with committed route 
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x58} ** protection.traffic_secret_len;
+    const traffic_secret = @as([protection.traffic_secret_len]u8, @splat(0x58));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
-    const reset_token = [_]u8{0x68} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0x68));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -2293,8 +2314,8 @@ test "Tls13ClientEndpoint receive step reports key discard while reporting input
         client_scid,
     );
     defer client.deinit();
-    const client_secret = [_]u8{0x5a} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x5b} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x5a));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x5b));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
@@ -2351,8 +2372,8 @@ test "Tls13ClientEndpoint services key discard deadline without input" {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x5c} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x5d} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x5c));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x5d));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
@@ -2395,8 +2416,8 @@ test "Tls13ClientEndpoint drains key discard deadline without input" {
     );
     defer client.deinit();
 
-    const client_secret = [_]u8{0x5e} ** protection.traffic_secret_len;
-    const server_secret = [_]u8{0x5f} ** protection.traffic_secret_len;
+    const client_secret = @as([protection.traffic_secret_len]u8, @splat(0x5e));
+    const server_secret = @as([protection.traffic_secret_len]u8, @splat(0x5f));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = client_secret,
@@ -2456,7 +2477,7 @@ test "Tls13ClientEndpoint receive returns Retry output with committed route path
         .dcid = &client_scid,
         .scid = &retry_scid,
         .token = "retry-token-for-client-address",
-        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
     };
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(
         std.testing.allocator,
@@ -2694,7 +2715,7 @@ test "Tls13ClientEndpoint receive enters draining on active stateless reset" {
     defer client.deinit();
 
     const peer_connection_id = [_]u8{ 0xea, 0xeb, 0xec, 0xed };
-    const reset_token = [_]u8{0xbb} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0xbb));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -2751,7 +2772,7 @@ test "Tls13ClientEndpoint receive step reports active stateless reset and close 
     defer client.deinit();
 
     const peer_connection_id = [_]u8{ 0xfa, 0xfb, 0xfc, 0xfd };
-    const reset_token = [_]u8{0xbc} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0xbc));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -2907,14 +2928,14 @@ test "Tls13ClientEndpoint closes with committed route output" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x77} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x77));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
-    const reset_token = [_]u8{0x88} ** 16;
+    const reset_token = @as([16]u8, @splat(0x88));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -3006,14 +3027,14 @@ test "Tls13ClientEndpoint drains route-bound stream controls without preflight m
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x8b} ** protection.traffic_secret_len;
+    const traffic_secret = @as([protection.traffic_secret_len]u8, @splat(0x8b));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
-    const reset_token = [_]u8{0x9b} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0x9b));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -3092,14 +3113,14 @@ test "Tls13ClientEndpoint drains close output with committed route and deadline"
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x87} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x87));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
-    const reset_token = [_]u8{0x98} ** 16;
+    const reset_token = @as([16]u8, @splat(0x98));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -3154,14 +3175,14 @@ test "Tls13ClientEndpoint drains application close output with committed route" 
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x8a} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x8a));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
-    const reset_token = [_]u8{0x9a} ** 16;
+    const reset_token = @as([16]u8, @splat(0x9a));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -3221,14 +3242,14 @@ test "Tls13ClientEndpoint retires its route when close deadline elapses" {
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0x99} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0x99));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
-    const reset_token = [_]u8{0xaa} ** 16;
+    const reset_token = @as([16]u8, @splat(0xaa));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
@@ -3276,14 +3297,14 @@ test "Tls13ClientEndpoint receive step retires close route while reporting input
     );
     defer client.deinit();
 
-    const traffic_secret = [_]u8{0xa9} ** 32;
+    const traffic_secret = @as([32]u8, @splat(0xa9));
     try client.transport.connection.confirmHandshake();
     try client.transport.connection.installOneRttTrafficSecrets(.{
         .local = traffic_secret,
         .peer = traffic_secret,
     });
     const peer_connection_id = [_]u8{ 0xea, 0xeb, 0xec, 0xed };
-    const reset_token = [_]u8{0xb9} ** 16;
+    const reset_token = @as([16]u8, @splat(0xb9));
     var encoded: [64]u8 = undefined;
     var writer = buffer.fixedWriter(&encoded);
     try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{

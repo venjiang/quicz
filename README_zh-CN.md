@@ -7,14 +7,14 @@
 
 [English](README.md) | 简体中文
 
-`quicz` 是一个纯 [Zig](https://ziglang.org/)（0.16）实现的 IETF QUIC 传输协议。
+`quicz` 是一个纯 [Zig](https://ziglang.org/)（0.17）实现的 IETF QUIC 传输协议。
 完整实现 RFC 9000/9001/9002，内置纯 Zig TLS 1.3 —— 无 C 依赖、无 OpenSSL、无 BoringSSL。
 
 ## 快速开始
 
 ### I/O 运行时（async，`std.Io`）
 
-`quicz.runtime` 提供基于 Zig 0.16 `std.Io`（线程化）的事件驱动 server/client。
+`quicz.runtime` 提供基于 Zig 0.17 `std.Io`（线程化）的事件驱动 server/client。
 server 按连接 spawn 独立 handler task（std.http 模型）；client 驱动 async 会话。
 
 ```zig
@@ -127,7 +127,13 @@ const qlog = quicz.qlog;
 
 ## 构建与测试
 
-需要 Zig **0.16.0**。
+需要 Zig **0.17.0**。如果默认 `zig` 命令使用其他版本，请改用 0.17.0 的可执行文件。
+例如，该命令名为 `zig17` 时，可以使用 `zig17 build` 或 `make ZIG=zig17`。
+
+iOS 的 `mobile-static` 构建会在缓存中的标准库副本上，对
+`std.Io.Threaded.processReplace` 应用临时兼容修正。该步骤使用 POSIX `sed` 工具。
+已安装的编译器和标准库保持不变。后续上游工具链通过设备和模拟器编译检查后，
+应移除此兼容步骤。
 
 ```sh
 zig build                                    # 构建库

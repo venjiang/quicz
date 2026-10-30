@@ -21,10 +21,10 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
-    const previous_token_secret: quicz.address_validation_token.Secret = [_]u8{0xa5} ** quicz.address_validation_token.secret_len;
-    const current_token_secret: quicz.address_validation_token.Secret = [_]u8{0x5c} ** quicz.address_validation_token.secret_len;
-    const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x5a} ** quicz.address_validation_token.nonce_len;
-    const v2_token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x6b} ** quicz.address_validation_token.nonce_len;
+    const previous_token_secret: quicz.address_validation_token.Secret = @as([quicz.address_validation_token.secret_len]u8, @splat(0xa5));
+    const current_token_secret: quicz.address_validation_token.Secret = @as([quicz.address_validation_token.secret_len]u8, @splat(0x5c));
+    const token_nonce: quicz.address_validation_token.Nonce = @as([quicz.address_validation_token.nonce_len]u8, @splat(0x5a));
+    const v2_token_nonce: quicz.address_validation_token.Nonce = @as([quicz.address_validation_token.nonce_len]u8, @splat(0x6b));
     const client_path = clientPath(50_000);
     const changed_client_path = clientPath(50_001);
     var token_policy = quicz.endpoint.AddressValidationPolicy.init(allocator, previous_token_secret, .{

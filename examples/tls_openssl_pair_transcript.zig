@@ -932,7 +932,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(!client.hasHandshakeProtectionKeys());
     try require(!server.hasHandshakeProtectionKeys());
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "manual close");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "manual close");
     try require(client.connectionState() == .closing);
     const close_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -961,7 +961,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     const server_close_error_code = switch (server.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| blk: {
             try require(close.error_code == 0);
-            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.stream));
+            try require(close.frame_type == @backingInt(quicz.frame.FrameType.stream));
             try require(std.mem.eql(u8, close.reason_phrase, "manual close"));
             break :blk close.error_code;
         },
@@ -1283,6 +1283,11 @@ fn verifySocketBackedHandshakeCryptoDelivery(
     try require(client_ack_route.connection_id == server_handle);
     try require(std.mem.eql(u8, client_ack_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.bytesInFlight(.handshake) == 0);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    const anti_deadlock = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(anti_deadlock.timer.space == .handshake and anti_deadlock.timer.kind == .pto);
+    try client.confirmHandshake();
+    try client_lifecycle.armRecoveryTimerFromConnection(client_handle, &client);
     try require(client_lifecycle.recoveryTimerCount() == 0);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 

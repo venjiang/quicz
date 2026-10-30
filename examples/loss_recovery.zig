@@ -1,5 +1,6 @@
 const std = @import("std");
 const quicz = @import("quicz");
+const ms = std.time.ns_per_ms;
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -9,12 +10,12 @@ pub fn main() !void {
     var packet_threshold = try quicz.Connection.init(allocator, .client, .{});
     defer packet_threshold.deinit();
 
-    _ = try packet_threshold.recordPacketSentInSpace(.application, 10, 100);
-    _ = try packet_threshold.recordPacketSentInSpace(.application, 11, 100);
-    _ = try packet_threshold.recordPacketSentInSpace(.application, 12, 100);
-    _ = try packet_threshold.recordPacketSentInSpace(.application, 13, 100);
+    _ = try packet_threshold.recordPacketSentInSpace(.application, 10 * ms, 100);
+    _ = try packet_threshold.recordPacketSentInSpace(.application, 11 * ms, 100);
+    _ = try packet_threshold.recordPacketSentInSpace(.application, 12 * ms, 100);
+    _ = try packet_threshold.recordPacketSentInSpace(.application, 13 * ms, 100);
 
-    try packet_threshold.receiveAckInSpace(.application, 70, .{
+    try packet_threshold.receiveAckInSpace(.application, 70 * ms, .{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -29,12 +30,12 @@ pub fn main() !void {
 
     var invalid_ack = try quicz.Connection.init(allocator, .client, .{});
     defer invalid_ack.deinit();
-    _ = try invalid_ack.recordPacketSentInSpace(.application, 10, 100);
-    _ = try invalid_ack.recordPacketSentInSpace(.application, 20, 100);
+    _ = try invalid_ack.recordPacketSentInSpace(.application, 10 * ms, 100);
+    _ = try invalid_ack.recordPacketSentInSpace(.application, 20 * ms, 100);
     const invalid_ack_ranges = [_]quicz.frame.AckRange{
         .{ .gap = 0, .ack_range = 0 },
     };
-    invalid_ack.receiveAckInSpace(.application, 60, .{
+    invalid_ack.receiveAckInSpace(.application, 60 * ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -53,10 +54,10 @@ pub fn main() !void {
     var time_threshold = try quicz.Connection.init(allocator, .client, .{});
     defer time_threshold.deinit();
 
-    _ = try time_threshold.recordPacketSentInSpace(.application, 300, 100);
-    _ = try time_threshold.recordPacketSentInSpace(.application, 500, 100);
+    _ = try time_threshold.recordPacketSentInSpace(.application, 300 * ms, 100);
+    _ = try time_threshold.recordPacketSentInSpace(.application, 500 * ms, 100);
 
-    try time_threshold.receiveAckInSpace(.application, 600, .{
+    try time_threshold.receiveAckInSpace(.application, 600 * ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -78,14 +79,15 @@ pub fn main() !void {
     );
 
     var newreno = try quicz.Connection.init(allocator, .client, .{
+        .initial_congestion_window_packets = null,
         .max_datagram_size = 1200,
         .initial_rtt_ns = 100000000,
     });
     defer newreno.deinit();
 
     const initial_cwnd = newreno.congestionWindow(.application);
-    _ = try newreno.recordPacketSentInSpace(.application, 0, 1200);
-    try newreno.receiveAckInSpace(.application, 100, .{
+    _ = try newreno.recordPacketSentInSpace(.application, 0 * ms, 1200);
+    try newreno.receiveAckInSpace(.application, 100 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -95,9 +97,9 @@ pub fn main() !void {
 
     var slow_start_sent: usize = 0;
     while (slow_start_sent < 10) : (slow_start_sent += 1) {
-        _ = try newreno.recordPacketSentInSpace(.application, @as(i64, @intCast(slow_start_sent + 1)), 1200);
+        _ = try newreno.recordPacketSentInSpace(.application, (@as(i64, @intCast(slow_start_sent + 1))) * ms, 1200);
     }
-    try newreno.receiveAckInSpace(.application, 110, .{
+    try newreno.receiveAckInSpace(.application, 110 * ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -107,10 +109,10 @@ pub fn main() !void {
 
     newreno.recovery_state.ssthresh = slow_start_cwnd;
     while (newreno.bytesInFlight(.application) < newreno.congestionWindow(.application)) {
-        _ = try newreno.recordPacketSentInSpace(.application, 120, 1200);
+        _ = try newreno.recordPacketSentInSpace(.application, 120 * ms, 1200);
     }
     const avoidance_before = newreno.congestionWindow(.application);
-    try newreno.receiveAckInSpace(.application, 220, .{
+    try newreno.receiveAckInSpace(.application, 220 * ms, .{
         .largest_acknowledged = 2,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -119,9 +121,9 @@ pub fn main() !void {
     if (avoidance_credit_cwnd != avoidance_before) return error.LossRecoveryExampleFailed;
     if (newreno.recovery_state.congestion_avoidance_bytes_acked != 1200) return error.LossRecoveryExampleFailed;
 
-    _ = try newreno.recordPacketSentInSpace(.application, 230, 1200);
+    _ = try newreno.recordPacketSentInSpace(.application, 230 * ms, 1200);
     if (newreno.bytesInFlight(.application) != avoidance_before) return error.LossRecoveryExampleFailed;
-    try newreno.receiveAckInSpace(.application, 240, .{
+    try newreno.receiveAckInSpace(.application, 240 * ms, .{
         .largest_acknowledged = 12,
         .ack_delay = 0,
         .first_ack_range = 9,
@@ -142,7 +144,7 @@ pub fn main() !void {
     batched_avoidance.congestion_window = 12_000;
     batched_avoidance.ssthresh = 12_000;
     batched_avoidance.onPacketSent(25_200);
-    batched_avoidance.onPacketAcked(25_200, 0, 100, 0);
+    batched_avoidance.onPacketAcked(25_200, 0 * ms, 100 * ms, 0 * ms);
     if (batched_avoidance.congestion_window != 14_400) return error.LossRecoveryExampleFailed;
     if (batched_avoidance.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
     std.debug.print(
@@ -158,9 +160,9 @@ pub fn main() !void {
     newreno_clamp.recovery_state.congestion_window = 3_000;
     var clamp_packet_number: u64 = 0;
     while (clamp_packet_number < 4) : (clamp_packet_number += 1) {
-        _ = try newreno_clamp.recordPacketSentInSpace(.application, @as(i64, @intCast(clamp_packet_number + 1)) * 10, 100);
+        _ = try newreno_clamp.recordPacketSentInSpace(.application, (@as(i64, @intCast(clamp_packet_number + 1)) * 10) * ms, 100);
     }
-    try newreno_clamp.receiveAckInSpace(.application, 100, .{
+    try newreno_clamp.receiveAckInSpace(.application, 100 * ms, .{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -179,21 +181,21 @@ pub fn main() !void {
     });
     defer persistent.deinit();
 
-    _ = try persistent.recordPacketSentInSpace(.application, 0, 100);
-    try persistent.receiveAckInSpace(.application, 50, .{
+    _ = try persistent.recordPacketSentInSpace(.application, 0 * ms, 100);
+    try persistent.receiveAckInSpace(.application, 50 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
-    if (persistent.recovery_state.min_rtt_ns != 50) return error.LossRecoveryExampleFailed;
+    if (persistent.recovery_state.min_rtt_ns != 50 * ms) return error.LossRecoveryExampleFailed;
     persistent.recovery_state.onPtoExpired();
     persistent.recovery_state.onPtoExpired();
     const persistent_duration = persistent.recovery_state.persistentCongestionDuration();
-    _ = try persistent.recordPacketSentInSpace(.application, 100, 100);
-    _ = try persistent.recordPacketSentInSpace(.application, 1000, 100);
-    _ = try persistent.recordPacketSentInSpace(.application, 1100, 100);
-    _ = try persistent.recordPacketSentInSpace(.application, 1200, 100);
-    try persistent.receiveAckInSpace(.application, 1700, .{
+    _ = try persistent.recordPacketSentInSpace(.application, 100 * ms, 100);
+    _ = try persistent.recordPacketSentInSpace(.application, 1000 * ms, 100);
+    _ = try persistent.recordPacketSentInSpace(.application, 1100 * ms, 100);
+    _ = try persistent.recordPacketSentInSpace(.application, 1200 * ms, 100);
+    try persistent.receiveAckInSpace(.application, 1700 * ms, .{
         .largest_acknowledged = 4,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -202,14 +204,14 @@ pub fn main() !void {
         return error.LossRecoveryExampleFailed;
     }
     const refreshed_min_rtt = persistent.recovery_state.min_rtt_ns orelse return error.LossRecoveryExampleFailed;
-    if (refreshed_min_rtt != 500) return error.LossRecoveryExampleFailed;
+    if (refreshed_min_rtt != 500 * ms) return error.LossRecoveryExampleFailed;
     const persistent_recovery_cleared = persistent.recovery_state.congestion_recovery_start_time_nanos == null;
     if (!persistent_recovery_cleared) return error.LossRecoveryExampleFailed;
-    if (!persistent.recovery_state.wouldStartCongestionRecovery(1800)) return error.LossRecoveryExampleFailed;
+    if (!persistent.recovery_state.wouldStartCongestionRecovery(1800 * ms)) return error.LossRecoveryExampleFailed;
     persistent.recovery_state.congestion_avoidance_bytes_acked = 600;
-    persistent.recovery_state.onCongestionEvent(1800, 1900);
+    persistent.recovery_state.onCongestionEvent(1800 * ms, 1900 * ms);
     const persistent_reentry_start = persistent.recovery_state.congestion_recovery_start_time_nanos orelse return error.LossRecoveryExampleFailed;
-    if (persistent_reentry_start != 1900) return error.LossRecoveryExampleFailed;
+    if (persistent_reentry_start != 1900 * ms) return error.LossRecoveryExampleFailed;
     if (persistent.recovery_state.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
     std.debug.print(
         "[loss] persistent congestion duration={d} reduced_cwnd={d} refreshed_min_rtt={d} recovery_cleared={} reentry_start={d}\n",
@@ -228,21 +230,21 @@ pub fn main() !void {
     });
     defer non_contiguous_persistent.deinit();
 
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 0, 100);
-    try non_contiguous_persistent.receiveAckInSpace(.application, 100, .{
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 0 * ms, 100);
+    try non_contiguous_persistent.receiveAckInSpace(.application, 100 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 10, 100);
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1000, 100);
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1100, 100);
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1200, 100);
-    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1300, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 10 * ms, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1000 * ms, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1100 * ms, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1200 * ms, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1300 * ms, 100);
     const non_contiguous_ack_ranges = [_]quicz.frame.AckRange{
         .{ .gap = 0, .ack_range = 0 },
     };
-    try non_contiguous_persistent.receiveAckInSpace(.application, 1400, .{
+    try non_contiguous_persistent.receiveAckInSpace(.application, 1400 * ms, .{
         .largest_acknowledged = 5,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -263,15 +265,15 @@ pub fn main() !void {
     defer recovery_period.deinit();
     var packet_number: u64 = 0;
     while (packet_number < 8) : (packet_number += 1) {
-        _ = try recovery_period.recordPacketSentInSpace(.application, @as(i64, @intCast(packet_number + 1)) * 10, 100);
+        _ = try recovery_period.recordPacketSentInSpace(.application, (@as(i64, @intCast(packet_number + 1)) * 10) * ms, 100);
     }
-    try recovery_period.receiveAckInSpace(.application, 100, .{
+    try recovery_period.receiveAckInSpace(.application, 100 * ms, .{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
     const recovery_window = recovery_period.congestionWindow(.application);
-    try recovery_period.receiveAckInSpace(.application, 120, .{
+    try recovery_period.receiveAckInSpace(.application, 120 * ms, .{
         .largest_acknowledged = 7,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -293,15 +295,15 @@ pub fn main() !void {
     recovery_ack_accounting.congestion_avoidance_bytes_acked = 600;
     recovery_ack_accounting.onPacketSent(12_000);
     recovery_ack_accounting.onPtoExpired();
-    recovery_ack_accounting.onCongestionEvent(20, 100);
+    recovery_ack_accounting.onCongestionEvent(20 * ms, 100 * ms);
     const recovery_ack_cwnd = recovery_ack_accounting.congestion_window;
-    recovery_ack_accounting.onPacketAcked(1200, 100, 80, 0);
+    recovery_ack_accounting.onPacketAcked(1200, 100 * ms, 80 * ms, 0 * ms);
     if (recovery_ack_accounting.congestion_window != recovery_ack_cwnd) return error.LossRecoveryExampleFailed;
     if (recovery_ack_accounting.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
     if (recovery_ack_accounting.bytes_in_flight != 10_800) return error.LossRecoveryExampleFailed;
     if (recovery_ack_accounting.pto_count != 0) return error.LossRecoveryExampleFailed;
     const recovery_ack_latest_rtt = recovery_ack_accounting.latest_rtt_ns orelse return error.LossRecoveryExampleFailed;
-    if (recovery_ack_latest_rtt != 80) return error.LossRecoveryExampleFailed;
+    if (recovery_ack_latest_rtt != 80 * ms) return error.LossRecoveryExampleFailed;
     std.debug.print(
         "[loss] recovery ACK accounting cwnd={d} latest_rtt={d} inflight={d} credit={d}\n",
         .{
@@ -324,11 +326,11 @@ pub fn main() !void {
     var probe_sent: usize = 0;
     while (probe_sent < 8) : (probe_sent += 1) {
         try congestion_probe.sendOnStream(probe_stream_id, &probe_chunk, false);
-        _ = (try congestion_probe.pollTx(@as(i64, @intCast(probe_sent + 1)) * 10, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
+        _ = (try congestion_probe.pollTx((@as(i64, @intCast(probe_sent + 1)) * 10) * ms, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
     }
     const minimum_probe_cwnd = quicz.recovery.minimumCongestionWindow(congestion_probe.recovery_state.max_datagram_size);
     congestion_probe.recovery_state.congestion_window = minimum_probe_cwnd;
-    try congestion_probe.receiveAckInSpace(.application, 90, .{
+    try congestion_probe.receiveAckInSpace(.application, 90 * ms, .{
         .largest_acknowledged = 5,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -337,7 +339,7 @@ pub fn main() !void {
         return error.LossRecoveryExampleFailed;
     }
     if (congestion_probe.recovery_state.canSend(1)) return error.LossRecoveryExampleFailed;
-    const probe_payload = (try congestion_probe.pollTx(100, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
+    const probe_payload = (try congestion_probe.pollTx(100 * ms, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
     if (congestion_probe.bytesInFlight(.application) <= congestion_probe.congestionWindow(.application)) {
         return error.LossRecoveryExampleFailed;
     }
@@ -358,14 +360,14 @@ pub fn main() !void {
     while (ce_packet_number < 30) : (ce_packet_number += 1) {
         _ = try ce_probe.recordEcnPacketSentInSpace(
             .application,
-            @as(i64, @intCast(ce_packet_number + 1)) * 10,
+            (@as(i64, @intCast(ce_packet_number + 1)) * 10) * ms,
             1200,
             .ect0,
         );
     }
     var ce_probe_buf: [1400]u8 = undefined;
-    if (try ce_probe.pollTx(350, &ce_probe_buf) != null) return error.LossRecoveryExampleFailed;
-    try ce_probe.receiveAckEcnInSpace(.application, 360, .{
+    if (try ce_probe.pollTx(350 * ms, &ce_probe_buf) != null) return error.LossRecoveryExampleFailed;
+    try ce_probe.receiveAckEcnInSpace(.application, 360 * ms, .{
         .ack = .{
             .largest_acknowledged = 0,
             .ack_delay = 0,
@@ -381,7 +383,7 @@ pub fn main() !void {
     if (ce_probe.ecnCounts(.application).ecn_ce_count != 1) return error.LossRecoveryExampleFailed;
     if (ce_probe.congestion_probe_count != 1) return error.LossRecoveryExampleFailed;
     if (ce_probe.recovery_state.canSend(1)) return error.LossRecoveryExampleFailed;
-    const ce_probe_payload = (try ce_probe.pollTx(370, &ce_probe_buf)) orelse return error.LossRecoveryExampleFailed;
+    const ce_probe_payload = (try ce_probe.pollTx(370 * ms, &ce_probe_buf)) orelse return error.LossRecoveryExampleFailed;
     if (ce_probe.congestion_probe_count != 0) return error.LossRecoveryExampleFailed;
     std.debug.print(
         "[loss] CE congestion probe bytes={d} ce_count={d} cwnd={d} inflight={d}\n",
@@ -397,10 +399,10 @@ pub fn main() !void {
         .initial_rtt_ns = 100000000,
     });
     defer rtt_sampling.deinit();
-    _ = try rtt_sampling.recordPacketSentInSpace(.application, 90, 100);
-    _ = try rtt_sampling.recordPacketSentInSpace(.application, 100, 100);
-    _ = try rtt_sampling.recordPacketSentInSpace(.application, 110, 100);
-    try rtt_sampling.receiveAckInSpace(.application, 200, .{
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 90 * ms, 100);
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 100 * ms, 100);
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 110 * ms, 100);
+    try rtt_sampling.receiveAckInSpace(.application, 200 * ms, .{
         .largest_acknowledged = 2,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -411,7 +413,7 @@ pub fn main() !void {
         .{ .gap = 0, .ack_range = 0 },
     };
     rtt_sampling.recovery_state.onPtoExpired();
-    try rtt_sampling.receiveAckInSpace(.application, 201, .{
+    try rtt_sampling.receiveAckInSpace(.application, 201 * ms, .{
         .largest_acknowledged = 2,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -429,25 +431,26 @@ pub fn main() !void {
     );
 
     var cross_space_gate = try quicz.Connection.init(allocator, .server, .{
+        .initial_congestion_window_packets = null,
         .max_datagram_size = 1200,
         .initial_rtt_ns = 100000000,
     });
     defer cross_space_gate.deinit();
     try cross_space_gate.validatePeerAddress();
-    _ = try cross_space_gate.recordPacketSentInSpace(.initial, 0, 6000);
-    _ = try cross_space_gate.recordPacketSentInSpace(.handshake, 1, 6000);
+    _ = try cross_space_gate.recordPacketSentInSpace(.initial, 0 * ms, 6000);
+    _ = try cross_space_gate.recordPacketSentInSpace(.handshake, 1 * ms, 6000);
     const blocked_total_inflight = cross_space_gate.totalBytesInFlight();
     const blocked_stream_id = try cross_space_gate.openStream();
     try cross_space_gate.sendOnStream(blocked_stream_id, "blocked", false);
     var gate_buf: [128]u8 = undefined;
-    if (try cross_space_gate.pollTx(10, &gate_buf) != null) return error.LossRecoveryExampleFailed;
-    try cross_space_gate.receiveAckInSpace(.initial, 20, .{
+    if (try cross_space_gate.pollTx(10 * ms, &gate_buf) != null) return error.LossRecoveryExampleFailed;
+    try cross_space_gate.receiveAckInSpace(.initial, 20 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
     const unblocked_total_inflight = cross_space_gate.totalBytesInFlight();
-    const gate_payload = (try cross_space_gate.pollTx(30, &gate_buf)) orelse return error.LossRecoveryExampleFailed;
+    const gate_payload = (try cross_space_gate.pollTx(30 * ms, &gate_buf)) orelse return error.LossRecoveryExampleFailed;
     var gate_decoded = try quicz.frame.decodeFrameSlice(gate_payload, allocator);
     defer quicz.frame.deinitFrame(&gate_decoded.frame, allocator);
     switch (gate_decoded.frame) {
@@ -471,28 +474,28 @@ pub fn main() !void {
         .ack_delay_exponent = 3,
     });
 
-    _ = try ack_delay.recordPacketSentInSpace(.application, 0, 100);
-    try ack_delay.receiveAckInSpace(.application, 100, .{
+    _ = try ack_delay.recordPacketSentInSpace(.application, 0 * ms, 100);
+    try ack_delay.receiveAckInSpace(.application, 100 * ms, .{
         .largest_acknowledged = 0,
         .ack_delay = 20,
         .first_ack_range = 0,
     });
-    _ = try ack_delay.recordPacketSentInSpace(.application, 100, 100);
-    try ack_delay.receiveAckInSpace(.application, 220, .{
+    _ = try ack_delay.recordPacketSentInSpace(.application, 100 * ms, 100);
+    try ack_delay.receiveAckInSpace(.application, 220 * ms, .{
         .largest_acknowledged = 1,
         .ack_delay = 20,
         .first_ack_range = 0,
     });
     if (ack_delay.smoothedRtt(.application) != 102) return error.LossRecoveryExampleFailed;
 
-    _ = try ack_delay.recordPacketSentInSpace(.application, 220, 100);
+    _ = try ack_delay.recordPacketSentInSpace(.application, 220 * ms, 100);
     try ack_delay.confirmHandshake();
-    try ack_delay.receiveAckInSpace(.application, 340, .{
+    try ack_delay.receiveAckInSpace(.application, 340 * ms, .{
         .largest_acknowledged = 2,
         .ack_delay = 20,
         .first_ack_range = 0,
     });
-    if (ack_delay.smoothedRtt(.application) != 103) return error.LossRecoveryExampleFailed;
+    if (ack_delay.smoothedRtt(.application) != 104) return error.LossRecoveryExampleFailed;
     std.debug.print(
         "[loss] post-handshake ACK delay capped smoothed_rtt_ms={d}\n",
         .{ack_delay.smoothedRtt(.application)},

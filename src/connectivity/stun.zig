@@ -30,7 +30,7 @@ const ipv6_family: u8 = 0x02;
 const cookie_bytes = [4]u8{ 0x21, 0x12, 0xa4, 0x42 };
 
 pub fn encodeBindingRequest(transaction_id: TransactionId) [header_length]u8 {
-    var message = [_]u8{0} ** header_length;
+    var message = @as([header_length]u8, @splat(0));
     writeU16(message[0..2], binding_request);
     writeU16(message[2..4], 0);
     writeU32(message[4..8], magic_cookie);
@@ -54,7 +54,7 @@ pub fn encodeBindingSuccessIpv4(
     address: [4]u8,
     port: u16,
 ) [32]u8 {
-    var message = [_]u8{0} ** 32;
+    var message = @as([32]u8, @splat(0));
     writeU16(message[0..2], binding_success);
     writeU16(message[2..4], 12);
     writeU32(message[4..8], magic_cookie);
@@ -178,7 +178,7 @@ test "decodes IPv4 XOR-MAPPED-ADDRESS from matching binding success" {
 test "decodes IPv6 XOR-MAPPED-ADDRESS" {
     const transaction_id = TransactionId{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     const address = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
-    var response = [_]u8{0} ** 44;
+    var response = @as([44]u8, @splat(0));
     writeU16(response[0..2], binding_success);
     writeU16(response[2..4], 24);
     writeU32(response[4..8], magic_cookie);
@@ -198,7 +198,7 @@ test "decodes IPv6 XOR-MAPPED-ADDRESS" {
 
 test "rejects mismatched transaction and malformed attributes" {
     const transaction_id = TransactionId{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-    var response = [_]u8{0} ** 24;
+    var response = @as([24]u8, @splat(0));
     writeU16(response[0..2], binding_success);
     writeU16(response[2..4], 4);
     writeU32(response[4..8], magic_cookie);

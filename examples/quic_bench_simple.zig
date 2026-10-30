@@ -210,7 +210,7 @@ pub fn main() !void {
         var ms_payload: [1200]u8 = undefined;
         @memset(&ms_payload, 'M');
         var ms_read: [65536]u8 = undefined;
-        var ms_queued: [num_streams]usize = .{0} ** num_streams;
+        var ms_queued: [num_streams]usize = @splat(0);
         var ms_total_recv: usize = 0;
         const ms_target = per_stream * num_streams;
 

@@ -448,11 +448,11 @@ test "legacy runtime fields callbacks and configuration retain their IPv4 shapes
         "insecure_skip_verify", "version",     "prefer_chacha20", "active_migration_disabled", "keepalive_interval_ms",
     };
     const client_types = .{ [4]u8, u16, []const u8, []const []const u8, ?*const std.crypto.Certificate.Bundle, bool, quicz.packet.Version, bool, bool, u32 };
-    const client_fields = std.meta.fields(Client.Config);
-    try std.testing.expectEqual(client_names.len, client_fields.len);
-    inline for (client_fields, 0..) |field, index| {
-        try std.testing.expectEqualStrings(client_names[index], field.name);
-        try std.testing.expect(field.type == client_types[index]);
+    const client_fields = @typeInfo(Client.Config).@"struct";
+    try std.testing.expectEqual(client_names.len, client_fields.field_names.len);
+    inline for (client_fields.field_names, client_fields.field_types, 0..) |name, field_type, index| {
+        try std.testing.expectEqualStrings(client_names[index], name);
+        try std.testing.expect(field_type == client_types[index]);
     }
     const server_names = [_][]const u8{
         "port",      "alpn",            "cert_der",        "private_key",              "private_key_algorithm",    "prefer_chacha20",              "max_idle_timeout_ms",
@@ -462,11 +462,11 @@ test "legacy runtime fields callbacks and configuration retain their IPv4 shapes
         u16,                                                []const []const u8,                                          []const u8,                                                           []const u8,                                                            quicz.tls13.PrivateKeyAlgorithm, bool, u64, ?[4]u8, usize,
         ?quicz.connectivity.punch_responder.PunchResponder, ?*quicz.connectivity.punch_responder.PunchResponderRegistry, ?*quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator, ?*const fn (quicz.connectivity.shared_punch_coordinator.Failure) void,
     };
-    const server_fields = std.meta.fields(Server.Config);
-    try std.testing.expectEqual(server_names.len, server_fields.len);
-    inline for (server_fields, 0..) |field, index| {
-        try std.testing.expectEqualStrings(server_names[index], field.name);
-        try std.testing.expect(field.type == server_types[index]);
+    const server_fields = @typeInfo(Server.Config).@"struct";
+    try std.testing.expectEqual(server_names.len, server_fields.field_names.len);
+    inline for (server_fields.field_names, server_fields.field_types, 0..) |name, field_type, index| {
+        try std.testing.expectEqualStrings(server_names[index], name);
+        try std.testing.expect(field_type == server_types[index]);
     }
     try std.testing.expect(!@hasField(Client.Config, "server_scope_id"));
     try std.testing.expect(!@hasField(Server.Config, "bind_scope_id"));
