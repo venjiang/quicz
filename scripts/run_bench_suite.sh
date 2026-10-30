@@ -32,7 +32,7 @@ cat "$LOG"
 
 echo ""
 echo "building all benchmarks (fast)..."
-if ! "${ZIG:-zig}" build -Doptimize=fast --global-cache-dir .zig-cache/global; then
+if ! ZIG_GLOBAL_CACHE_DIR="$ROOT/.zig-cache/global" "${ZIG:-zig}" build -Doptimize=fast; then
     echo "build failed" | tee -a "$LOG"
     exit 1
 fi

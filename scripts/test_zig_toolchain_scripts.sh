@@ -16,7 +16,10 @@ printf '%s %s\n' "$name" "$*" >> "$TOOLCHAIN_TEST_STATE/commands"
 case "$name:$1" in
     zig:version) echo 0.16.0 ;;
     zig17:version) echo 0.17.0 ;;
-    zig17:build) exit 77 ;;
+    zig17:build)
+        printf '%s\n' "${ZIG_GLOBAL_CACHE_DIR:-}" > "$TOOLCHAIN_TEST_STATE/global-cache"
+        exit 77
+        ;;
     docker:inspect)
         [ "$2" = quicz-linux-arm64 ] && exit 0
         [ -f "$TOOLCHAIN_TEST_STATE/container" ] || exit 1
@@ -74,6 +77,14 @@ if [ "$benchmark_status" -eq 1 ] &&
     echo 'PASS: benchmark metadata uses the selected compiler'
 else
     echo 'FAIL: benchmark metadata differs from the selected compiler' >&2
+    failures=$((failures + 1))
+fi
+
+if [ "$(cat "$fixture/state/global-cache")" = "$(CDPATH= cd -- "$fixture" && pwd)/.zig-cache/global" ] &&
+    grep -q '^zig17 build -Doptimize=fast$' "$fixture/state/commands"; then
+    echo 'PASS: benchmark cache uses the Zig 0.17 environment variable'
+else
+    echo 'FAIL: benchmark cache uses an unsupported build argument' >&2
     failures=$((failures + 1))
 fi
 
