@@ -38,7 +38,7 @@ check_live() {
 
 if [ "$SKIP_LIVE" -ne 1 ]; then
   check_live "cloudflare-quic.com" "https://cloudflare-quic.com/"
-  check_live "www.fastly.com" "https://www.fastly.com/"
+  check_live "www.litespeedtech.com" "https://www.litespeedtech.com/"
 fi
 
 # Local serve -> h3 round trip with the built-in loopback certificate.

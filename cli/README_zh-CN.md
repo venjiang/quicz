@@ -142,8 +142,9 @@ scrape 也保持快速。指标名与 `quicz probe --prometheus` 一致；多 ta
 ../scripts/cli_h3_live_test.sh --skip-live      # 只跑本地回环
 ```
 
-线上目标为 `https://cloudflare-quic.com/` 和 `https://www.fastly.com/`；
-每次必须返回 `HTTP/3 200` 且正文非空。直接命令效果相同：
+线上目标为 `https://cloudflare-quic.com/` 和 `https://www.litespeedtech.com/`。
+每次请求必须在 25 秒预算内返回 `HTTP/3 200`，且正文非空。
+两次请求均使用默认的证书校验。可以直接测试任一目标：
 
 ```bash
 ./zig-out/bin/quicz h3 https://cloudflare-quic.com/ --timeout-ms 25000

@@ -180,9 +180,9 @@ round trip:
 ../scripts/cli_h3_live_test.sh --skip-live      # local round trip only
 ```
 
-Live targets are `https://cloudflare-quic.com/` and `https://www.fastly.com/`;
-each must return `HTTP/3 200` with a non-empty body. Direct commands produce
-the same result:
+Live targets are `https://cloudflare-quic.com/` and `https://www.litespeedtech.com/`.
+Each must return `HTTP/3 200` with a non-empty body within the 25-second request budget.
+Both requests use the default certificate checks. Test either target directly:
 
 ```bash
 ./zig-out/bin/quicz h3 https://cloudflare-quic.com/ --timeout-ms 25000
