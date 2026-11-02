@@ -2086,6 +2086,22 @@ pub fn ServerForTuple(comptime Path: type) type {
                         }
                         break :blk .application;
                     };
+                    // MVP ONLY: one controlled IPv4 rebinding, with no output
+                    // queued until the first validation finishes. This is not
+                    // a production candidate/timeout/anti-amplification policy.
+                    var mvp_challenge: ?[8]u8 = null;
+                    if (Path == endpoint.Udp4Tuple and effective_data.len > 0 and effective_data[0] & 0x80 == 0) {
+                        if (self.server_ep.lifecycle.routeDatagram(path, effective_data)) |route| {
+                            if (route.path_changed) if (self.server_ep.records.records.get(route.connection_id)) |record| {
+                                const conn = record.connectionRef();
+                                if (conn.handshakeConfirmed() and conn.pendingPathChallengeCount() == 0 and conn.outstandingPathChallengeCount() == 0) {
+                                    var token: [8]u8 = undefined;
+                                    io.randomSecure(&token) catch return;
+                                    mvp_challenge = token;
+                                }
+                            };
+                        } else |_| {}
+                    }
                     const step = self.server_ep.receiveDatagramStepWithRoutePath(
                         allocator,
                         path,
@@ -2093,7 +2109,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                         effective_data,
                         &[_]u8{},
                         &[_]quic_packet.Version{ .v1, .v2 },
-                        .{ .space = space, .out = &scratch, .unpredictable_prefix = &[_]u8{}, .supported_versions = &[_]quic_packet.Version{ .v1, .v2 } },
+                        .{ .space = space, .out = &scratch, .unpredictable_prefix = &[_]u8{}, .supported_versions = &[_]quic_packet.Version{ .v1, .v2 }, .path_challenge_data = mvp_challenge },
                         &scratch,
                         &[_]u8{},
                         &initial_out,
@@ -2108,8 +2124,19 @@ pub fn ServerForTuple(comptime Path: type) type {
                     switch (step.process) {
                         .routed => |routed| switch (routed) {
                             .installed_key => |ik| {
+                                // Observe only the real lifecycle commit. The
+                                // harness never sets a route or forges a response.
+                                if (ik.feed) |feed| if (feed.updated_route) |updated| {
+                                    const record = self.server_ep.records.records.get(updated.connection_id) orelse @panic("MVP missing record");
+                                    const source_cid = record.sourceConnectionId();
+                                    const cid_match = std.mem.eql(u8, updated.destination_connection_id.asSlice(), source_cid);
+                                    if (!cid_match) @panic("MVP input CID differs from async source CID");
+                                    const committed = self.server_ep.lifecycle.currentRoutePath(source_cid) catch @panic("MVP missing committed path");
+                                    std.debug.print("MVP natural_commit connection={d} remote_port={d} input_cid_matches_record={any}\n", .{ updated.connection_id, committed.remote.port, cid_match });
+                                };
                                 for (installed_out[0..ik.drain.datagrams_written]) |o| {
-                                    self.socket.send(io, &dest, o.datagram) catch {};
+                                    var output_address = Family.toIp(o.path.remote);
+                                    self.socket.send(io, &output_address, o.datagram) catch {};
                                     allocator.free(o.datagram);
                                 }
                                 // Deliver received stream data to per-connection

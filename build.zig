@@ -36,6 +36,26 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Disposable Mons runtime probe. The override preserves a pristine baseline.
+    const mvp_source = b.option([]const u8, "mvp-quicz-source", "Local baseline source for the disposable Mons NAT probe");
+    const mvp_quicz = b.createModule(.{
+        .root_source_file = if (mvp_source) |root| .{ .cwd_relative = b.pathJoin(&.{ root, "src/lib.zig" }) } else b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const mons_nat_mvp = b.addExecutable(.{
+        .name = "mons-nat-mvp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mons_nat_mvp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "quicz", .module = mvp_quicz }},
+        }),
+    });
+    b.step("build-mons-nat-mvp", "Build the disposable Mons NAT rebinding probe")
+        .dependOn(&b.addInstallArtifact(mons_nat_mvp, .{}).step);
+
     // Benchmark executables must measure production-like throughput, so force
     // ReleaseFast instead of inheriting the default (Debug) optimize. Without
     // this, `zig build bench-suite` reports misleadingly low numbers (~50 MB/s
