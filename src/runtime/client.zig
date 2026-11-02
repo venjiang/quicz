@@ -215,6 +215,34 @@ pub const Client = ClientForTuple(endpoint.Udp4Tuple);
 /// Native IPv6 client with an explicitly bound source socket.
 pub const IPv6Client = ClientForTuple(endpoint.Udp6Tuple);
 
+test "client receive releases state after peer close" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    const alpn = [_][]const u8{"close-lock-test"};
+    var client = Client.initWithSocket(allocator, io, socket, .{
+        .server_port = 9,
+        .server_name = "localhost",
+        .alpn = &alpn,
+    }) catch |err| {
+        socket.close(io);
+        return err;
+    };
+    defer client.deinit();
+    @atomicStore(bool, &client.conn_closing_or_closed, true, .release);
+    var buffer: [1]u8 = undefined;
+    const result = client.receive(0, &buffer);
+    const lock_available = client.state_mutex.tryLock();
+    // This thread owns either the test acquisition or the leaked receive lock.
+    // Release it before assertions so a regression cannot stall cleanup.
+    client.state_mutex.unlock();
+    try std.testing.expectError(error.ConnectionClosed, result);
+    try std.testing.expect(lock_available);
+}
+
 /// Build the shared streaming client for one UDP address family.
 pub fn ClientForTuple(comptime Path: type) type {
     return ClientForTupleWithDatagramLimit(Path, if (Path == endpoint.Udp6Tuple) 1200 else @intCast(send_mtu));
@@ -717,6 +745,7 @@ pub fn ClientForTupleWithDatagramLimit(comptime Path: type, comptime datagram_li
                 // No data and no EOF: a closing/closed connection will never
                 // deliver more on this stream.
                 if (@atomicLoad(bool, &self.conn_closing_or_closed, .acquire)) {
+                    self.state_mutex.unlock();
                     return error.ConnectionClosed;
                 }
                 self.state_mutex.unlock();
