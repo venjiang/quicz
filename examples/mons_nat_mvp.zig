@@ -2,7 +2,7 @@
 const std = @import("std");
 const quicz = @import("quicz");
 const Io = std.Io;
-const Mode = enum { control, rebind, loss, blackhole, ssh_control, ssh_rebind, ssh_blackhole };
+const Mode = enum { control, rebind, loss, blackhole, ssh_control, ssh_rebind, ssh_blackhole, device };
 
 fn bind(io: Io) !Io.net.Socket {
     var address = Io.net.IpAddress{ .ip4 = .loopback(0) };
@@ -30,8 +30,8 @@ const Proxy = struct {
     cid_checks: usize = 0,
     cid_mismatch: bool = false,
 
-    fn init(io: Io, host: Io.net.IpAddress) !Proxy {
-        const front = try bind(io);
+    fn init(io: Io, host: Io.net.IpAddress, front_address: Io.net.IpAddress) !Proxy {
+        const front = try front_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
         errdefer front.close(io);
         const old = try bind(io);
         errdefer old.close(io);
@@ -62,6 +62,11 @@ const Proxy = struct {
         var buffer: [8192]u8 = undefined;
         while (true) {
             const message = (try self.receive(self.front, &buffer)) orelse continue;
+            if (std.mem.eql(u8, message.data, "MVP_PERMISSION_CHECK")) {
+                std.debug.print("MVP permission_check_received\n", .{});
+                try self.front.send(self.io, &message.from, "MVP_PERMISSION_READY");
+                continue;
+            }
             self.lock();
             self.client = message.from;
             const switched = self.switched;
@@ -265,13 +270,68 @@ fn runSsh(allocator: std.mem.Allocator, io: Io, client: *quicz.runtime.client.Cl
     try controller.await(io);
 }
 
+fn runDevice(allocator: std.mem.Allocator, io: Io, server: *quicz.runtime.server.Server, proxy: *Proxy, certificate: []const u8, output: []const u8) !void {
+    var secret: [16]u8 = undefined;
+    try io.randomSecure(&secret);
+    const token = std.fmt.bytesToHex(secret, .lower);
+    const address = proxy.front.address.ip4;
+    const configuration = try std.fmt.allocPrint(
+        allocator,
+        "{{\"serverIPv4\":[{d},{d},{d},{d}],\"serverPort\":{d},\"serverName\":\"{s}\",\"alpn\":\"mons-nat-mvp\",\"token\":\"{s}\",\"scenario\":\"controlled-nat-port-change\"}}\n",
+        .{ address.bytes[0], address.bytes[1], address.bytes[2], address.bytes[3], address.port, quicz.connectivity.ephemeral_identity.server_name, token },
+    );
+    defer allocator.free(configuration);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/offer.json", .{output});
+    defer allocator.free(config_path);
+    const config_file = try Io.Dir.createFileAbsolute(io, config_path, .{});
+    defer config_file.close(io);
+    try config_file.writeStreamingAll(io, configuration);
+    const certificate_path = try std.fmt.allocPrint(allocator, "{s}/server.der", .{output});
+    defer allocator.free(certificate_path);
+    const certificate_file = try Io.Dir.createFileAbsolute(io, certificate_path, .{});
+    defer certificate_file.close(io);
+    try certificate_file.writeStreamingAll(io, certificate);
+    std.debug.print("MVP device_offer_ready scenario=controlled_nat_port_change front_port={d} old_port={d} new_port={d}\n", .{
+        address.port, proxy.old.address.ip4.port, proxy.replacement.address.ip4.port,
+    });
+    var connection = try server.accept();
+    var stream = try connection.acceptStream();
+    const stages = [_][]const u8{ "ready", "rebind", "after", "finish" };
+    const replies = [_][]const u8{ "control", "host-push", "done" };
+    for (stages, 0..) |stage, index| {
+        const expected = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ token, stage });
+        defer allocator.free(expected);
+        try receiveServer(&stream, expected);
+        std.debug.print("MVP device_input stage={s} connection={d} stream={d}\n", .{ stage, connection.id, stream.id });
+        if (index == 1) {
+            try io.sleep(.fromMilliseconds(500), .awake);
+            proxy.beginPush(false);
+            std.debug.print("MVP device_host_push_begin\n", .{});
+        }
+        if (index < replies.len) {
+            const reply = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ token, replies[index] });
+            defer allocator.free(reply);
+            try stream.send(reply, false);
+            try stream.flush();
+        }
+        if (index == 0) {
+            // This controlled probe uses a quiet interval, not a product timer.
+            try io.sleep(.fromMilliseconds(1000), .awake);
+            proxy.switchPort(false);
+            std.debug.print("MVP device_nat_switched port=A_to_B\n", .{});
+        }
+    }
+    try proxy.summary();
+    std.debug.print("MVP DEVICE PASS accepts=1 connections=1 streams=1 scenario=controlled_nat_port_change\n", .{});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     const arguments = try init.minimal.args.toSlice(allocator);
     if (arguments.len != 2 and arguments.len != 4) return error.ExpectedMode;
     const mode = std.meta.stringToEnum(Mode, arguments[1]) orelse return error.ExpectedMode;
     const ssh_mode = mode == .ssh_control or mode == .ssh_rebind or mode == .ssh_blackhole;
-    if (ssh_mode != (arguments.len == 4)) return error.ExpectedMode;
+    if ((ssh_mode or mode == .device) != (arguments.len == 4)) return error.ExpectedMode;
     var threaded = Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -294,7 +354,9 @@ pub fn main(init: std.process.Init) !void {
     });
     defer server.deinit();
     try server.start();
-    var proxy = try Proxy.init(io, .{ .ip4 = .loopback(server.localPort()) });
+    const front_address = if (mode == .device) try Io.net.IpAddress.parseIp4(arguments[2], 0) else Io.net.IpAddress{ .ip4 = .loopback(0) };
+    if (mode == .device and std.mem.allEqual(u8, &front_address.ip4.bytes, 0)) return error.ExplicitFrontAddressRequired;
+    var proxy = try Proxy.init(io, .{ .ip4 = .loopback(server.localPort()) }, front_address);
     defer proxy.deinit();
     var from_client = try io.concurrent(Proxy.forwardClient, .{&proxy});
     defer from_client.cancel(io) catch {};
@@ -302,6 +364,10 @@ pub fn main(init: std.process.Init) !void {
     defer from_old.cancel(io) catch {};
     var from_replacement = try io.concurrent(Proxy.forwardHost, .{ &proxy, true });
     defer from_replacement.cancel(io) catch {};
+    if (mode == .device) {
+        try runDevice(allocator, io, &server, &proxy, identity.certificate_der, arguments[3]);
+        return;
+    }
     var client = try quicz.runtime.client.Client.init(allocator, io, .{
         .server_port = proxy.front.address.ip4.port,
         .server_name = quicz.connectivity.ephemeral_identity.server_name,

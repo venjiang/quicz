@@ -117,4 +117,64 @@ seven-case SSH matrices also pass after this correction.
 Corrected-run evidence is in `/private/tmp/mons-mvp-assertions.LJHUQ3/`,
 `/private/tmp/mons-nat-mvp.3etMNv/` and
 `/private/tmp/mons-ssh-nat-mvp.GDhHVh/`. Two independent reviews confirmed
-that the finding is closed. The runtime experiment remains unchanged.
+that the finding is closed. That gate correction did not change the runtime.
+
+## Physical iPhone prerequisite
+
+The SSH gate and assertion correction are committed as `08dc32cd`.
+The next gate uses an isolated NAT Probe App on the actual iPhone 14 Pro.
+It validates the mobile C ABI through the controlled LAN proxy. It does
+not change Wi-Fi or cellular service, and it does not replace Mons.
+
+A native close preflight found an existing missing unlock when receive
+returns `ConnectionClosed`. A normal reply released the lock. Remote close
+returned the error while retaining the lock. A focused Zig test reproduced
+the defect. The experiment now releases that lock before the same error
+return. The same native preflight then passes both cases. Its source and
+original failing evidence remain in `/private/tmp/mons-mobile-close-preflight.XOejvW/`.
+
+The App links a separately built archive containing this fix. Its report
+records the full local source identity. The original Mons archive and
+dependency pin are unchanged. An existing wildcard development profile
+signs the App without creating Apple credentials or online configuration.
+The existing QuiczValidation App is preserved.
+
+The first device attempt expired before any QUIC handshake. It is not a
+passing run and does not establish the reason for the missing connection.
+After local network authorization, a fresh bounded attempt passes on
+iPhone 14 Pro / iOS 18.7.2:
+
+- Native create, connect and open each occur once. Stream 0 remains valid.
+- The bound client port stays unchanged. Every payload matches this run's token.
+- The Host naturally commits to B before the new Host-push window.
+- The Host receives the later input and final acknowledgment on that stream.
+- The retired A packet count is zero during the Host-push window.
+- Native close and destroy return before the App writes its passing result.
+
+Both sides' results and the verified summary are in
+`/private/tmp/mons-ios-nat-mvp.JTyW1O/retry-1/`. The independent App was
+removed after collection. Both test Host processes exited. Mons and the
+pre-existing QuiczValidation App retain their original installation metadata.
+
+This is one controlled positive device run. It does not validate iPhone
+interface roaming, IPv4 address changes, IPv6, WSS handover, NIOSSH, a real
+terminal or failure cleanup on iOS. Actual Wi-Fi/cellular handover still
+needs a stable public UDP test endpoint and a separate execution window.
+
+After the native unlock and device entry were added, the ten assertion
+checks, ten NAT cases and seven real SSH cases pass again. The existing
+`zig build test-mobile-abi` target also exits successfully. Its unrelated-CA
+tests deliberately log handshake rejection warnings. Formatting, shell
+syntax and diff checks pass. Independent code/evidence review found no
+blocking issue for this limited gate. These third-gate changes are not committed.
+
+The device builder requires explicit, nonempty `MONS_QUICZ_FRAMEWORK` and
+`MONS_QUICZ_EXPECTED_SOURCE` values. Use the isolated archive and the complete
+source identity reported by its build. The builder has no vendor fallback.
+It checks the full marker before packaging or signing.
+
+Six source-input cases extend the shell regression to sixteen checks.
+Before the correction, four missing/empty cases incorrectly passed.
+Afterward, all sixteen checks pass. The complete builder rejects missing
+inputs before creating its output. An explicit isolated-source invocation
+still builds and signs successfully without installing another App.

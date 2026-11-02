@@ -11,6 +11,13 @@ awk '/^run_case .* blackhole .* timeout$/ {copy=1; next} copy {print} copy && /^
     "$repository/scripts/run_mons_nat_mvp.sh" > "$result/nat-blackhole.sh"
 awk '/^[[:space:]]*\[\[ \$status != 0 && / {copy=1} copy && /^    fi$/ {exit} copy {print}' \
     "$repository/scripts/run_mons_ssh_nat_mvp.sh" > "$result/ssh-negative.sh"
+awk '/^app=/ {exit} {print}' "$repository/scripts/build_mons_ios_nat_probe.sh" > "$result/builder-prefix.sh"
+mkdir -p "$result/layout/quicz/scripts" "$result/layout/mons/vendor/quicz/QuiczMobile.xcframework"
+printf '%s\n' "$result/layout/quicz/scripts/build_mons_ios_nat_probe.sh" > "$result/builder-path.txt"
+printf '%s\n' "$result/layout/mons/vendor/quicz/QuiczMobile.xcframework" > "$result/vendor-path.txt"
+printf '7beeffa2728b77165be7f99ec3a33a79ec57ab89\n' > "$result/layout/mons/vendor/quicz/QuiczMobile.xcframework/MonsSourceRevision.txt"
+mkdir "$result/framework"
+printf 'local-git:review:sha256:isolated:optimize:ReleaseSafe\n' > "$result/framework/MonsSourceRevision.txt"
 
 cat > "$result/fake-timeout.sh" <<'EOF'
 #!/bin/bash
@@ -44,6 +51,28 @@ ssh_negative() {
 }
 ssh_negative
 EOF
+cat > "$result/builder-case.sh" <<'EOF'
+set -euo pipefail
+unset MONS_QUICZ_FRAMEWORK MONS_QUICZ_EXPECTED_SOURCE
+case "$MVP_ASSERT_MODE" in
+    missing-both) ;;
+    missing-framework)
+        export MONS_QUICZ_EXPECTED_SOURCE=7beeffa2728b77165be7f99ec3a33a79ec57ab89 ;;
+    missing-identity)
+        export MONS_QUICZ_FRAMEWORK="$(cat "$MVP_ASSERT_ROOT/vendor-path.txt")" ;;
+    empty-both)
+        export MONS_QUICZ_FRAMEWORK='' MONS_QUICZ_EXPECTED_SOURCE='' ;;
+    matching|mismatched)
+        export MONS_QUICZ_FRAMEWORK="$MVP_ASSERT_ROOT/framework"
+        export MONS_QUICZ_EXPECTED_SOURCE="$(cat "$MONS_QUICZ_FRAMEWORK/MonsSourceRevision.txt")"
+        if [[ $MVP_ASSERT_MODE == mismatched ]]; then
+            MONS_QUICZ_EXPECTED_SOURCE=unexpected
+        fi ;;
+    *) exit 2 ;;
+esac
+prefix=$(cat "$MVP_ASSERT_ROOT/builder-prefix.sh")
+/bin/bash -c "$prefix" "$(cat "$MVP_ASSERT_ROOT/builder-path.txt")" unused-offer unused-output unused-profile
+EOF
 
 checks=0
 failures=0
@@ -73,5 +102,11 @@ check reject ssh-verified ssh-case.sh 'MVP SSH transport_verified'
 check reject ssh-commit ssh-case.sh 'MVP natural_commit connection=1'
 check reject ssh-combined ssh-case.sh $'MONS_PUSH_review:123:/dev/ttys001\nMVP SSH transport_verified\nMVP natural_commit connection=1'
 check accept ssh-rebind-clean ssh-case.sh '' ssh_rebind
+check reject builder-missing-both builder-case.sh '' missing-both
+check reject builder-missing-framework builder-case.sh '' missing-framework
+check reject builder-missing-identity builder-case.sh '' missing-identity
+check reject builder-empty-both builder-case.sh '' empty-both
+check reject builder-mismatched builder-case.sh '' mismatched
+check accept builder-matching builder-case.sh '' matching
 printf 'Assertion regression: checks=%s failures=%s\n' "$checks" "$failures"
 [[ $failures == 0 ]]
