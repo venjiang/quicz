@@ -117,14 +117,23 @@ The phone used `pdp_ip0` with Wi-Fi disabled. Both peers used explicit global IP
 Each connection passed authenticated bidirectional probes, CA and hostname checks, 100 exact 64-byte echoes, FIN, same-socket checks, close, and destroy.
 All three app exit codes were zero. The tests used the existing IPv6 C ABI and runtime without protocol changes.
 
-This result does not prove IPv4 NAT traversal. Three effective IPv4 cellular tests still reported five probes per peer and zero received datagrams.
-The IPv4 failure remains unexplained. IPv6 candidates came from system interfaces, so these tests do not cover public IPv6 STUN services.
+This result does not prove universal IPv4 NAT traversal. Phone-to-Mac IPv4 double-NAT punching still fails with zero received datagrams.
+Dedicated-port capture recorded five host probes per attempt on outbound `en0`, with no observed peer replies.
+Two phone A-B-A STUN comparisons showed different public addresses and ports across destinations on the same socket, then restored the original mapping.
+These observations show that a STUN endpoint cannot be assumed valid toward every peer.
+They do not identify the exact dropping middlebox or filtering behavior.
+A controlled public IPv4 peer later passed two cellular connections, each with verified certificates, 100 exact 64-byte echoes, FIN, and unchanged client socket.
+Both phone and server processes exited zero. The peer observed different source ports from the phone's STUN candidates in both runs.
+The fixture learned the source only after an authenticated probe, then completed bidirectional proof before starting the existing QUIC runtime.
+SSH carried control and logs, not application payload. The cellular-to-public IPv4 path passed these tests, but the phone-to-Mac double-NAT path did not.
+The listener exited after testing. Cleanup removed the temporary binary and empty directory.
+IPv6 candidates came from system interfaces, so these tests do not cover public IPv6 STUN services.
 Background operation, network changes, and long-duration stability also remain outside this result.
 See the [current validation record](../../backlog.md) for evidence and limits.
 
 ## Not implemented or not validated
 
-- IPv4 cellular and public-NAT hole punching has not passed acceptance.
+- Phone-to-Mac IPv4 double-NAT punching has not passed acceptance.
 - Relay-mediated candidate exchange remains unimplemented.
 - Rendezvous and relay datagram protocols.
 - Physical-iPhone background operation, network changes, and long-duration operation remain unvalidated.
