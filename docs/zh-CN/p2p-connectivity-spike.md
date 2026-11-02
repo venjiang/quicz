@@ -64,15 +64,26 @@ zig build run-mobile-latency-server -- 4433 passive-punch
 wildcard socket的bound endpoint可能返回`0.0.0.0`。平台候选收集必须把bound port与可达接口地址组合，
 不得向peer发布wildcard地址。
 
-## 明确尚未实现
+## 原生 IPv6 蜂窝验收
 
-- 真实STUN服务与蜂窝网络验证。
-- Relay候选交换与真实NAT打洞验证。
+2026-11-02，协议源码 `148acc7e` 通过独立实体 iPhone 与 Mac 的三次原生 IPv6 蜂窝 P2P 验收。
+手机实际使用 `pdp_ip0`，Wi-Fi 关闭。双方使用明确的全局 IPv6 地址，不使用应用数据 Relay。
+每次均通过双向认证 probe、CA 和主机名校验、100 轮 64 字节精确回显、FIN、同 socket 检查及 close/destroy。
+三次 App 退出码均为 0。验收复用已有 IPv6 C ABI 和 runtime，没有修改协议实现。
+
+该结果不代表 IPv4 NAT 已修复。IPv4 蜂窝打洞的三次有效测试仍为双方各发送 5 次 probe、接收计数为 0，根因尚未定位。
+本轮 IPv6 候选来自系统接口，不覆盖公网 IPv6 STUN、前后台、网络切换或长时稳定性。
+具体边界和证据见[当前验收记录](../../backlog.md)。
+
+## 尚未实现或未完成验收
+
+- IPv4 蜂窝和跨公网 NAT 打洞尚未通过验收。
+- Relay 候选交换尚未实现。
 - Rendezvous和Relay datagram协议。
-- 实体iPhone生命周期与真实蜂窝网络验证。
+- 实体 iPhone 前后台、网络切换和长时运行尚未完成验收。
 - 活动应用stream在Relay与Direct路径之间无感迁移。
 
-能力位不得提前声明这些未完成能力。
+能力位仅说明相应 API 已实现，不能替代真实网络验收，也不保证某个候选可达。尚未实现的协议不得提前声明。
 
 ## 验收顺序
 

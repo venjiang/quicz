@@ -110,16 +110,28 @@ The bound-endpoint ABI can return `0.0.0.0` for a wildcard socket. Platform
 candidate gathering must combine the bound port with reachable interface
 addresses; it must never advertise the wildcard address to a peer.
 
-## Deliberately not implemented yet
+## Native IPv6 cellular validation
 
-- Real STUN service and cellular-network validation.
-- Relay-mediated candidate exchange and real-NAT hole-punch validation.
+On 2026-11-02, protocol revision `148acc7e` passed three native IPv6 cellular P2P tests between an independent physical-iPhone app and a Mac.
+The phone used `pdp_ip0` with Wi-Fi disabled. Both peers used explicit global IPv6 addresses without an application-data relay.
+Each connection passed authenticated bidirectional probes, CA and hostname checks, 100 exact 64-byte echoes, FIN, same-socket checks, close, and destroy.
+All three app exit codes were zero. The tests used the existing IPv6 C ABI and runtime without protocol changes.
+
+This result does not prove IPv4 NAT traversal. Three effective IPv4 cellular tests still reported five probes per peer and zero received datagrams.
+The IPv4 failure remains unexplained. IPv6 candidates came from system interfaces, so these tests do not cover public IPv6 STUN services.
+Background operation, network changes, and long-duration stability also remain outside this result.
+See the [current validation record](../../backlog.md) for evidence and limits.
+
+## Not implemented or not validated
+
+- IPv4 cellular and public-NAT hole punching has not passed acceptance.
+- Relay-mediated candidate exchange remains unimplemented.
 - Rendezvous and relay datagram protocols.
-- Physical-iPhone lifecycle and real cellular-network validation.
+- Physical-iPhone background operation, network changes, and long-duration operation remain unvalidated.
 - Seamless migration of an established application stream between relay and
   direct paths.
 
-The capability mask must not advertise these unfinished features.
+Capability bits identify implemented APIs. They do not prove candidate reachability or real-network acceptance. Do not advertise unimplemented protocols.
 
 ## Acceptance sequence
 

@@ -13,8 +13,9 @@
 下方首次核验的失败清单仅保留历史证据。
 协议源码提交 `668570e4` 的三个远端 CI 作业均通过。
 2026-10-30，`148acc7e` 已通过实体 iPhone 的 Wi-Fi 局域网验收。
-蜂窝网络与跨公网 NAT 打洞验收在 2026-11-02 恢复执行，认证 UDP 打洞未通过，QUIC 路径仍未验收。
-该项继续独立于本轮迁移的必过项，不计为已通过。
+2026-11-02 的原生 IPv6 蜂窝 P2P 验收为 3/3，认证打洞、证书校验、回显和 FIN 均通过。
+IPv4 蜂窝／跨公网 NAT 的认证 UDP 打洞仍未通过，其 QUIC 路径仍未验收。
+IPv4 待办继续独立于本轮迁移的必过项，不计为已通过。
 详细结果和后续验收条件见下方记录。
 
 迁移前基线：提交 `7beeffa2728b77165be7f99ec3a33a79ec57ab89` 使用 Zig 0.16.0。
@@ -140,14 +141,17 @@ CI 新增 CLI 单元测试步骤。修复提交的 CI 结果单独核对，不�
 
 2026-11-02，用户恢复验收。被测协议源码仍为 `148acc7e`，任务分支仅增加了文档提交。
 独立 App 确认默认路径为 `cellular=true`、`wifi=false`，设备控制通道为 USB。
+
+#### IPv4 蜂窝与跨公网 NAT
+
 手机和 Mac 分别获取了不同公网地址的 STUN 候选。
 三次有效打洞测试使用新 socket 和短期认证参数，均得到以下结果：
 
 - 双方各报告发送 5 次 probe，诊断字段 `datagrams_received` 均为 0。
 - 双方均未确认 peer probe 或本端 probe 的 ACK。手机返回 `QUICZ_MOBILE_PUNCH_FAILED`，outcome 为重试耗尽。
-- 测试未进入 QUIC/TLS 握手，证书校验、回显、FIN 和关闭后的回收仍未完成蜂窝路径验收。
+- 测试未进入 QUIC/TLS 握手，证书校验、回显、FIN 和关闭后的回收仍未完成 IPv4 蜂窝路径验收。
 
-因此，当前状态为**已测试、认证 UDP 打洞未通过，丢包根因尚未定位**。
+因此，IPv4 当前状态为**已测试、认证 UDP 打洞未通过，丢包根因尚未定位**。
 这些是应用层诊断计数，不能替代网络报头抓取，也不能据此认定 NAT 类型、运营商过滤或 Zig 版本回归。
 Mac 应用防火墙处于关闭状态，发往手机公网候选的路由使用 `en0`。
 主机同一 socket 依次查询两个 STUN 服务并返回首个服务时，三次公网地址和端口一致。
@@ -166,11 +170,33 @@ Mac 应用防火墙处于关闭状态，发往手机公网候选的路由使用 
 当前进程没有 BPF 读取权限，也没有可用的免交互管理员授权，因此本轮未执行抓包。
 本轮不改变系统权限，也不部署外部服务。STUN 成功和测试程序构建成功仍不能计为打洞验收通过。
 
-后续验收仍应满足以下条件：
+#### IPv6 原生蜂窝 P2P
+
+首轮恢复验收的临时程序只调用 IPv4 C ABI，未覆盖已有 IPv6 能力。
+该覆盖遗漏不能作为 IPv6 P2P 失败或 Zig 0.17 回归的证据。
+补充验收复用已有 `IPv6Server`、`quicz_mobile_client_create_ipv6()`
+和 `quicz_mobile_client_punch_ipv6_with_diagnostics()`，没有修改核心实现。
+
+实体 iPhone 通过 `pdp_ip0` 蜂窝接口选择全局 IPv6 地址，Mac 绑定其真实全局 IPv6 地址。
+双方直接交换明确的 IPv6 候选，控制消息通过 USB 传递，不使用应用数据 Relay。
+三次独立连接使用新 socket 和短期认证参数，均通过以下检查：
+
+- 认证 UDP proof 的 outcome 为 validated，`peer_probe=1`、`local_ack=1`。
+- QUIC/TLS 保留 CA 和 `localhost` 主机名校验。
+- 每次完成 100 轮、每轮 64 字节的精确回显，并收到 FIN。
+- 手机在 probe 和 QUIC 完成前后的 IPv6 地址、UDP 端口保持不变，close 和 destroy 正常返回。
+- 三次 App 退出码均为 0，服务端分别确认 6400 字节回显和 FIN。
+
+因此，当前源码的**原生 IPv6 蜂窝 P2P 验收为 3/3 通过**。
+该结果覆盖本次明确地址的跨网 IPv6 路径，不代表 IPv4 NAT 已修复，也不保证所有运营商或网络均可直连。
+本轮 IPv6 候选来自系统接口，不调用 IPv6 STUN。IPv6 STUN 公网服务、前后台、网络切换和长时稳定性不在本轮验收范围。
+
+#### 后续验收边界
 
 - 手机默认数据路径为蜂窝网络，双方位于不同公网网络。若通过 USB 控制设备，USB 只用于启动和读取日志。
 - 双方使用短期 key 和 attempt ID 完成认证 UDP probe/ack，并分别确认收到 peer probe 与本端 probe 的 ACK。
-- STUN、打洞和后续 QUIC 使用各自同一 UDP socket，保留证书和主机名校验，不使用应用数据 Relay。
+- IPv4 的 STUN、打洞和后续 QUIC 使用各自同一 UDP socket。明确 IPv6 候选的 probe 和 QUIC 也须保持同一 socket。
+- 两个地址族均保留证书和主机名校验，不使用应用数据 Relay。
 - 双向精确回显、FIN 和关闭检查均通过，并保留路径、诊断计数和进程退出证据。STUN 成功不等于打洞成功。
 
 本机证据位于 `/private/tmp/quicz-realnet-148acc7e-20261030/`。
@@ -181,7 +207,9 @@ Mac 应用防火墙处于关闭状态，发往手机公网候选的路由使用 
 `cellular-public-20261102-v4-mapping-receipt.json` 至 `cellular-public-20261102-v6-control-receipt.json`
 保存手机 STUN 前置失败，不计为完成打洞测试。
 `host-mapping-pipe-20261102.json` 保存完整的主机三次 STUN 映射对照。
-后续可用 `python3 /private/tmp/quicz-realnet-148acc7e-20261030/run_cellular.py <新场景名>` 复查，避免覆盖旧记录。
+`cellular-ipv6-20261102-v1-receipt.json` 至 `cellular-ipv6-20261102-v3-receipt.json` 保存三次 IPv6 成功结果。
+后续 IPv4 复查可用 `python3 /private/tmp/quicz-realnet-148acc7e-20261030/run_cellular.py <新场景名>`，避免覆盖旧记录。
+IPv6 复查须先重新选择 Mac 的有效全局地址，再设置 `QUICZ_FAMILY=ipv6` 和 `QUICZ_IPV6_HOST=<当前地址>` 运行同一控制程序。
 临时目录可能被系统清理，后续应以本节的源码版本和验收条件重建测试，不依赖旧 NAT 映射或旧签名有效期。
 
 ### 迁移范围
