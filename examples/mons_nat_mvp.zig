@@ -2,7 +2,7 @@
 const std = @import("std");
 const quicz = @import("quicz");
 const Io = std.Io;
-const Mode = enum { control, rebind, loss, blackhole };
+const Mode = enum { control, rebind, loss, blackhole, ssh_control, ssh_rebind, ssh_blackhole };
 
 fn bind(io: Io) !Io.net.Socket {
     var address = Io.net.IpAddress{ .ip4 = .loopback(0) };
@@ -170,11 +170,108 @@ fn receiveServer(stream: *quicz.runtime.server.Stream, expected: []const u8) !vo
     if (!std.mem.eql(u8, buffer[0..received], expected)) return error.PayloadMismatch;
 }
 
+fn stdinToClient(io: Io, client: *quicz.runtime.client.Client, stream_id: u64) !void {
+    var buffer: [16384]u8 = undefined;
+    while (true) {
+        const count = try Io.File.stdin().readStreaming(io, &.{&buffer});
+        if (count == 0) break;
+        try client.sendOnStream(stream_id, buffer[0..count], false);
+    }
+    try client.sendOnStream(stream_id, "", true);
+}
+
+fn clientToStdout(io: Io, client: *quicz.runtime.client.Client, stream_id: u64) !void {
+    var buffer: [16384]u8 = undefined;
+    while (true) {
+        const count = try client.receive(stream_id, &buffer);
+        if (count == 0) return;
+        try Io.File.stdout().writeStreamingAll(io, buffer[0..count]);
+    }
+}
+
+fn streamToSsh(io: Io, stream: *quicz.runtime.server.Stream, tcp: Io.net.Stream) !void {
+    var writer = tcp.writer(io, &.{});
+    var buffer: [16384]u8 = undefined;
+    while (true) {
+        const count = try stream.receive(&buffer);
+        if (count == 0) break;
+        try writer.interface.writeAll(buffer[0..count]);
+        try writer.interface.flush();
+    }
+    try tcp.shutdown(io, .send);
+}
+
+fn sshToStream(io: Io, stream: *quicz.runtime.server.Stream, tcp: Io.net.Stream) !void {
+    var reader = tcp.reader(io, &.{});
+    var buffer: [16384]u8 = undefined;
+    var slices = [_][]u8{&buffer};
+    while (true) {
+        const count = reader.interface.readVec(&slices) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        try stream.send(buffer[0..count], false);
+        try stream.flush();
+    }
+    try stream.send("", true);
+    try stream.flush();
+}
+
+fn waitMarker(io: Io, path: []const u8) !void {
+    while (true) {
+        Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try io.sleep(.fromMilliseconds(25), .awake);
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn controlSsh(io: Io, proxy: *Proxy, mode: Mode, trigger: []const u8, verified: []const u8) !void {
+    try waitMarker(io, trigger);
+    if (mode != .ssh_control) proxy.switchPort(mode == .ssh_blackhole);
+    std.debug.print("MVP SSH path_ready mode={s}\n", .{@tagName(mode)});
+    try io.sleep(.fromMilliseconds(500), .awake);
+    proxy.beginPush(false);
+    std.debug.print("MVP SSH push_window_begin\n", .{});
+    try waitMarker(io, verified);
+    try proxy.summary();
+    std.debug.print("MVP SSH transport_verified client_objects=1 connections=1 streams=1 backend_connections=1\n", .{});
+}
+
+fn runSsh(allocator: std.mem.Allocator, io: Io, client: *quicz.runtime.client.Client, stream_id: u64, server: *quicz.runtime.server.Server, proxy: *Proxy, mode: Mode, port: u16, trigger: []const u8) !void {
+    const verified = try std.fmt.allocPrint(allocator, "{s}.verify", .{trigger});
+    defer allocator.free(verified);
+    var input = try io.concurrent(stdinToClient, .{ io, client, stream_id });
+    defer input.cancel(io) catch {};
+    var connection = try server.accept();
+    var stream = try connection.acceptStream();
+    const address = Io.net.IpAddress{ .ip4 = .loopback(port) };
+    const tcp = try address.connect(io, .{ .mode = .stream });
+    defer tcp.close(io);
+    std.debug.print("MVP SSH begin tls=verified client_port={d} connection={d} stream={d} old_port={d} new_port={d}\n", .{
+        client.localPort(), connection.id, stream_id, proxy.old.address.ip4.port, proxy.replacement.address.ip4.port,
+    });
+    var outgoing = try io.concurrent(streamToSsh, .{ io, &stream, tcp });
+    defer outgoing.cancel(io) catch {};
+    var incoming = try io.concurrent(sshToStream, .{ io, &stream, tcp });
+    defer incoming.cancel(io) catch {};
+    var controller = try io.concurrent(controlSsh, .{ io, proxy, mode, trigger, verified });
+    defer controller.cancel(io) catch {};
+    try clientToStdout(io, client, stream_id);
+    try controller.await(io);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     const arguments = try init.minimal.args.toSlice(allocator);
-    if (arguments.len != 2) return error.ExpectedMode;
+    if (arguments.len != 2 and arguments.len != 4) return error.ExpectedMode;
     const mode = std.meta.stringToEnum(Mode, arguments[1]) orelse return error.ExpectedMode;
+    const ssh_mode = mode == .ssh_control or mode == .ssh_rebind or mode == .ssh_blackhole;
+    if (ssh_mode != (arguments.len == 4)) return error.ExpectedMode;
     var threaded = Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -216,6 +313,11 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
     try client.connect();
     const stream_id = try client.openStream();
+    if (ssh_mode) {
+        const port = try std.fmt.parseInt(u16, arguments[2], 10);
+        try runSsh(allocator, io, &client, stream_id, &server, &proxy, mode, port, arguments[3]);
+        return;
+    }
     const client_port = client.localPort();
     try client.sendOnStream(stream_id, "ready", false);
     var connection = try server.accept();

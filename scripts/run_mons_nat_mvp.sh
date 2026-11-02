@@ -24,7 +24,10 @@ run_case() {
         grep -Fq "MVP PASS mode=$mode" "$log"
     else
         [[ $status == 142 ]] || { tail -c 3000 "$log"; return 1; }
-        ! grep -Fq 'MVP PASS' "$log"
+        if grep -Fq 'MVP PASS' "$log"; then
+            printf 'Unexpected success marker in timeout log: %s\n' "$log" >&2
+            return 1
+        fi
     fi
     grep -Fq 'MVP control_pass tls=verified' "$log"
     [[ $(grep -Fc 'drive: accepted conn ' "$log") == 1 ]]
@@ -49,5 +52,8 @@ run_case "$result/probe-bin/bin/mons-nat-mvp" loss "$result/probe-loss.log" succ
 grep -Fq 'dropped_replacement=1' "$result/probe-loss.log"
 grep -Fq 'old_during_push=0' "$result/probe-loss.log"
 run_case "$result/probe-bin/bin/mons-nat-mvp" blackhole "$result/probe-blackhole.log" timeout
-! grep -Fq 'MVP natural_commit' "$result/probe-blackhole.log"
+if grep -Fq 'MVP natural_commit' "$result/probe-blackhole.log"; then
+    printf 'Unexpected path commit in blocked-path log: %s\n' "$result/probe-blackhole.log" >&2
+    exit 1
+fi
 printf 'MVP verdict: controlled first-path success; loss tolerance observed; production migration remains unverified.\n'
