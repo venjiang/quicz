@@ -131,6 +131,10 @@ IPv6 candidates came from system interfaces, so these tests do not cover public 
 Background operation, network changes, and long-duration stability also remain outside this result.
 See the [current validation record](../../backlog.md) for evidence and limits.
 
+The Zig 0.17 toolchain migration acceptance is complete.
+The remaining connectivity items below are separate work, not migration acceptance blockers. Migration completion does not mark those items as passed.
+See the [migration record](../../backlog.md) for the completed scope and fixed CI evidence.
+
 ## Not implemented or not validated
 
 - Phone-to-Mac IPv4 double-NAT punching has not passed acceptance.
