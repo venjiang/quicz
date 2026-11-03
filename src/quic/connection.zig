@@ -219,6 +219,7 @@ const maxFrameWireLen = wire_len.maxFrameWireLen;
 const ackFrameRangesAreValid = frame_rules.ackFrameRangesAreValid;
 const ackFrameContains = frame_rules.ackFrameContains;
 const frameIsAckEliciting = frame_rules.frameIsAckEliciting;
+const frameIsProbing = frame_rules.frameIsProbing;
 const frameAllowedInPacketNumberSpace = frame_rules.frameAllowedInPacketNumberSpace;
 const defaultFramePacketTypeForSpace = frame_rules.defaultFramePacketTypeForSpace;
 const packetNumberSpaceForFramePacketType = frame_rules.packetNumberSpaceForFramePacketType;
@@ -308,6 +309,9 @@ const BuiltProtectedShortPacket = struct {
     consume_path_response: bool = false,
     response_origin: ?endpoint.DatagramPath = null,
     consume_path_challenge: bool = false,
+    path_response_index: usize = 0,
+    path_challenge_index: usize = 0,
+    path_context: ?connection_state.DatagramContext = null,
     consume_retire_connection_id: bool = false,
     new_connection_id_index: ?usize = null,
     consume_new_token: bool = false,
@@ -339,16 +343,17 @@ const LossDetectionResult = struct {
     pc_first_sent_time_nanos: i64 = 0,
     pc_last_sent_time_nanos: i64 = 0,
     pc_contiguous_packet_numbers: bool = true,
-    largest_lost_sent_time_nanos: ?i64 = null,
-    largest_lost_packet_number: ?u64 = null,
+    largest_current_path_lost_sent_time_nanos: ?i64 = null,
+    largest_current_path_lost_packet_number: ?u64 = null,
 
-    fn recordLostPacket(self: *LossDetectionResult, sent_packet: SentPacket, first_rtt_sample_sent_time_nanos: ?i64) void {
+    fn recordLostPacket(self: *LossDetectionResult, sent_packet: SentPacket, first_rtt_sample_sent_time_nanos: ?i64, path_first_packet_number: u64) void {
         self.lost_bytes = std.math.add(usize, self.lost_bytes, sent_packet.bytes) catch std.math.maxInt(usize);
-        self.largest_lost_sent_time_nanos = if (self.largest_lost_sent_time_nanos) |current|
+        if (!sent_packet.isOnRecoveryPath(path_first_packet_number)) return;
+        self.largest_current_path_lost_sent_time_nanos = if (self.largest_current_path_lost_sent_time_nanos) |current|
             @max(current, sent_packet.sent_time_nanos)
         else
             sent_packet.sent_time_nanos;
-        self.largest_lost_packet_number = if (self.largest_lost_packet_number) |current|
+        self.largest_current_path_lost_packet_number = if (self.largest_current_path_lost_packet_number) |current|
             @max(current, sent_packet.packet_number)
         else
             sent_packet.packet_number;
@@ -683,12 +688,31 @@ pub const Connection = struct {
     pub const PolledDatagram = struct {
         /// Caller frees these bytes with the connection allocator.
         datagram: []u8,
-        /// Metadata only. This does not choose the packet's UDP destination.
+        /// Metadata only. This does not select a UDP destination.
+        response_origin: ?endpoint.DatagramPath = null,
+    };
+
+    /// Output selection used by a route-aware endpoint owner.
+    pub const PacketSelection = union(enum) {
+        automatic,
+        ordinary,
+        response: struct { index: usize, include_ack: bool },
+        challenge: struct { index: usize, include_ack: bool },
+    };
+
+    /// A protected packet and the context of a consumed validation frame.
+    pub const DatagramOutput = struct {
+        datagram: []u8,
+        path_context: ?connection_state.DatagramContext = null,
         response_origin: ?endpoint.DatagramPath = null,
     };
 
     allocator: std.mem.Allocator,
     config: Config,
+    /// Conservative datagram ceiling after an IP path change.
+    path_max_datagram_size: ?usize = null,
+    /// Application packet numbers below this boundary belong to earlier paths.
+    recovery_path_first_packet_number: u64 = 0,
     /// Optional qlog event writer. Non-null when QLOG_DIR is set.
     qlog_writer: ?*qlog_module.QlogWriter = null,
     side: ConnectionSide,
@@ -711,11 +735,20 @@ pub const Connection = struct {
     next_packet_number: u64,
     application_packet_space_discarded: bool,
     next_peer_packet_number: u64,
+    /// Classification of the last numbered 1-RTT payload.
+    /// Consume only when the Application receive cursor advances.
+    last_one_rtt_non_probing: bool = false,
     pending_ack_largest: ?u64,
     received_packet_ranges: ReceivedPacketRanges,
     pending_path_responses: std.ArrayList(PendingPathResponse),
-    /// Origin annotation scoped by the source-aware protected receive wrapper.
-    datagram_origin: ?endpoint.DatagramPath = null,
+    /// UDP-owner context scoped around one synchronous protected receive.
+    datagram_context: ?connection_state.DatagramContext = null,
+    /// Authentication outcome for the active datagram context.
+    datagram_authenticated: bool = false,
+    /// Serving tuple scoped to one synchronous route-aware output poll.
+    serving_output_path: ?endpoint.DatagramPath = null,
+    /// Route-aware receive can discard expired responses without closing service.
+    ignore_unmatched_path_responses: bool = false,
     pending_path_challenges: std.ArrayList(PendingPathChallenge),
     outstanding_path_challenges: std.ArrayList(OutstandingPathChallenge),
     /// Exact-token observation owned by one synchronous protected receive call.
@@ -1555,6 +1588,82 @@ pub const Connection = struct {
             if (std.mem.eql(u8, &challenge.data, &token)) return true;
         }
         return false;
+    }
+
+    /// Return the next deadline of the existing path-challenge retry engine.
+    pub fn pathValidationDeadline(self: *const Connection) ?i64 {
+        if (self.isClosingOrClosed()) return null;
+        var next: ?i64 = null;
+        var timer_recovery = self.recovery_state;
+        const retry_after = timer_recovery.ptoNs();
+        for (self.outstanding_path_challenges.items) |challenge| {
+            const deadline = saturatingAdd(challenge.sent_time_nanos, self.pathChallengeRetryDelay(challenge.context, retry_after));
+            if (next == null or deadline < next.?) next = deadline;
+        }
+        return next;
+    }
+
+    /// Abandon one expired token without affecting another path or connection.
+    pub fn abandonPathChallenge(self: *Connection, token: [8]u8) void {
+        var removed = false;
+        var pending_index: usize = 0;
+        while (pending_index < self.pending_path_challenges.items.len) {
+            if (std.mem.eql(u8, &self.pending_path_challenges.items[pending_index].data, &token)) {
+                _ = self.pending_path_challenges.orderedRemove(pending_index);
+                removed = true;
+            } else pending_index += 1;
+        }
+        var outstanding_index: usize = 0;
+        while (outstanding_index < self.outstanding_path_challenges.items.len) {
+            if (std.mem.eql(u8, &self.outstanding_path_challenges.items[outstanding_index].data, &token)) {
+                _ = self.outstanding_path_challenges.orderedRemove(outstanding_index);
+                removed = true;
+            } else outstanding_index += 1;
+        }
+        if (removed) self.failed_path_validations +|= 1;
+    }
+
+    /// Return the context of the next queued validation frame.
+    pub fn pendingValidationContext(self: *const Connection) ?connection_state.DatagramContext {
+        if (self.pending_path_responses.items.len != 0) return self.pending_path_responses.items[0].context;
+        if (self.pending_path_challenges.items.len != 0) return self.pending_path_challenges.items[0].context;
+        return null;
+    }
+
+    /// Test whether a path still owns queued or in-flight validation work.
+    pub fn hasQueuedValidationOnPath(self: *const Connection, path: endpoint.DatagramPath) bool {
+        for (self.pending_path_responses.items) |response| {
+            if (response.context) |context| if (context.path.eql(path)) return true;
+        }
+        for (self.pending_path_challenges.items) |challenge| {
+            if (challenge.context) |context| if (context.path.eql(path)) return true;
+        }
+        for (self.outstanding_path_challenges.items) |challenge| {
+            if (challenge.context) |context| if (context.path.eql(path)) return true;
+        }
+        return false;
+    }
+
+    /// Propagate proven address validation to retained metadata on that path.
+    pub fn markDatagramPathValidated(self: *Connection, path: endpoint.DatagramPath) void {
+        if (self.datagram_context) |*context| {
+            if (context.path.eql(path)) context.validated = true;
+        }
+        for (self.pending_path_responses.items) |*response| {
+            if (response.context) |*context| {
+                if (context.path.eql(path)) context.validated = true;
+            }
+        }
+        for (self.pending_path_challenges.items) |*challenge| {
+            if (challenge.context) |*context| {
+                if (context.path.eql(path)) context.validated = true;
+            }
+        }
+        for (self.outstanding_path_challenges.items) |*challenge| {
+            if (challenge.context) |*context| {
+                if (context.path.eql(path)) context.validated = true;
+            }
+        }
     }
 
     /// Return PATH_CHALLENGE validations that exhausted the retry budget.
@@ -3250,7 +3359,18 @@ pub const Connection = struct {
     }
 
     pub fn maxTxDatagramSize(self: Connection) usize {
-        return @min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size);
+        return @min(@min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size), self.path_max_datagram_size orelse std.math.maxInt(usize));
+    }
+
+    /// Reset recovery and pacing for a changed IP path without discarding streams.
+    pub fn resetPathRecovery(self: *Connection) void {
+        self.recovery_path_first_packet_number = self.next_packet_number;
+        self.path_max_datagram_size = min_initial_udp_datagram_len;
+        self.recovery_state.resetPath(self.config.initial_rtt_ns, @intCast(self.maxTxDatagramSize()));
+        self.first_rtt_sample_sent_time_nanos = null;
+        self.loss_deadline_nanos = null;
+        self.tx_pacer = pacer_module.Pacer.init(self.maxTxDatagramSize());
+        self.pacing_send_deadline = null;
     }
 
     fn validateReceivedUdpDatagramSize(self: Connection, datagram: []const u8) Error!void {
@@ -4294,9 +4414,14 @@ pub const Connection = struct {
         datagram: []const u8,
         origin: endpoint.DatagramPath,
     ) Error!void {
-        const previous_origin = self.datagram_origin;
-        self.datagram_origin = origin;
-        defer self.datagram_origin = previous_origin;
+        const previous_context = self.datagram_context;
+        const previous_authenticated = self.datagram_authenticated;
+        self.datagram_context = .{ .path = origin };
+        self.datagram_authenticated = false;
+        defer {
+            self.datagram_context = previous_context;
+            self.datagram_authenticated = previous_authenticated;
+        }
         try self.processProtectedShortDatagramWithInstalledKeysOrClose(now_nanos, dcid_len, datagram);
     }
 
@@ -4326,6 +4451,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (decoded.len != datagram_len) return error.InvalidPacket;
+        if (self.datagram_context != null) self.datagram_authenticated = true;
         const packet_space = self.packetNumberSpace(.application);
         // Duplicate or below-window 1-RTT packets are discarded per
         // RFC 9000 §13.1, not connection errors.
@@ -4380,17 +4506,19 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
     ) Error!?[]u8 {
-        const output = try self.pollProtectedShortDatagramWithKeyPhaseAndOrigin(now_nanos, dcid, keys, key_phase);
+        const output = try self.pollProtectedShortDatagramSelected(now_nanos, dcid, keys, key_phase, .automatic, null);
         return if (output) |packet_output| packet_output.datagram else null;
     }
 
-    fn pollProtectedShortDatagramWithKeyPhaseAndOrigin(
+    fn pollProtectedShortDatagramSelected(
         self: *Connection,
         now_nanos: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
-    ) Error!?PolledDatagram {
+        selection: PacketSelection,
+        validation_limit: ?usize,
+    ) Error!?DatagramOutput {
         self.pacing_send_deadline = null;
         errdefer self.pacing_send_deadline = null;
         self.expireIdleState(now_nanos);
@@ -4400,6 +4528,7 @@ pub const Connection = struct {
             return if (close) |bytes| .{ .datagram = bytes } else null;
         }
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.application_packet_space_discarded) return error.InvalidPacket;
 
         // Select control-only output before the general builder can coalesce
         // STREAM data or remove obsolete queued frames.
@@ -4415,23 +4544,49 @@ pub const Connection = struct {
             }
         }
 
-        var built = if (pacing_limited) limited: {
-            if (self.application_packet_space_discarded) return error.InvalidPacket;
-            const ack = self.pendingAckFrame(.application);
-            if (self.pending_path_responses.items.len != 0) {
-                break :limited try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack);
-            }
-            if (ack) |pending| {
-                break :limited try self.buildProtectedShortControlPacket(dcid, keys, key_phase, try ackFrameWireLen(pending), pending, false);
-            }
-            return null;
-        } else (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
+        var built = switch (selection) {
+            .response => |chosen| chosen: {
+                if (chosen.index >= self.pending_path_responses.items.len) return error.InvalidPacket;
+                const ack = if (chosen.include_ack) self.pendingAckFrame(.application) else null;
+                break :chosen try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack, chosen.index, validation_limit);
+            },
+            .challenge => |chosen| chosen: {
+                if (chosen.index >= self.pending_path_challenges.items.len) return error.InvalidPacket;
+                if (pacing_limited) return null;
+                const ack = if (chosen.include_ack) self.pendingAckFrame(.application) else null;
+                break :chosen try self.buildProtectedShortPathChallengePacket(dcid, keys, key_phase, ack, chosen.index, validation_limit);
+            },
+            .automatic, .ordinary => normal: {
+                const ordinary_only = std.meta.activeTag(selection) == .ordinary;
+                if (pacing_limited) {
+                    if (self.application_packet_space_discarded) return error.InvalidPacket;
+                    const ack = self.pendingAckFrame(.application);
+                    if (!ordinary_only and self.pending_path_responses.items.len != 0) {
+                        break :normal try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack, 0, validation_limit);
+                    }
+                    if (ack) |pending| {
+                        break :normal try self.buildProtectedShortControlPacket(dcid, keys, key_phase, try ackFrameWireLen(pending), pending, false);
+                    }
+                    return null;
+                }
+                break :normal (try self.buildNextProtectedShortPacket(dcid, keys, key_phase, ordinary_only, validation_limit)) orelse return null;
+            },
+        };
         errdefer {
             built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
         }
 
         if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (built.consume_path_response or built.consume_path_challenge) {
+            if (validation_limit) |limit| {
+                if (built.datagram.len > limit) {
+                    built.deinitSidecars(self.allocator);
+                    self.allocator.free(built.datagram);
+                    return null;
+                }
+            }
+        }
         if (if (built.ack_eliciting)
             self.ackElicitingSendAdmission(.application, built.datagram.len) != .allowed
         else
@@ -4458,7 +4613,7 @@ pub const Connection = struct {
         if (pacing_limited) {
             self.pacing_send_deadline = self.tx_pacer.nextSendTime(now_nanos, self.maxTxDatagramSize(), self.recovery_state.congestion_window, self.recovery_state.smoothed_rtt_ns);
         }
-        return .{ .datagram = built.datagram, .response_origin = built.response_origin };
+        return .{ .datagram = built.datagram, .path_context = built.path_context, .response_origin = built.response_origin };
     }
 
     /// Return a pacing wakeup recorded by protected polling. Merge this value
@@ -4509,18 +4664,33 @@ pub const Connection = struct {
     }
 
     /// Poll protected bytes with optional PATH_RESPONSE origin metadata.
-    /// Ordinary and close output have no response origin. Packet selection,
-    /// ACK coalescing and send accounting match the existing byte-only poll.
+    /// Packet selection and send accounting match the byte-only poll.
     pub fn pollProtectedShortDatagramWithInstalledKeysAndOrigin(
         self: *Connection,
         now_nanos: i64,
         dcid: []const u8,
     ) Error!?PolledDatagram {
+        const output = try self.pollProtectedShortDatagramWithInstalledKeysAndContext(now_nanos, dcid, .automatic, null);
+        return if (output) |packet_output| .{ .datagram = packet_output.datagram, .response_origin = packet_output.response_origin } else null;
+    }
+
+    /// Poll selected installed-key output while retaining validation-path metadata.
+    ///
+    /// The UDP owner selects ACK coalescing and a server validation-byte limit.
+    /// Close priority, congestion admission, pacing and send accounting are shared
+    /// with ordinary protected polling. A blocked selection consumes no frame.
+    pub fn pollProtectedShortDatagramWithInstalledKeysAndContext(
+        self: *Connection,
+        now_nanos: i64,
+        dcid: []const u8,
+        selection: PacketSelection,
+        validation_limit: ?usize,
+    ) Error!?DatagramOutput {
         const state = self.local_one_rtt_key_phase_state orelse {
             self.pacing_send_deadline = null;
             return error.InvalidPacket;
         };
-        return self.pollProtectedShortDatagramWithKeyPhaseAndOrigin(now_nanos, dcid, state.currentKeys(), state.currentKeyPhase());
+        return self.pollProtectedShortDatagramSelected(now_nanos, dcid, state.currentKeys(), state.currentKeyPhase(), selection, validation_limit);
     }
 
     fn protectedPathValidationPlaintextLen(
@@ -4528,7 +4698,9 @@ pub const Connection = struct {
         dcid_len: usize,
         packet_number_len: u8,
         plaintext_len: usize,
+        validation_limit: ?usize,
     ) Error!usize {
+        if (validation_limit) |limit| if (limit < min_initial_udp_datagram_len) return plaintext_len;
         if (self.maxTxDatagramSize() < min_initial_udp_datagram_len) return plaintext_len;
         if (!self.canSendToPeerAddress(min_initial_udp_datagram_len)) return plaintext_len;
 
@@ -5679,11 +5851,13 @@ pub const Connection = struct {
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
+        ordinary_only: bool,
+        validation_limit: ?usize,
     ) Error!?BuiltProtectedShortPacket {
         if (self.application_packet_space_discarded) return error.InvalidPacket;
         const ack_to_send = self.pendingAckFrame(.application);
-        if (self.pending_path_responses.items.len != 0) {
-            return try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack_to_send);
+        if (!ordinary_only and self.pending_path_responses.items.len != 0) {
+            return try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack_to_send, 0, validation_limit);
         }
         if (self.pending_reset_streams.items.len != 0) {
             return try self.buildProtectedShortResetStreamPacket(dcid, keys, key_phase, ack_to_send);
@@ -5704,8 +5878,8 @@ pub const Connection = struct {
         if (self.pending_new_tokens.items.len != 0) {
             return try self.buildProtectedShortNewTokenPacket(dcid, keys, key_phase, ack_to_send);
         }
-        if (self.pending_path_challenges.items.len != 0) {
-            return try self.buildProtectedShortPathChallengePacket(dcid, keys, key_phase, ack_to_send);
+        if (!ordinary_only and self.pending_path_challenges.items.len != 0) {
+            return try self.buildProtectedShortPathChallengePacket(dcid, keys, key_phase, ack_to_send, 0, validation_limit);
         }
         self.dropObsoleteMaxFrames();
         if (self.pending_max_frames.items.len != 0) {
@@ -5807,10 +5981,12 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
         ack_to_send: ?frame.AckFrame,
+        response_index: usize,
+        validation_limit: ?usize,
     ) Error!BuiltProtectedShortPacket {
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
-        const response = self.pending_path_responses.items[0];
+        const response = self.pending_path_responses.items[response_index];
         const response_data = response.data;
         const response_encoded_len = pathResponseFrameWireLen();
         var encoded_frame_len = response_encoded_len;
@@ -5829,6 +6005,7 @@ pub const Connection = struct {
             dcid.len,
             packet_number_encoding.len,
             @max(encoded_frame_len, min_payload_len),
+            validation_limit,
         );
         if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
 
@@ -5867,7 +6044,9 @@ pub const Connection = struct {
             .ack_eliciting = true,
             .clear_ack = ack_to_send != null,
             .consume_path_response = true,
-            .response_origin = response.origin,
+            .path_response_index = response_index,
+            .path_context = response.context,
+            .response_origin = if (response.context) |context| context.path else null,
         };
     }
 
@@ -6268,10 +6447,12 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
         ack_to_send: ?frame.AckFrame,
+        challenge_index: usize,
+        validation_limit: ?usize,
     ) Error!BuiltProtectedShortPacket {
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
-        const pending_challenge = self.pending_path_challenges.items[0];
+        const pending_challenge = self.pending_path_challenges.items[challenge_index];
         const challenge_encoded_len = pathChallengeFrameWireLen();
         var encoded_frame_len = challenge_encoded_len;
         if (ack_to_send) |ack| {
@@ -6289,6 +6470,7 @@ pub const Connection = struct {
             dcid.len,
             packet_number_encoding.len,
             @max(encoded_frame_len, min_payload_len),
+            validation_limit,
         );
         if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
 
@@ -6327,6 +6509,8 @@ pub const Connection = struct {
             .ack_eliciting = true,
             .clear_ack = ack_to_send != null,
             .consume_path_challenge = true,
+            .path_challenge_index = challenge_index,
+            .path_context = pending_challenge.context,
         };
     }
 
@@ -6825,6 +7009,10 @@ pub const Connection = struct {
                 .packet_number = built.packet_number,
                 .sent_time_nanos = now_nanos,
                 .bytes = built.datagram.len,
+                .sent_on_serving_path = if (built.path_context) |context|
+                    if (self.serving_output_path) |serving| context.path.eql(serving) else true
+                else
+                    true,
                 .stream_frame = built.sent_stream_frame,
                 .crypto_frame = sent_crypto_frame,
                 .reset_stream_frame = built.sent_reset_stream_frame,
@@ -6837,14 +7025,17 @@ pub const Connection = struct {
         }
 
         if (built.consume_ping) self.pending_ping_count -= 1;
-        if (built.consume_path_response) _ = self.pending_path_responses.orderedRemove(0);
+        if (built.consume_path_response) _ = self.pending_path_responses.orderedRemove(built.path_response_index);
         if (built.consume_path_challenge) {
-            const removed = self.pending_path_challenges.orderedRemove(0);
+            const removed = self.pending_path_challenges.orderedRemove(built.path_challenge_index);
             const transmissions = std.math.add(u8, removed.transmissions, 1) catch max_path_challenge_transmissions;
             self.outstanding_path_challenges.appendAssumeCapacity(.{
                 .data = removed.data,
                 .sent_time_nanos = now_nanos,
                 .transmissions = transmissions,
+                .context = removed.context,
+                // A delayed response can belong to any transmission of this token.
+                .minimum_datagram_size = if (removed.transmissions == 0) built.datagram.len else @min(removed.minimum_datagram_size, built.datagram.len),
             });
         }
         if (built.consume_retire_connection_id) _ = self.pending_retire_connection_ids.orderedRemove(0);
@@ -7190,7 +7381,7 @@ pub const Connection = struct {
                     null,
                 .new_connection_id => |new_connection_id| self.classifyNewConnectionIdFrameProcessingCloseError(new_connection_id, frame_type_value),
                 .retire_connection_id => |retire_connection_id| self.classifyRetireConnectionIdFrameProcessingCloseError(retire_connection_id, frame_type_value),
-                .path_response => |path_response| if (self.pathResponseChallengeIndex(path_response.data) == null)
+                .path_response => |path_response| if (!self.ignore_unmatched_path_responses and self.pathResponseChallenge(path_response.data) == null)
                     semanticCloseError(.protocol_violation, frame_type_value, "path response")
                 else
                     null,
@@ -7312,6 +7503,7 @@ pub const Connection = struct {
         if (packet_space.discarded.*) return error.InvalidPacket;
 
         var ack_eliciting = false;
+        var non_probing = false;
         var received_handshake_done = false;
         var offset: usize = 0;
         while (offset < datagram.len) {
@@ -7330,6 +7522,7 @@ pub const Connection = struct {
             if (frameIsAckEliciting(decoded.frame)) {
                 ack_eliciting = true;
             }
+            if (!frameIsProbing(decoded.frame)) non_probing = true;
 
             switch (decoded.frame) {
                 .ack => |ack| try self.receiveAckFrame(space, now_nanos, ack, null),
@@ -7382,6 +7575,9 @@ pub const Connection = struct {
         self.maybeDiscardInitialAfterHandshakePacketReceived(space);
         if (received_handshake_done and !self.isClosingOrClosed()) {
             try self.discardPacketNumberSpace(.handshake);
+        }
+        if (packet_type == .one_rtt and received_packet_number != null) {
+            self.last_one_rtt_non_probing = non_probing;
         }
     }
     /// Return the next frame-payload datagram for a selected packet number space.
@@ -7932,7 +8128,7 @@ pub const Connection = struct {
     /// Queue one PATH_CHALLENGE frame and track it until a matching PATH_RESPONSE arrives.
     pub fn sendPathChallenge(self: *Connection, data: [8]u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        self.pending_path_challenges.append(self.allocator, .{ .data = data }) catch return error.OutOfMemory;
+        self.pending_path_challenges.append(self.allocator, .{ .data = data, .context = self.datagram_context }) catch return error.OutOfMemory;
     }
 
     /// Queue the server-only HANDSHAKE_DONE frame for Application/1-RTT transmission.
@@ -8895,7 +9091,11 @@ pub const Connection = struct {
         if (!ackFrameRangesAreValid(ack)) return error.InvalidPacket;
 
         var acked_bytes: usize = 0;
+        var previous_path_acked_bytes: usize = 0;
+        var previous_path_ecn_acked = false;
+        const path_first_packet_number = if (space == .application) self.recovery_path_first_packet_number else 0;
         var largest_acked_packet: ?SentPacket = null;
+        var largest_current_path_acked_packet: ?SentPacket = null;
         var newly_acked_ect0: u64 = 0;
         var newly_acked_ect1: u64 = 0;
         var local_key_update_acked = false;
@@ -8910,6 +9110,10 @@ pub const Connection = struct {
 
             var removed = packet_space.sent_packets.orderedRemove(i);
             acked_bytes = std.math.add(usize, acked_bytes, removed.bytes) catch std.math.maxInt(usize);
+            if (!removed.isOnRecoveryPath(path_first_packet_number)) {
+                previous_path_acked_bytes +|= removed.bytes;
+                previous_path_ecn_acked = previous_path_ecn_acked or removed.ecn_codepoint != .not_ect;
+            }
             if (space == .application) {
                 if (self.local_one_rtt_key_update_ack_threshold) |threshold| {
                     if (removed.packet_number >= threshold) {
@@ -8917,13 +9121,18 @@ pub const Connection = struct {
                     }
                 }
             }
-            if (largest_acked_packet == null or removed.packet_number > largest_acked_packet.?.packet_number) {
-                largest_acked_packet = .{
-                    .packet_number = removed.packet_number,
-                    .sent_time_nanos = removed.sent_time_nanos,
-                    .bytes = removed.bytes,
-                    .ecn_codepoint = removed.ecn_codepoint,
-                };
+            const acked_packet = SentPacket{
+                .packet_number = removed.packet_number,
+                .sent_time_nanos = removed.sent_time_nanos,
+                .bytes = removed.bytes,
+                .ecn_codepoint = removed.ecn_codepoint,
+                .sent_on_serving_path = removed.sent_on_serving_path,
+            };
+            if (largest_acked_packet == null or removed.packet_number > largest_acked_packet.?.packet_number) largest_acked_packet = acked_packet;
+            if (removed.isOnRecoveryPath(path_first_packet_number) and
+                (largest_current_path_acked_packet == null or removed.packet_number > largest_current_path_acked_packet.?.packet_number))
+            {
+                largest_current_path_acked_packet = acked_packet;
             }
             switch (removed.ecn_codepoint) {
                 .not_ect => {},
@@ -8945,7 +9154,8 @@ pub const Connection = struct {
         );
 
         const latest_rtt_sample = if (largest_acked_packet != null and
-            largest_acked_packet.?.packet_number == ack.largest_acknowledged)
+            largest_acked_packet.?.packet_number == ack.largest_acknowledged and
+            largest_acked_packet.?.isOnRecoveryPath(path_first_packet_number))
             elapsed(largest_acked_packet.?.sent_time_nanos, now_nanos)
         else
             null;
@@ -8966,10 +9176,13 @@ pub const Connection = struct {
             packet_space.largest_acknowledged.* orelse ack.largest_acknowledged,
             latest_rtt_sample,
             now_nanos,
+            path_first_packet_number,
         );
         refreshSendDataAckedStates(self);
         var congestion_probe_needed = false;
-        if (ecn_result.ce_congestion_event) {
+        if (ecn_result.ce_congestion_event and !previous_path_ecn_acked and
+            largest_acked_packet.?.isOnRecoveryPath(path_first_packet_number))
+        {
             if (largest_acked_packet) |acked_packet| {
                 congestion_probe_needed = packet_space.recovery_state.wouldStartCongestionRecovery(acked_packet.sent_time_nanos);
                 packet_space.recovery_state.onCongestionEvent(acked_packet.sent_time_nanos, now_nanos);
@@ -8977,14 +9190,16 @@ pub const Connection = struct {
         }
         const persistent_congestion_established = loss_result.persistentCongestionEstablished(space, packet_space.recovery_state.*);
         if (loss_result.lost_bytes != 0) {
-            congestion_probe_needed = congestion_probe_needed or
-                packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_lost_sent_time_nanos.?);
-            packet_space.recovery_state.onPacketLostWithNumber(
-                loss_result.lost_bytes,
-                loss_result.largest_lost_sent_time_nanos.?,
-                now_nanos,
-                loss_result.largest_lost_packet_number,
-            );
+            if (loss_result.largest_current_path_lost_packet_number != null) {
+                congestion_probe_needed = congestion_probe_needed or
+                    packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_current_path_lost_sent_time_nanos.?);
+                packet_space.recovery_state.onPacketLostWithNumber(
+                    loss_result.lost_bytes,
+                    loss_result.largest_current_path_lost_sent_time_nanos.?,
+                    now_nanos,
+                    loss_result.largest_current_path_lost_packet_number,
+                );
+            } else packet_space.recovery_state.onPreviousPathLoss(loss_result.lost_bytes);
             // A lost packet is requeued for retransmission, so count it here.
             packet_space.recovery_state.recordRetransmission();
         }
@@ -8996,21 +9211,23 @@ pub const Connection = struct {
             self.local_one_rtt_key_update_ack_threshold = null;
         }
 
-        packet_space.recovery_state.notifyLargestAcked(ack.largest_acknowledged);
+        if (largest_current_path_acked_packet) |acked_packet| packet_space.recovery_state.notifyLargestAcked(acked_packet.packet_number);
         const pto_backoff_before_ack = self.ptoBackoffSnapshot();
+        if (previous_path_acked_bytes != 0) packet_space.recovery_state.onPreviousPathAck(previous_path_acked_bytes);
+        const current_path_acked_bytes = acked_bytes - previous_path_acked_bytes;
         if (latest_rtt_sample) |rtt_sample| {
             packet_space.recovery_state.onPacketAckedWithUtilization(
-                acked_bytes,
+                current_path_acked_bytes,
                 largest_acked_packet.?.sent_time_nanos,
                 rtt_sample,
                 self.ackDelayForRtt(space, ack.ack_delay),
                 congestion_window_utilized,
             );
             self.syncRttEstimatesFromSpace(space);
-        } else {
+        } else if (current_path_acked_bytes != 0) {
             packet_space.recovery_state.onPacketAckedWithoutRttSample(
-                acked_bytes,
-                largest_acked_packet.?.sent_time_nanos,
+                current_path_acked_bytes,
+                largest_current_path_acked_packet.?.sent_time_nanos,
                 congestion_window_utilized,
             );
         }
@@ -9091,6 +9308,7 @@ pub const Connection = struct {
         largest_acknowledged: u64,
         latest_rtt_sample_ns: ?u64,
         now_nanos: i64,
+        path_first_packet_number: u64,
     ) Error!LossDetectionResult {
         const loss_delay_ns = recovery.timeThresholdLossDelayNs(
             (latest_rtt_sample_ns orelse 0),
@@ -9194,7 +9412,7 @@ pub const Connection = struct {
             }
 
             var removed = packet_space.sent_packets.orderedRemove(i);
-            result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_nanos.*);
+            result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_nanos.*, path_first_packet_number);
             removed.deinit(self.allocator);
         }
         return result;
@@ -9214,16 +9432,20 @@ pub const Connection = struct {
             packet_space.loss_deadline_nanos.* = null;
             return;
         };
-        const loss_result = try self.removeAckDrivenLosses(packet_space, largest_acknowledged, null, now_nanos);
+        const path_first_packet_number = if (space == .application) self.recovery_path_first_packet_number else 0;
+        const loss_result = try self.removeAckDrivenLosses(packet_space, largest_acknowledged, null, now_nanos, path_first_packet_number);
         if (loss_result.lost_bytes != 0) {
-            const congestion_probe_needed =
-                packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_lost_sent_time_nanos.?);
-            packet_space.recovery_state.onPacketLostWithNumber(
-                loss_result.lost_bytes,
-                loss_result.largest_lost_sent_time_nanos.?,
-                now_nanos,
-                loss_result.largest_lost_packet_number,
-            );
+            const current_path_loss = loss_result.largest_current_path_lost_packet_number != null;
+            const congestion_probe_needed = current_path_loss and
+                packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_current_path_lost_sent_time_nanos.?);
+            if (current_path_loss) {
+                packet_space.recovery_state.onPacketLostWithNumber(
+                    loss_result.lost_bytes,
+                    loss_result.largest_current_path_lost_sent_time_nanos.?,
+                    now_nanos,
+                    loss_result.largest_current_path_lost_packet_number,
+                );
+            } else packet_space.recovery_state.onPreviousPathLoss(loss_result.lost_bytes);
             if (congestion_probe_needed) {
                 self.armCongestionProbeIfPendingData(space);
             }
@@ -9448,7 +9670,7 @@ pub const Connection = struct {
         const retry_after = self.recovery_state.ptoNs();
         var retry_count: usize = 0;
         for (self.outstanding_path_challenges.items) |challenge| {
-            if (elapsed(challenge.sent_time_nanos, now_nanos) < retry_after) continue;
+            if (elapsed(challenge.sent_time_nanos, now_nanos) < self.pathChallengeRetryDelay(challenge.context, retry_after)) continue;
             if (challenge.transmissions < max_path_challenge_transmissions) retry_count += 1;
         }
         if (retry_count != 0) {
@@ -9458,7 +9680,7 @@ pub const Connection = struct {
         var i: usize = 0;
         while (i < self.outstanding_path_challenges.items.len) {
             const challenge = self.outstanding_path_challenges.items[i];
-            if (elapsed(challenge.sent_time_nanos, now_nanos) < retry_after) {
+            if (elapsed(challenge.sent_time_nanos, now_nanos) < self.pathChallengeRetryDelay(challenge.context, retry_after)) {
                 i += 1;
                 continue;
             }
@@ -9472,9 +9694,17 @@ pub const Connection = struct {
             self.pending_path_challenges.appendAssumeCapacity(.{
                 .data = challenge.data,
                 .transmissions = challenge.transmissions,
+                .context = challenge.context,
+                .minimum_datagram_size = challenge.minimum_datagram_size,
             });
             _ = self.outstanding_path_challenges.orderedRemove(i);
         }
+    }
+
+    fn pathChallengeRetryDelay(self: *const Connection, context: ?connection_state.DatagramContext, current_pto: u64) u64 {
+        if (context == null) return current_pto;
+        const initial_path_pto = 3 *| self.config.initial_rtt_ns +| self.config.max_ack_delay_ns;
+        return @max(current_pto, initial_path_pto);
     }
 
     fn pollCloseFrame(
@@ -10206,6 +10436,7 @@ pub const Connection = struct {
             .data = challenge_data,
             .sent_time_nanos = now_nanos,
             .transmissions = transmissions,
+            .context = pending_challenge.context,
         }) catch return error.OutOfMemory;
         appended_outstanding_challenge = true;
 
@@ -10823,26 +11054,49 @@ pub const Connection = struct {
     fn receivePathChallengeFrame(self: *Connection, path_challenge: frame.PathChallengeFrame) Error!void {
         for (self.pending_path_responses.items) |response| {
             if (!std.mem.eql(u8, &response.data, &path_challenge.data)) continue;
-            if (self.datagram_origin) |current| {
-                if (response.origin) |queued| if (queued.eql(current)) return;
-            } else return;
+            if (self.datagram_context == null) return;
+            if (response.context) |queued| {
+                if (self.datagram_context) |current| {
+                    if (queued.path.eql(current.path)) return;
+                }
+            }
         }
         self.pending_path_responses.append(self.allocator, .{
             .data = path_challenge.data,
-            .origin = self.datagram_origin,
+            .context = self.datagram_context,
         }) catch return error.OutOfMemory;
     }
 
-    fn pathResponseChallengeIndex(self: *Connection, data: [8]u8) ?usize {
+    fn pathResponseChallenge(self: *const Connection, data: [8]u8) ?union(enum) { outstanding: usize, pending_retry: usize } {
         for (self.outstanding_path_challenges.items, 0..) |challenge, i| {
-            if (std.mem.eql(u8, &challenge.data, &data)) return i;
+            if (std.mem.eql(u8, &challenge.data, &data)) return .{ .outstanding = i };
+        }
+        for (self.pending_path_challenges.items, 0..) |challenge, i| {
+            if (challenge.transmissions != 0 and std.mem.eql(u8, &challenge.data, &data)) return .{ .pending_retry = i };
         }
         return null;
     }
 
+    /// Return the minimum emitted size across this token's transmissions.
+    /// A queued challenge that was never sent cannot provide validation proof.
+    pub fn pathChallengeMinimumDatagramSize(self: *const Connection, token: [8]u8) ?usize {
+        const location = self.pathResponseChallenge(token) orelse return null;
+        return switch (location) {
+            .outstanding => |index| self.outstanding_path_challenges.items[index].minimum_datagram_size,
+            .pending_retry => |index| self.pending_path_challenges.items[index].minimum_datagram_size,
+        };
+    }
+
     fn receivePathResponseFrame(self: *Connection, path_response: frame.PathResponseFrame) Error!void {
-        const challenge_index = self.pathResponseChallengeIndex(path_response.data) orelse return error.InvalidPacket;
-        _ = self.outstanding_path_challenges.orderedRemove(challenge_index);
+        const location = self.pathResponseChallenge(path_response.data) orelse {
+            if (self.ignore_unmatched_path_responses) return;
+            return error.InvalidPacket;
+        };
+        const context = switch (location) {
+            .outstanding => |index| self.outstanding_path_challenges.orderedRemove(index).context,
+            .pending_retry => |index| self.pending_path_challenges.orderedRemove(index).context,
+        };
+        if (context) |source| self.markDatagramPathValidated(source.path);
         if (self.path_response_observation) |*observation| {
             if (std.mem.eql(u8, &observation.token, &path_response.data)) observation.matched = true;
         }

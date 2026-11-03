@@ -133,8 +133,8 @@ run_case() {
         grep -q 'old_during_push=0' "$current/transport.log"
         if [[ $mode == ssh_rebind ]]; then
             new_port=$(grep 'MVP SSH begin' "$current/transport.log" | sed 's/.*new_port=//')
-            grep -q "MVP natural_commit .*remote_port=$new_port input_cid_matches_record=true" "$current/transport.log"
-            commit_line=$(grep -n -m 1 'MVP natural_commit' "$current/transport.log" | cut -d: -f1)
+            grep -q "path migration committed .*remote_port=$new_port" "$current/transport.log"
+            commit_line=$(grep -n -m 1 'path migration committed' "$current/transport.log" | cut -d: -f1)
             push_line=$(grep -n -m 1 'MVP SSH push_window_begin' "$current/transport.log" | cut -d: -f1)
             [[ $commit_line -lt $push_line ]]
         fi
@@ -152,7 +152,7 @@ run_case() {
         if [[ $mode == ssh_rebind ]]; then
             grep -q 'retired_destination_during_push' "$current/transport.log"
         else
-            if grep -q 'MVP natural_commit' "$current/transport.log"; then
+            if grep -q 'path migration committed' "$current/transport.log"; then
                 printf 'Unexpected path commit in blocked-path case: %s\n' "$name" >&2
                 return 1
             fi

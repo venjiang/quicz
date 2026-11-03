@@ -3758,6 +3758,18 @@ test "Tls13ServerEndpoint pairs accepted Initial output with committed route pat
 }
 
 test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
+    try expectServerTimerOutput(.normal);
+}
+
+test "Tls13ServerEndpoint coalesces earlier key discard with due path output" {
+    try expectServerTimerOutput(.coalesced);
+}
+
+test "Tls13ServerEndpoint retires idle service before empty path output checks" {
+    try expectServerTimerOutput(.idle);
+}
+
+fn expectServerTimerOutput(scenario: enum { normal, coalesced, idle }) !void {
     const TestRecord = struct {
         handle: u64,
         connection: Connection,
@@ -3815,125 +3827,241 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
         TestRecord.deinit,
     );
 
-    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
-        .max_routes = 1,
-        .max_stateless_reset_tokens = 1,
-    });
-    defer endpoint_owner.deinit();
+    for ([_]enum { recovery, validation, backend_validation, sweep, sweep_scratch, key_route, key_route_alloc, key_bytes, key_backend, idle, idle_scratch }{ .recovery, .validation, .backend_validation, .sweep, .sweep_scratch, .key_route, .key_route_alloc, .key_bytes, .key_backend, .idle, .idle_scratch }) |mode| {
+        const key_overlap = mode == .key_route or mode == .key_route_alloc or mode == .key_bytes or mode == .key_backend;
+        const idle_overlap = mode == .idle or mode == .idle_scratch;
+        if ((scenario == .normal and (key_overlap or idle_overlap)) or
+            (scenario == .coalesced and !key_overlap) or (scenario == .idle and !idle_overlap)) continue;
+        const validation_only = mode != .recovery;
+        var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+            .max_routes = 1,
+            .max_stateless_reset_tokens = 1,
+        });
+        defer endpoint_owner.deinit();
 
-    const old_path = endpoint.Udp4Tuple{
-        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
-        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
-    };
-    const new_path = endpoint.Udp4Tuple{
-        .local = old_path.local,
-        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
-    };
-    const server_dcid = "local";
-    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-due");
-    var empty_backend = EmptyBackend{};
+        const old_path = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+        };
+        const new_path = endpoint.Udp4Tuple{
+            .local = old_path.local,
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+        };
+        const server_dcid = "local";
+        const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-due");
+        var empty_backend = EmptyBackend{};
 
-    const record = try std.testing.allocator.create(TestRecord);
-    var record_initialized = false;
-    var record_owned = true;
-    errdefer {
-        if (record_owned) {
-            if (record_initialized) record.deinit();
-            std.testing.allocator.destroy(record);
+        const record = try std.testing.allocator.create(TestRecord);
+        var record_initialized = false;
+        var record_owned = true;
+        errdefer {
+            if (record_owned) {
+                if (record_initialized) record.deinit();
+                std.testing.allocator.destroy(record);
+            }
         }
+        record.* = .{
+            .handle = 82,
+            .connection = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ns = if (key_overlap or idle_overlap) 333 * ms else 100, .max_idle_timeout_ms = if (idle_overlap) 100 else 0 }),
+            .backend = empty_backend.backend(),
+        };
+        record_initialized = true;
+        try record.connection.validatePeerAddress();
+        try record.connection.confirmHandshake();
+        try record.connection.installOneRttTrafficSecrets(.{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        });
+        try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, old_path, .{});
+        errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+        try endpoint_owner.records.adopt(record.handle, record);
+        record_owned = false;
+
+        if (key_overlap) {
+            const ping = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = server_dcid,
+                .key_phase = false,
+                .packet_number = 0,
+            }, try root.packet.encodePacketNumberForHeader(0, null), secrets.client, &.{ 1, 0, 0, 0 });
+            defer std.testing.allocator.free(ping);
+            _ = try endpoint_owner.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(record.handle, &record.connection, new_path, 9 * ms, ping, .{
+                .space = .application,
+                .out = &.{},
+                .unpredictable_prefix = &.{},
+                .supported_versions = &.{.v1},
+                .path_challenge_data = @splat(7),
+            });
+        } else if (validation_only) try record.connection.sendPathChallenge(@splat(7)) else try record.connection.sendPing();
+        const first = (try endpoint_owner.pollOneRttDatagram(record.handle, 10 * ms)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(first);
+        if (validation_only) {
+            const ack = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = server_dcid,
+                .key_phase = false,
+                .packet_number = if (key_overlap) 1 else 0,
+            }, try root.packet.encodePacketNumberForHeader(if (key_overlap) 1 else 0, null), secrets.client, &.{ 2, 0, 0, 0, 0 });
+            defer std.testing.allocator.free(ack);
+            try endpoint_owner.lifecycle.processProtectedShortDatagramWithInstalledKeysOrClose(record.handle, &record.connection, 11 * ms, server_dcid.len, ack);
+            try std.testing.expect(record.connection.lossDetectionTimerDeadline() == null);
+        }
+        if (key_overlap) {
+            const path_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+            try record.connection.initiateOneRttKeyUpdate();
+            // Place a retained generation immediately before the path retry.
+            record.connection.local_one_rtt_key_phase_state.?.schedulePreviousDiscard(path_deadline.deadline_nanos - ms);
+            const first_due = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.key_discard, first_due.kind);
+            try std.testing.expect(first_due.deadline_nanos < path_deadline.deadline_nanos);
+            if (mode == .key_backend) {
+                var scratch: [8]u8 = undefined;
+                const result = (try endpoint_owner.lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram(record.handle, &record.connection, path_deadline.deadline_nanos, .application, record.backend, &scratch, .{ .space = .application, .destination_connection_id = "peer" })) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(result.due_work.pending_work.key_discard_serviced);
+                try std.testing.expect(result.due_work.pending_work.path_validation_serviced);
+                const retry = result.due_work.datagram orelse return error.TestUnexpectedResult;
+                defer std.testing.allocator.free(retry);
+            } else if (mode == .key_bytes) {
+                var out: [1]endpoint_types.EndpointPolledDatagramResult = undefined;
+                const result = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithScratch(path_deadline.deadline_nanos, &out)) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(result.pending_work.key_discard_serviced and result.pending_work.path_validation_serviced);
+                try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+                defer std.testing.allocator.free(out[0].datagram);
+            } else {
+                var out: [1]TestEndpoint.DatagramPathResult = undefined;
+                const result = if (mode == .key_route)
+                    (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(path_deadline.deadline_nanos, &out)) orelse return error.TestUnexpectedResult
+                else
+                    (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(std.testing.allocator, path_deadline.deadline_nanos, &out)) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(result.pending_work.key_discard_serviced and result.pending_work.path_validation_serviced);
+                try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+                defer std.testing.allocator.free(out[0].datagram);
+                try std.testing.expect(out[0].path.eql(new_path));
+            }
+            continue;
+        }
+        if (idle_overlap) {
+            const now = @max(record.connection.pathValidationDeadline() orelse return error.TestUnexpectedResult, record.connection.idleTimeoutDeadline() orelse return error.TestUnexpectedResult);
+            const result = if (mode == .idle)
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(std.testing.allocator, now, .application, &.{})
+            else
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(now, .application, &.{});
+            try std.testing.expectEqual(@as(usize, 1), result.pending_work.idle_retired_count);
+            try std.testing.expect(result.drain.first_error == null);
+            try std.testing.expectEqual(@as(usize, 0), endpoint_owner.activeConnectionCount());
+            continue;
+        }
+        const expected_kind = if (validation_only) endpoint_types.EndpointConnectionDeadlineKind.path_validation else endpoint_types.EndpointConnectionDeadlineKind.recovery;
+        const deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(expected_kind, deadline.kind);
+        try std.testing.expectEqual(record.handle, deadline.connection_id);
+
+        _ = try endpoint_owner.lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+            server_dcid,
+            new_path,
+            &record.connection,
+        );
+
+        if (mode == .backend_validation) {
+            var backend_scratch: [8]u8 = undefined;
+            const backend_due = (try endpoint_owner.lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram(
+                record.handle,
+                &record.connection,
+                deadline.deadline_nanos,
+                .application,
+                record.backend,
+                &backend_scratch,
+                .{ .space = .application, .destination_connection_id = "peer" },
+            )) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(backend_due.due_work.pending_work.path_validation_serviced);
+            const retry = backend_due.due_work.datagram orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(retry);
+            continue;
+        }
+
+        if (mode == .sweep or mode == .sweep_scratch) {
+            var sweep_out: [1]TestEndpoint.DatagramPathResult = undefined;
+            const zero = if (mode == .sweep)
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(std.testing.allocator, deadline.deadline_nanos, .application, &.{})
+            else
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(deadline.deadline_nanos, .application, &.{});
+            try std.testing.expectEqual(@as(?root.Error, error.BufferTooSmall), zero.drain.first_error);
+            try std.testing.expect(record.connection.pendingPathChallengeCount() == 0);
+            const swept = if (mode == .sweep)
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(std.testing.allocator, deadline.deadline_nanos, .application, &sweep_out)
+            else
+                try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(deadline.deadline_nanos, .application, &sweep_out);
+            try std.testing.expectEqual(@as(usize, 1), swept.drain.datagrams_written);
+            defer std.testing.allocator.free(sweep_out[0].datagram);
+            try std.testing.expect(sweep_out[0].path.eql(new_path));
+            continue;
+        }
+
+        var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
+        try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+            deadline.deadline_nanos,
+            &zero_due_out,
+        ));
+        const zero_preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(expected_kind, zero_preserved_deadline.kind);
+        try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
+        if (!validation_only) try std.testing.expectEqual(root.PacketNumberSpace.application, zero_preserved_deadline.recovery.?.space);
+
+        var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
+        try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
+        const missing_route_due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+            std.testing.allocator,
+            deadline.deadline_nanos,
+            &due_out,
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(record.handle, missing_route_due.deadline.connection_id);
+        try std.testing.expectEqual(expected_kind, missing_route_due.deadline.kind);
+        try std.testing.expect(missing_route_due.pending_work.recovery_serviced == null);
+        try std.testing.expectEqual(@as(usize, 0), missing_route_due.drain.datagrams_written);
+        try std.testing.expectEqual(@as(?root.Error, null), missing_route_due.drain.first_error);
+        try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due.drain.first_route_error);
+        const allocator_preserved_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(expected_kind, allocator_preserved_deadline.kind);
+        try std.testing.expectEqual(record.handle, allocator_preserved_deadline.connection_id);
+        if (!validation_only) try std.testing.expectEqual(root.PacketNumberSpace.application, allocator_preserved_deadline.recovery.?.space);
+
+        const missing_route_due_scratch = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+            deadline.deadline_nanos,
+            &due_out,
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(record.handle, missing_route_due_scratch.deadline.connection_id);
+        try std.testing.expectEqual(expected_kind, missing_route_due_scratch.deadline.kind);
+        try std.testing.expect(missing_route_due_scratch.pending_work.recovery_serviced == null);
+        try std.testing.expectEqual(@as(usize, 0), missing_route_due_scratch.drain.datagrams_written);
+        try std.testing.expectEqual(@as(?root.Error, null), missing_route_due_scratch.drain.first_error);
+        try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due_scratch.drain.first_route_error);
+        const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(expected_kind, preserved_deadline.kind);
+        try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
+        if (!validation_only) try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
+        try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, new_path, .{});
+
+        const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+            deadline.deadline_nanos,
+            &due_out,
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(record.handle, due.deadline.connection_id);
+        try std.testing.expectEqual(expected_kind, due.deadline.kind);
+        if (validation_only) {
+            try std.testing.expect(due.pending_work.path_validation_serviced);
+        } else {
+            const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(record.handle, serviced.connection_id);
+            try std.testing.expectEqual(root.PacketNumberSpace.application, serviced.timer.space);
+        }
+        try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+        try std.testing.expectEqual(@as(?root.Error, null), due.drain.first_error);
+        defer std.testing.allocator.free(due_out[0].datagram);
+        try std.testing.expectEqual(record.handle, due_out[0].connection_id);
+        try std.testing.expect(due_out[0].path.eql(new_path));
+        try std.testing.expect(due_out[0].datagram.len != 0);
+        const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(record.handle, next_deadline.connection_id);
+        try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
     }
-    record.* = .{
-        .handle = 82,
-        .connection = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ns = 100 }),
-        .backend = empty_backend.backend(),
-    };
-    record_initialized = true;
-    try record.connection.validatePeerAddress();
-    try record.connection.confirmHandshake();
-    try record.connection.installOneRttTrafficSecrets(.{
-        .local = secrets.server.secret,
-        .peer = secrets.client.secret,
-    });
-    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, old_path, .{});
-    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
-    try endpoint_owner.records.adopt(record.handle, record);
-    record_owned = false;
-
-    try record.connection.sendPing();
-    const first = (try endpoint_owner.pollOneRttDatagram(record.handle, 10 * ms)) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(first);
-    const deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, deadline.kind);
-    try std.testing.expectEqual(record.handle, deadline.connection_id);
-
-    _ = try endpoint_owner.lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
-        server_dcid,
-        new_path,
-        &record.connection,
-    );
-
-    var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
-    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
-        deadline.deadline_nanos,
-        &zero_due_out,
-    ));
-    const zero_preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, zero_preserved_deadline.kind);
-    try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
-    try std.testing.expectEqual(root.PacketNumberSpace.application, zero_preserved_deadline.recovery.?.space);
-
-    var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
-    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
-    const missing_route_due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        std.testing.allocator,
-        deadline.deadline_nanos,
-        &due_out,
-    )) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(record.handle, missing_route_due.deadline.connection_id);
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, missing_route_due.deadline.kind);
-    try std.testing.expect(missing_route_due.pending_work.recovery_serviced == null);
-    try std.testing.expectEqual(@as(usize, 0), missing_route_due.drain.datagrams_written);
-    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due.drain.first_error);
-    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due.drain.first_route_error);
-    const allocator_preserved_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, allocator_preserved_deadline.kind);
-    try std.testing.expectEqual(record.handle, allocator_preserved_deadline.connection_id);
-    try std.testing.expectEqual(root.PacketNumberSpace.application, allocator_preserved_deadline.recovery.?.space);
-
-    const missing_route_due_scratch = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
-        deadline.deadline_nanos,
-        &due_out,
-    )) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(record.handle, missing_route_due_scratch.deadline.connection_id);
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, missing_route_due_scratch.deadline.kind);
-    try std.testing.expect(missing_route_due_scratch.pending_work.recovery_serviced == null);
-    try std.testing.expectEqual(@as(usize, 0), missing_route_due_scratch.drain.datagrams_written);
-    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due_scratch.drain.first_error);
-    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due_scratch.drain.first_route_error);
-    const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
-    try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
-    try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
-    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, new_path, .{});
-
-    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
-        deadline.deadline_nanos,
-        &due_out,
-    )) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(record.handle, due.deadline.connection_id);
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
-    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(record.handle, serviced.connection_id);
-    try std.testing.expectEqual(root.PacketNumberSpace.application, serviced.timer.space);
-    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
-    try std.testing.expectEqual(@as(?root.Error, null), due.drain.first_error);
-    defer std.testing.allocator.free(due_out[0].datagram);
-    try std.testing.expectEqual(record.handle, due_out[0].connection_id);
-    try std.testing.expect(due_out[0].path.eql(new_path));
-    try std.testing.expect(due_out[0].datagram.len != 0);
-    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(record.handle, next_deadline.connection_id);
-    try std.testing.expectEqual(endpoint_types.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint route preflight reclaims closed records before route errors" {

@@ -300,7 +300,11 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             path: Path,
             token: [8]u8,
             state: enum { pending, validated, superseded } = .pending,
+            migration_intent: bool = false,
+            mtu_validated: bool = false,
+            deadline_nanos: i64,
         };
+        const ProbePath = struct { connection_id: u64, path: Path };
 
         /// Destination-CID router owned by this endpoint lifecycle.
         router: PathEndpoint.EndpointRouter,
@@ -310,6 +314,8 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
         ecn_paths: PathEndpoint.EcnPathPolicy,
         /// One automatic validation candidate per caller-owned connection handle.
         path_validations: std.AutoHashMap(u64, PathValidation),
+        /// Remaining bytes for unvalidated server paths with retained probe work.
+        probe_allowances: std.array_hash_map.Auto(ProbePath, usize),
 
         /// Create an endpoint lifecycle owner with empty routes and timers.
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -329,11 +335,13 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 .recovery_timers = EndpointLossDetectionTimers.init(allocator),
                 .ecn_paths = PathEndpoint.EcnPathPolicy.init(allocator),
                 .path_validations = std.AutoHashMap(u64, PathValidation).init(allocator),
+                .probe_allowances = .{},
             };
         }
 
         /// Release route and timer storage owned by this endpoint lifecycle.
         pub fn deinit(self: *Self) void {
+            self.probe_allowances.deinit(self.router.allocator);
             self.path_validations.deinit();
             self.ecn_paths.deinit();
             self.recovery_timers.deinit();
@@ -1240,7 +1248,14 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             new_path: Path,
             connection: *Connection,
         ) endpoint.RouteError!endpoint.RouteResult {
+            const previous_path = try self.currentRoutePath(destination_connection_id);
             const updated = try self.router.updateRoutePathFromValidatedDatagram(destination_connection_id, new_path);
+            if (Path == endpoint.Udp4Tuple) {
+                if (!std.mem.eql(u8, &previous_path.remote.octets, &new_path.remote.octets) or
+                    !previous_path.local.eql(new_path.local)) connection.resetPathRecovery();
+            }
+            connection.markDatagramPathValidated(endpoint.DatagramPath.init(new_path));
+            _ = self.probe_allowances.swapRemove(.{ .connection_id = updated.connection_id, .path = new_path });
             if (self.path_validations.getPtr(updated.connection_id)) |validation| {
                 if (connection.hasPathChallenge(validation.token)) {
                     // Retain ownership until the old probe is consumed or expires.
@@ -1712,7 +1727,8 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
         /// stateless reset, new Initial, Handshake, 0-RTT, and drop actions. For
         /// routed 1-RTT application packets, automatic challenges retain their
         /// candidate tuple and token. A matching response on any path validates
-        /// that candidate. A new highest packet from its tuple permits commit.
+        /// that candidate. Commit requires current non-probing intent and a new
+        /// highest packet from the candidate's tuple.
         /// Without an automatic candidate, manual probes retain their prior policy.
         /// With `path_challenge_data`, only a successfully processed changed-path
         /// application packet that advances the Application receive cursor can
@@ -1755,9 +1771,31 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             datagram,
                         ),
                         .application => {
+                            _ = try self.servicePathValidation(connection_id, connection, now_nanos);
+                            const previous_context = connection.datagram_context;
+                            const previous_authenticated = connection.datagram_authenticated;
+                            const previous_response_policy = connection.ignore_unmatched_path_responses;
+                            const candidate_proof = if (self.path_validations.get(connection_id)) |validation|
+                                validation.state == .validated and validation.path.eql(path)
+                            else
+                                false;
+                            connection.datagram_context = .{
+                                .path = endpoint.DatagramPath.init(path),
+                                .validated = (!route.path_changed and connection.peer_address_validated) or candidate_proof,
+                            };
+                            connection.datagram_authenticated = false;
+                            connection.ignore_unmatched_path_responses = true;
+                            defer {
+                                connection.datagram_context = previous_context;
+                                connection.datagram_authenticated = previous_authenticated;
+                                connection.ignore_unmatched_path_responses = previous_response_policy;
+                            }
                             if (self.path_validations.get(connection_id)) |validation| {
                                 if (validation.state != .validated and !connection.hasPathChallenge(validation.token)) {
                                     _ = self.path_validations.remove(connection_id);
+                                    if (!connection.hasQueuedValidationOnPath(endpoint.DatagramPath.init(validation.path))) {
+                                        _ = self.probe_allowances.swapRemove(.{ .connection_id = connection_id, .path = validation.path });
+                                    }
                                 }
                             }
                             const had_candidate = self.path_validations.contains(connection_id);
@@ -1765,6 +1803,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             const receive_cursor_before = connection.next_peer_packet_number;
                             var superseded_response = false;
                             if (self.path_validations.getPtr(connection_id)) |validation| {
+                                const challenge_expanded = (connection.pathChallengeMinimumDatagramSize(validation.token) orelse 0) >= 1200;
                                 const matched = connection.processProtectedShortDatagramWithInstalledKeysOrCloseAndObservePathResponse(
                                     now_nanos,
                                     route.destination_connection_id.asSlice().len,
@@ -1775,15 +1814,33 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                                     return err;
                                 };
                                 if (matched) {
+                                    _ = self.probe_allowances.swapRemove(.{ .connection_id = connection_id, .path = validation.path });
                                     if (validation.state == .superseded) {
                                         superseded_response = true;
                                     } else {
                                         validation.state = .validated;
+                                        validation.mtu_validated = challenge_expanded;
+                                    }
+                                }
+                                if (options.validate_path_mtu and validation.state == .validated and !validation.mtu_validated) {
+                                    if (options.path_challenge_data) |token| {
+                                        if (!std.mem.eql(u8, &token, &validation.token)) {
+                                            const receive_context = connection.datagram_context;
+                                            connection.datagram_context = .{ .path = endpoint.DatagramPath.init(validation.path), .validated = true };
+                                            defer connection.datagram_context = receive_context;
+                                            try connection.sendPathChallenge(token);
+                                            validation.token = token;
+                                            validation.state = .pending;
+                                        }
                                     }
                                 }
                                 try self.armRecoveryTimerFromConnection(connection_id, connection);
                                 if (validation.state != .validated and !connection.hasPathChallenge(validation.token)) {
+                                    const failed_path = validation.path;
                                     _ = self.path_validations.remove(connection_id);
+                                    if (!connection.hasQueuedValidationOnPath(endpoint.DatagramPath.init(failed_path))) {
+                                        _ = self.probe_allowances.swapRemove(.{ .connection_id = connection_id, .path = failed_path });
+                                    }
                                 }
                             } else {
                                 try self.processProtectedShortDatagramWithInstalledKeysOrClose(
@@ -1796,8 +1853,17 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             }
                             const outstanding_after = connection.outstandingPathChallengeCount();
                             const advances_cursor = connection.next_peer_packet_number > receive_cursor_before;
+                            if (advances_cursor and connection.last_one_rtt_non_probing) {
+                                if (self.path_validations.getPtr(connection_id)) |validation| {
+                                    if (validation.state != .superseded) {
+                                        // Only the latest qualifying non-probing
+                                        // input selects this candidate for service.
+                                        validation.migration_intent = validation.path.eql(path);
+                                    }
+                                }
+                            }
                             const candidate_validated = if (self.path_validations.get(connection_id)) |validation|
-                                validation.state == .validated and validation.path.eql(path) and advances_cursor
+                                validation.state == .validated and (!options.validate_path_mtu or validation.mtu_validated) and validation.migration_intent and validation.path.eql(path) and advances_cursor
                             else
                                 false;
                             const manual_validated = !had_candidate and outstanding_after < outstanding_before;
@@ -1825,9 +1891,14 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                                     self.path_validations.putAssumeCapacityNoClobber(connection_id, .{
                                         .path = path,
                                         .token = challenge_data,
+                                        .migration_intent = connection.last_one_rtt_non_probing,
+                                        .deadline_nanos = @import("connection.zig").saturatingAdd(now_nanos, 3 *| @max(connection.recovery_state.ptoNs(), 3 *| connection.config.initial_rtt_ns +| connection.config.max_ack_delay_ns)),
                                     });
                                     path_challenge_queued = true;
                                 }
+                            }
+                            if (connection.datagram_authenticated) {
+                                try self.recordProbeInput(connection_id, connection, path, datagram.len, connection.datagram_context.?.validated);
                             }
                             break :routed .{
                                 .feed = .{ .routed = route },
@@ -1909,24 +1980,25 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                     .next_deadline = self.nextDeadline(connection_id, connection),
                 },
             };
-            const output_path = feed.selected_output_path orelse try self.currentRoutePath(routed.destination_connection_id.asSlice());
-            const polled = try self.pollDatagram(
+            const service_path = try self.currentRoutePath(routed.destination_connection_id.asSlice());
+            const polled = try self.pollDatagramOnPath(
                 connection_id,
                 connection,
                 now_nanos,
                 poll_options,
+                service_path,
             );
             const polled_result: ?EndpointPolledDatagramResult = if (polled) |protected_datagram|
                 .{
                     .connection_id = connection_id,
-                    .datagram = protected_datagram,
+                    .datagram = protected_datagram.datagram,
                 }
             else
                 null;
             return .{
                 .feed = feed,
                 .datagram = polled_result,
-                .output_path = if (polled_result != null) output_path else null,
+                .output_path = if (polled) |packet_output| packet_output.path else null,
                 .next_deadline = self.nextDeadline(connection_id, connection),
             };
         }
@@ -3547,6 +3619,16 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 }
             }
 
+            if (state == .active) {
+                if (self.nextPathValidationDeadline(connection_id, connection)) |deadline| {
+                    if (next == null or deadline < next.?.deadline_nanos) next = .{
+                        .connection_id = connection_id,
+                        .deadline_nanos = deadline,
+                        .kind = .path_validation,
+                    };
+                }
+            }
+
             return next;
         }
 
@@ -4996,6 +5078,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             );
             if (result.close_retired != null) return result;
 
+            result.path_validation_serviced = try self.servicePathValidation(connection_id, connection, now_nanos);
             result.key_discard_serviced = connection.discardExpiredOneRttKeys(now_nanos);
 
             result.recovery_serviced = try self.serviceRecoveryTimer(
@@ -5004,6 +5087,64 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 now_nanos,
             );
             return result;
+        }
+
+        fn nextPathValidationDeadline(self: *const Self, connection_id: u64, connection: *const Connection) ?i64 {
+            var deadline = connection.pathValidationDeadline();
+            if (self.path_validations.get(connection_id)) |validation| {
+                if (deadline == null or validation.deadline_nanos < deadline.?) deadline = validation.deadline_nanos;
+            }
+            return deadline;
+        }
+
+        /// Query due path work without consuming retries or candidate state.
+        pub fn hasDuePathValidation(self: *const Self, connection_id: u64, connection: *const Connection, now_nanos: i64) bool {
+            if (connection.connectionState() != .active or idleRetirementDue(connection, now_nanos)) return false;
+            const deadline = self.nextPathValidationDeadline(connection_id, connection) orelse return false;
+            return deadline <= now_nanos;
+        }
+
+        fn idleRetirementDue(connection: *const Connection, now_nanos: i64) bool {
+            const deadline = connection.idleTimeoutDeadline() orelse return false;
+            return deadline <= now_nanos;
+        }
+
+        /// Select installed-key output for all work due at this wakeup.
+        /// The earliest deadline can belong to key discard while a path retry is due.
+        /// Terminal idle cleanup never requires an output slot.
+        pub fn installedKeyPollOptionsForDueWork(
+            self: *const Self,
+            deadline: EndpointConnectionDeadline,
+            connection: *const Connection,
+            now_nanos: i64,
+            destination_connection_id: []const u8,
+            source_connection_id: []const u8,
+        ) ?EndpointPollInstalledKeyDatagramOptions {
+            if (idleRetirementDue(connection, now_nanos)) return null;
+            if (self.hasDuePathValidation(deadline.connection_id, connection, now_nanos)) return .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            };
+            return deadline.installedKeyPollOptions(destination_connection_id, source_connection_id);
+        }
+
+        fn servicePathValidation(self: *Self, connection_id: u64, connection: *Connection, now_nanos: i64) Error!bool {
+            if (connection.connectionState() != .active) return false;
+            const deadline = self.nextPathValidationDeadline(connection_id, connection) orelse return false;
+            if (deadline > now_nanos) return false;
+            try connection.checkPathValidationTimeouts(now_nanos);
+            if (self.path_validations.get(connection_id)) |validation| {
+                if (now_nanos >= validation.deadline_nanos) connection.abandonPathChallenge(validation.token);
+                if (now_nanos >= validation.deadline_nanos or
+                    (validation.state != .validated and !connection.hasPathChallenge(validation.token)))
+                {
+                    _ = self.path_validations.remove(connection_id);
+                    if (!connection.hasQueuedValidationOnPath(endpoint.DatagramPath.init(validation.path))) {
+                        _ = self.probe_allowances.swapRemove(.{ .connection_id = connection_id, .path = validation.path });
+                    }
+                }
+            }
+            return true;
         }
 
         /// Sweep pending work across caller-owned connections.
@@ -5036,6 +5177,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 if (pending.recovery_serviced != null) {
                     sweep.recovery_serviced_count += 1;
                 }
+                if (pending.path_validation_serviced) sweep.path_validation_serviced_count += 1;
             }
             return sweep;
         }
@@ -5259,7 +5401,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 pending_connections,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
@@ -5292,7 +5434,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 pending_connections,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
@@ -5323,11 +5465,20 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             poll_space: EndpointInstalledKeyDatagramSpace,
             out: []EndpointPolledDatagramResult,
         ) Error!EndpointPendingWorkSweepDatagramDrainResult {
+            if (out.len == 0) {
+                for (pending_connections) |view| {
+                    if (self.hasDuePathValidation(view.connection_id, view.connection, now_nanos)) return .{
+                        .pending_work = .{},
+                        .drain = .{ .first_error = error.BufferTooSmall },
+                        .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
+                    };
+                }
+            }
             const pending_work = try self.processPendingWorkAcrossConnections(
                 pending_connections,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .drain = .{},
@@ -5358,11 +5509,20 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             poll_views: []const EndpointConnectionInstalledKeyPollView,
             out: []EndpointPolledDatagramResult,
         ) Error!EndpointPendingWorkSweepDatagramDrainResult {
+            if (out.len == 0) {
+                for (pending_connections) |view| {
+                    if (self.hasDuePathValidation(view.connection_id, view.connection, now_nanos)) return .{
+                        .pending_work = .{},
+                        .drain = .{ .first_error = error.BufferTooSmall },
+                        .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
+                    };
+                }
+            }
             const pending_work = try self.processPendingWorkAcrossConnections(
                 pending_connections,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .drain = .{},
@@ -5387,6 +5547,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 .close_retired_count = if (pending_work.close_retired != null) 1 else 0,
                 .key_discard_serviced_count = if (pending_work.key_discard_serviced) 1 else 0,
                 .recovery_serviced_count = if (pending_work.recovery_serviced != null) 1 else 0,
+                .path_validation_serviced_count = if (pending_work.path_validation_serviced) 1 else 0,
             };
         }
 
@@ -6491,12 +6652,14 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             options: EndpointPollInstalledKeyDatagramOptions,
         ) Error!EndpointPendingWorkDatagramResult {
             const pending_work = try self.processPendingWork(connection_id, connection, now_nanos);
-            const serviced = pending_work.recovery_serviced orelse return .{
+            if (pending_work.recovery_serviced == null and !pending_work.path_validation_serviced) return .{
                 .pending_work = pending_work,
                 .datagram = null,
                 .next_deadline = self.nextDeadline(connection_id, connection),
             };
-            if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+            if (pending_work.recovery_serviced) |serviced| {
+                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+            } else if (options.space != .application) return error.InvalidPacket;
 
             return .{
                 .pending_work = pending_work,
@@ -6518,13 +6681,20 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             options: EndpointPollInstalledKeyDatagramOptions,
             out: []EndpointPolledDatagramResult,
         ) Error!EndpointPendingWorkDatagramDrainResult {
+            if (out.len == 0 and self.hasDuePathValidation(connection_id, connection, now_nanos)) return .{
+                .pending_work = .{},
+                .drain = .{ .first_error = error.BufferTooSmall },
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
             const pending_work = try self.processPendingWork(connection_id, connection, now_nanos);
-            const serviced = pending_work.recovery_serviced orelse return .{
+            if (pending_work.recovery_serviced == null and !pending_work.path_validation_serviced) return .{
                 .pending_work = pending_work,
                 .drain = .{},
                 .next_deadline = self.nextDeadline(connection_id, connection),
             };
-            if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+            if (pending_work.recovery_serviced) |serviced| {
+                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+            } else if (options.space != .application) return error.InvalidPacket;
 
             const poll_views = [_]EndpointConnectionPollView{.{
                 .connection_id = connection_id,
@@ -6544,10 +6714,14 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             };
         }
 
-        fn installedKeyOptionsMatchRecoveryDeadline(
+        fn installedKeyOptionsMatchDueWork(
+            self: *const Self,
+            connection: *const Connection,
+            now_nanos: i64,
             deadline: EndpointConnectionDeadline,
             options: EndpointPollInstalledKeyDatagramOptions,
         ) bool {
+            if (self.hasDuePathValidation(deadline.connection_id, connection, now_nanos)) return options.space == .application;
             if (deadline.kind != .recovery) return false;
             const timer = deadline.recovery orelse return false;
             return timer.space == options.recoveryPacketNumberSpace();
@@ -6679,8 +6853,8 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             const deadline = self.nextDeadline(connection_id, connection) orelse return null;
             if (deadline.deadline_nanos > now_nanos) return null;
 
-            const pending_datagram = if (deadline.kind == .recovery) pending: {
-                if (!installedKeyOptionsMatchRecoveryDeadline(deadline, options)) return error.InvalidPacket;
+            const pending_datagram = if (!idleRetirementDue(connection, now_nanos) and (deadline.kind == .recovery or self.hasDuePathValidation(connection_id, connection, now_nanos))) pending: {
+                if (!self.installedKeyOptionsMatchDueWork(connection, now_nanos, deadline, options)) return error.InvalidPacket;
                 break :pending try self.processPendingWorkAndPollDatagram(
                     connection_id,
                     connection,
@@ -6716,8 +6890,8 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             const deadline = self.nextDeadline(connection_id, connection) orelse return null;
             if (deadline.deadline_nanos > now_nanos) return null;
 
-            const pending_drain = if (deadline.kind == .recovery) pending: {
-                if (!installedKeyOptionsMatchRecoveryDeadline(deadline, options)) return error.InvalidPacket;
+            const pending_drain = if (!idleRetirementDue(connection, now_nanos) and (deadline.kind == .recovery or self.hasDuePathValidation(connection_id, connection, now_nanos))) pending: {
+                if (!self.installedKeyOptionsMatchDueWork(connection, now_nanos, deadline, options)) return error.InvalidPacket;
                 if (out.len == 0) return error.BufferTooSmall;
                 break :pending try self.processPendingWorkAndDrainDatagrams(
                     connection_id,
@@ -6757,7 +6931,10 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             const deadline = self.nextDeadline(connection_id, connection) orelse return null;
             if (deadline.deadline_nanos > now_nanos) return null;
 
-            const pending_datagram = if (deadline.installedKeyPollOptions(
+            const pending_datagram = if (self.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id,
                 source_connection_id,
             )) |options|
@@ -6793,7 +6970,10 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             const deadline = self.nextDeadline(connection_id, connection) orelse return null;
             if (deadline.deadline_nanos > now_nanos) return null;
 
-            const pending_drain = if (deadline.installedKeyPollOptions(
+            const pending_drain = if (self.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id,
                 source_connection_id,
             )) |options| pending: {
@@ -7104,15 +7284,17 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             const deadline = self.nextDeadline(connection_id, connection) orelse return null;
             if (deadline.deadline_nanos > now_nanos) return null;
 
-            const pending_datagram = if (deadline.kind == .recovery) pending: {
-                const timer = deadline.recovery orelse return error.InvalidPacket;
-                if (timer.space == .initial) {
-                    break :pending EndpointPendingWorkDatagramResult{
-                        .pending_work = try self.processPendingWork(connection_id, connection, now_nanos),
-                        .datagram = null,
-                    };
+            const pending_datagram = if (!idleRetirementDue(connection, now_nanos) and (deadline.kind == .recovery or self.hasDuePathValidation(connection_id, connection, now_nanos))) pending: {
+                if (deadline.kind == .recovery) {
+                    const timer = deadline.recovery orelse return error.InvalidPacket;
+                    if (timer.space == .initial) {
+                        break :pending EndpointPendingWorkDatagramResult{
+                            .pending_work = try self.processPendingWork(connection_id, connection, now_nanos),
+                            .datagram = null,
+                        };
+                    }
                 }
-                if (!installedKeyOptionsMatchRecoveryDeadline(deadline, poll_options)) return error.InvalidPacket;
+                if (!self.installedKeyOptionsMatchDueWork(connection, now_nanos, deadline, poll_options)) return error.InvalidPacket;
                 break :pending try self.processPendingWorkAndPollDatagram(
                     connection_id,
                     connection,
@@ -11709,6 +11891,78 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             return datagram;
         }
 
+        const ApplicationOutput = struct { datagram: []u8, path: ?Path };
+
+        fn recordProbeInput(
+            self: *Self,
+            connection_id: u64,
+            connection: *const Connection,
+            path: Path,
+            received_bytes: usize,
+            validated: bool,
+        ) Error!void {
+            const probe_path = ProbePath{ .connection_id = connection_id, .path = path };
+            if (connection.side != .server or validated or !connection.hasQueuedValidationOnPath(endpoint.DatagramPath.init(path))) {
+                _ = self.probe_allowances.swapRemove(probe_path);
+                return;
+            }
+            const allowance = try self.probe_allowances.getOrPut(self.router.allocator, probe_path);
+            if (!allowance.found_existing) allowance.value_ptr.* = 0;
+            allowance.value_ptr.* = allowance.value_ptr.* +| (received_bytes *| 3);
+        }
+
+        fn pollApplicationOutput(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            now_nanos: i64,
+            dcid: []const u8,
+            selection: Connection.PacketSelection,
+            selected_context: ?connection_state.DatagramContext,
+            service_path: Path,
+        ) Error!?ApplicationOutput {
+            const previous_serving_path = connection.serving_output_path;
+            connection.serving_output_path = endpoint.DatagramPath.init(service_path);
+            defer connection.serving_output_path = previous_serving_path;
+            const selected_path: ?Path = if (selected_context) |context|
+                context.path.toTuple(Path) orelse return error.InvalidPacket
+            else
+                null;
+            const service_validated = if (selected_path) |path| path.eql(service_path) and connection.peer_address_validated else false;
+            const validation_limit: ?usize = if (selected_context) |context|
+                if (connection.side == .server and !context.validated and !service_validated)
+                    self.probe_allowances.get(.{ .connection_id = connection_id, .path = selected_path.? }) orelse 0
+                else
+                    null
+            else
+                null;
+            const output = connection.pollProtectedShortDatagramWithInstalledKeysAndContext(now_nanos, dcid, selection, validation_limit) catch |err| {
+                self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+                return err;
+            };
+            errdefer if (output) |packet_output| connection.allocator.free(packet_output.datagram);
+            if (output) |packet_output| {
+                if (packet_output.path_context) |context| {
+                    // The packetizer consumes the selected context or emits
+                    // ordinary/close output without a validation context.
+                    const probe_path = ProbePath{ .connection_id = connection_id, .path = selected_path.? };
+                    if (context.validated or service_validated or connection.side != .server) {
+                        _ = self.probe_allowances.swapRemove(probe_path);
+                    } else {
+                        if (self.probe_allowances.getPtr(probe_path)) |allowance| {
+                            allowance.* = allowance.* -| packet_output.datagram.len;
+                        }
+                        if (!connection.hasQueuedValidationOnPath(context.path)) _ = self.probe_allowances.swapRemove(probe_path);
+                    }
+                }
+            }
+            try self.armRecoveryTimerFromConnection(connection_id, connection);
+            return if (output) |packet_output| .{
+                .datagram = packet_output.datagram,
+                .path = if (packet_output.path_context != null) selected_path else service_path,
+            } else null;
+        }
+
         /// Socket-facing installed-key datagram output entrypoint.
         ///
         /// This is the public endpoint-loop name for polling the next packet after
@@ -11742,6 +11996,63 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                     options.destination_connection_id,
                 ),
             };
+        }
+
+        /// Poll one packet with a response-specific path or the committed service path.
+        ///
+        /// Off-service probes omit ACK/STREAM coalescing. Blocked probe sources do
+        /// not prevent another eligible source or ordinary service output.
+        pub fn pollDatagramOnPath(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            now_nanos: i64,
+            options: EndpointPollInstalledKeyDatagramOptions,
+            service_path: Path,
+        ) Error!?PathResults.EndpointDatagramPathResult {
+            if (options.space != .application) {
+                const datagram = (try self.pollDatagram(connection_id, connection, now_nanos, options)) orelse return null;
+                return .{ .connection_id = connection_id, .datagram = datagram, .path = service_path };
+            }
+            const next_context = connection.pendingValidationContext();
+            const ordinary_path = if (next_context) |context|
+                (context.path.toTuple(Path) orelse return error.InvalidPacket).eql(service_path)
+            else
+                true;
+            const output = selected: {
+                if (ordinary_path) {
+                    const automatic_output = try self.pollApplicationOutput(connection_id, connection, now_nanos, options.destination_connection_id, .automatic, next_context, service_path);
+                    // Preserve successful priority. A blocked head must not hide
+                    // another eligible validation frame.
+                    if (automatic_output != null or connection.pending_path_responses.items.len + connection.pending_path_challenges.items.len <= 1) break :selected automatic_output;
+                }
+                for (connection.pending_path_responses.items, 0..) |response, index| {
+                    const include_ack = if (response.context) |context|
+                        (context.path.toTuple(Path) orelse return error.InvalidPacket).eql(service_path)
+                    else
+                        true;
+                    if (try self.pollApplicationOutput(connection_id, connection, now_nanos, options.destination_connection_id, .{ .response = .{ .index = index, .include_ack = include_ack } }, response.context, service_path)) |packet_output| {
+                        break :selected packet_output;
+                    }
+                }
+                for (connection.pending_path_challenges.items, 0..) |challenge, index| {
+                    const include_ack = if (challenge.context) |context|
+                        (context.path.toTuple(Path) orelse return error.InvalidPacket).eql(service_path)
+                    else
+                        true;
+                    if (try self.pollApplicationOutput(connection_id, connection, now_nanos, options.destination_connection_id, .{ .challenge = .{ .index = index, .include_ack = include_ack } }, challenge.context, service_path)) |packet_output| {
+                        break :selected packet_output;
+                    }
+                }
+                // The automatic lane was already attempted for a serving head.
+                if (ordinary_path) break :selected null;
+                break :selected try self.pollApplicationOutput(connection_id, connection, now_nanos, options.destination_connection_id, .ordinary, null, service_path);
+            };
+            return if (output) |packet_output| .{
+                .connection_id = connection_id,
+                .datagram = packet_output.datagram,
+                .path = packet_output.path.?,
+            } else null;
         }
 
         /// Poll the first installed-key datagram across caller-owned connections.
@@ -12795,6 +13106,14 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
 
         /// Retire all routes, automatic validation and recovery timers for one connection handle.
         pub fn retireConnection(self: *Self, connection_id: u64) EndpointConnectionRetireResult {
+            var probe_index: usize = 0;
+            while (probe_index < self.probe_allowances.count()) {
+                if (self.probe_allowances.keys()[probe_index].connection_id == connection_id) {
+                    self.probe_allowances.swapRemoveAt(probe_index);
+                } else {
+                    probe_index += 1;
+                }
+            }
             _ = self.path_validations.remove(connection_id);
             _ = self.ecn_paths.resetConnection(connection_id);
             return .{

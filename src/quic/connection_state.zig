@@ -56,16 +56,25 @@ pub const PendingCloseFrame = union(enum) {
 /// Rollback snapshot for whether peer close diagnostics existed.
 pub const PeerCloseSnapshot = enum { absent, present };
 
-/// Queued PATH_RESPONSE payload and optional caller-supplied origin.
+/// Value-only source context for queued path-validation output.
+pub const DatagramContext = struct {
+    path: endpoint.DatagramPath,
+    validated: bool = false,
+};
+
+/// Queued PATH_RESPONSE and the path on which its challenge arrived.
 pub const PendingPathResponse = struct {
     data: [8]u8,
-    origin: ?endpoint.DatagramPath = null,
+    context: ?DatagramContext = null,
 };
 
 /// Pending PATH_CHALLENGE data awaiting transmission.
 pub const PendingPathChallenge = struct {
     data: [8]u8,
     transmissions: u8 = 0,
+    context: ?DatagramContext = null,
+    /// Smallest committed size for this token, retained across queued retries.
+    minimum_datagram_size: usize = 0,
 };
 
 /// PATH_CHALLENGE data sent and awaiting response.
@@ -73,6 +82,9 @@ pub const OutstandingPathChallenge = struct {
     data: [8]u8,
     sent_time_nanos: i64,
     transmissions: u8,
+    /// Smallest committed UDP size for this token, not its latest send size.
+    minimum_datagram_size: usize = 0,
+    context: ?DatagramContext = null,
 };
 
 /// Sent packet metadata retained for ACK/loss accounting.
@@ -81,10 +93,17 @@ pub const SentPacket = struct {
     sent_time_nanos: i64,
     bytes: usize,
     ecn_codepoint: EcnCodepoint = .not_ect,
+    /// Whether route-aware output used its serving path at send commit.
+    sent_on_serving_path: bool = true,
     stream_frame: ?PendingStreamFrame = null,
     crypto_frame: ?PendingCryptoFrame = null,
     reset_stream_frame: ?frame.ResetStreamFrame = null,
     stop_sending_frame: ?frame.StopSendingFrame = null,
+
+    /// Return recovery ownership from the serving-path mark and packet epoch.
+    pub fn isOnRecoveryPath(self: SentPacket, first_packet_number: u64) bool {
+        return self.sent_on_serving_path and self.packet_number >= first_packet_number;
+    }
 
     pub fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
         if (self.stream_frame) |pending| {

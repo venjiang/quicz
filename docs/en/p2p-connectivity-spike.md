@@ -152,9 +152,9 @@ response. No reference source code is copied into this implementation.
 
 ### Automatic Validation Ownership
 
-Status: local validation and independent review passed. Production
-integration remains pending. The explicit-commit regression failed before
-the correction and passed after it.
+The original ownership slice passed local validation and independent review.
+The explicit-commit regression failed before the correction and passed after it.
+The later runtime work is described below. Product integration remains separate.
 
 [RFC 9000 sections 8.2.2 and 8.2.3](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2.3)
 allow a matching response on any path. That response validates the path
@@ -171,14 +171,14 @@ returns, including errors. No second parser or retry engine is added.
 
 | Input while B is the candidate | Validation | Route |
 | --- | --- | --- |
-| B's matching response arrives on B with a new highest number. | B succeeds. | Commit B. |
+| B's matching response arrives on B with a new highest number. | B succeeds. | Commit B only with current non-probing intent and the required MTU proof. |
 | B's matching response arrives on A or C. | B succeeds. | Keep A. |
-| B later sends a new highest packet. | Retain B's success. | Commit B. |
+| B later sends a new highest non-probing packet. | Retain B's success. | Commit B when the required MTU proof is complete. |
 | A replay or lower packet number arrives on B. | Keep its existing status. | Keep A. |
 | Another probe's valid response arrives. | Do not validate B. | Keep A. |
 | Authentication or frame processing fails. | Do not record success. | Keep A. |
 | B's challenge enters the existing retry queue. | Retain B and its token. | Keep A. |
-| B's retries expire. | Remove B before processing the next input. | Keep A. |
+| B's retries or absolute limit expire. | Remove B through timer service or before accepting late input. | Keep A. |
 | An explicit commit selects D while B is validated. | Remove B's success. | Keep D. |
 | An explicit commit selects D while B is pending. | Mark B superseded until its token is consumed or expires. | Keep D. |
 | A superseded B response arrives, even with a new highest number. | Consume the old token without starting a candidate. | Keep D. |
@@ -189,10 +189,9 @@ Candidate storage is bounded by connection handles. Capacity is reserved
 before a challenge is queued. The shared successful route-commit helper
 supersedes earlier automatic ownership. It leaves unrelated probes intact.
 Without an automatic owner, manual probes retain their prior feed policy.
-Explicit lower-level migration helpers keep their compatibility behavior. Timer-only cleanup,
-candidate output policy and multiple CID commits remain separate work.
-These checks do not establish production roaming or physical-network
-acceptance, and they do not change Mons dependency pins.
+Explicit lower-level migration helpers keep their compatibility behavior.
+The runtime work below adds timer cleanup, per-packet destinations and CID coherence.
+These checks do not establish physical-network acceptance or change product dependencies.
 
 Final related checks passed 32/32. The complete suite passed 2029/2029.
 The actual multi-connection example completed all four handlers and
@@ -211,10 +210,86 @@ bytes and the origin of a consumed response. Ordinary, close and
 unannotated output have no response origin. The caller owns the returned
 bytes under the existing allocator contract.
 
-This is metadata only. It does not select a UDP destination or establish
-address validation. Existing byte APIs, packet order, ACK coalescing,
-admission and recovery remain unchanged. Endpoint and runtime routing do
-not adopt these annotations in this slice.
+The origin API is metadata only. It does not select a UDP destination or
+establish address validation. Existing byte APIs retain their signatures and
+normal packet selection. The route-aware endpoint APIs use retained context
+to select each validation packet's destination.
+
+### Passive IPv4 Runtime Migration
+
+The server runtime supports passive IPv4 rebinding after handshake confirmation.
+The server address remains stable. The client keeps its existing connection,
+streams and socket. This scope does not include active socket replacement,
+address-family changes or migration between QUIC and a relay transport.
+
+Connection retains a copied tuple with each queued response and challenge.
+Retries retain the challenge's original tuple. Route-aware polling sends
+off-service validation packets without ACK or application frames. Ordinary
+data remains on the committed path until migration succeeds. A blocked probe
+does not prevent ordinary output or another eligible response.
+When a serving-path response is blocked, polling still examines queued validation
+alternatives. Successful automatic output retains its existing priority.
+
+An unvalidated server path has its own amplification credit. Authenticated
+received bytes grant credit to that connection and complete tuple. Failed
+authentication grants none. A send debits credit only after packet commit.
+Candidate expiry and connection retirement remove their owned work and credit.
+
+The existing challenge retry engine participates in endpoint deadline selection.
+It remains active when an ACK removes all ordinary in-flight recovery work.
+Source-aware challenges use the larger of the current PTO and the initial-path
+PTO. One absolute candidate limit also bounds retries blocked by amplification.
+Neither case adds another retry engine or keeps a healthy connection waiting forever.
+
+Responses to already-sent challenges remain eligible while a retry is queued.
+Route-aware receive discards unmatched responses after expiry without validating
+a new path or closing healthy service. Legacy receive entrypoints keep their
+unknown-response error behavior. Batch sweeps retain path-validation progress,
+and empty output buffers do not consume due path retries.
+
+The earliest deadline selects the wakeup, not the only action in that pass.
+Due key discard and path retry can complete together. Output selection includes
+the retry even when key discard has the earlier deadline. Terminal idle cleanup
+keeps its existing priority and does not require an output slot for path work.
+
+The runtime enables `validate_path_mtu` and supplies fresh challenge data.
+A short challenge can prove the candidate address but cannot complete migration.
+The lifecycle then queues a fresh challenge of at least 1200 bytes on that
+validated address. Both stages share the original candidate limit. Only the
+exact response to the expanded challenge completes the MTU requirement.
+Each token retains the minimum size across its committed transmissions.
+A short transmission prevents later expanded retries from upgrading that token's
+MTU proof. A distinct token must obtain the full-size proof instead.
+Low-level callers keep the existing optional policy and token-supply contract.
+
+The latest authenticated, highest-numbered non-probing input selects migration
+intent. Pure probing traffic, duplicates and older packets do not select a
+serving path. A later non-probing packet from another tuple revokes that intent.
+The lifecycle keeps one automatic candidate per connection. Another candidate
+can start after the existing owner expires or completes.
+
+A validated commit moves every non-empty CID alias of the connection together.
+Routes belonging to another connection stay unchanged. Port-only rebinding
+retains recovery estimates. An IPv4 address change resets RTT, congestion and
+pacing, with a conservative 1200-byte ceiling. In-flight records, stream data
+and cumulative metrics remain available. Old-path ACKs and losses release
+their bytes without training the new path's estimates.
+
+Route-aware send records also retain whether each packet used the serving path.
+This mark combines with the packet-number epoch when processing ACKs and losses.
+Validation output sent to an older address after a commit cannot train the new
+path merely because it has a newer packet number. Mixed ACKs release all bytes,
+but congestion timing and growth use only eligible serving-path packets.
+
+Byte-only lifecycle polling retains connection-level admission and timer refresh.
+It does not apply or debit route-aware path credit. The private path-credit
+packetizer requires a concrete serving tuple from its route-aware caller.
+
+Native tests cover protected receive and polling, token ownership, probing
+classification, amplification, timer-only retry and cleanup, MTU follow-up,
+CID aliases and path recovery state. Existing byte-only origin APIs retain
+their dedicated regression tests. Local socket validation and product or
+physical-device acceptance must be reported separately.
 
 ## Deliberately not implemented yet
 

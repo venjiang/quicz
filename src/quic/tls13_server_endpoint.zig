@@ -76,21 +76,14 @@ pub fn Tls13ServerEndpointForTuple(
     return struct {
         const Self = @This();
 
-        /// Endpoint-owned 1-RTT datagram paired with its committed UDP route.
+        /// Endpoint-owned 1-RTT datagram paired with its selected UDP path.
         pub const OneRttDatagramPathResult = struct {
             datagram: []u8,
             path: Path,
         };
 
-        /// Endpoint-owned protected datagram paired with its committed UDP route.
-        pub const DatagramPathResult = struct {
-            /// Endpoint-owned connection handle that produced `datagram`.
-            connection_id: u64,
-            /// Protected datagram emitted by the selected record.
-            datagram: []u8,
-            /// Current committed UDP tuple for this record's local route CID.
-            path: Path,
-        };
+        /// Protected output paired with its probe-specific or service path.
+        pub const DatagramPathResult = PathTypes.EndpointDatagramPathResult;
 
         /// Endpoint response datagram paired with the UDP tuple it answers.
         pub const DatagramResponsePathResult = struct {
@@ -352,7 +345,7 @@ pub fn Tls13ServerEndpointForTuple(
             };
         }
 
-        fn preflightDueRecoveryRoutes(
+        fn preflightDueOutputRoutes(
             self: *Self,
             now_nanos: i64,
         ) (root.Error || endpoint.RouteError)!void {
@@ -362,15 +355,18 @@ pub fn Tls13ServerEndpointForTuple(
                 const connection_id = entry.key_ptr.*;
                 const record = entry.value_ptr.*;
                 const connection = connection_of(record);
+                if (self.lifecycle.hasDuePathValidation(connection_id, connection, now_nanos)) {
+                    _ = try self.currentRecordRoutePath(record);
+                    continue;
+                }
                 const deadline = self.lifecycle.nextDeadline(connection_id, connection) orelse continue;
                 if (deadline.deadline_nanos > now_nanos) continue;
-                if (deadline.kind != .recovery) continue;
-                if (deadline.recovery == null) continue;
+                if (deadline.kind != .recovery or deadline.recovery == null) continue;
                 _ = try self.currentRecordRoutePath(record);
             }
         }
 
-        fn hasDueRecoveryForInstalledKeySpace(
+        fn hasDueOutputForInstalledKeySpace(
             self: *const Self,
             now_nanos: i64,
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
@@ -381,6 +377,7 @@ pub fn Tls13ServerEndpointForTuple(
                 const connection_id = entry.key_ptr.*;
                 const record = entry.value_ptr.*;
                 const connection = connection_of(record);
+                if (space == .application and self.lifecycle.hasDuePathValidation(connection_id, connection, now_nanos)) return true;
                 const deadline = self.lifecycle.nextDeadline(connection_id, connection) orelse continue;
                 if (deadline.deadline_nanos > now_nanos) continue;
                 if (deadline.kind != .recovery) continue;
@@ -610,7 +607,7 @@ pub fn Tls13ServerEndpointForTuple(
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
-            self.preflightDueRecoveryRoutes(now_nanos) catch |err| {
+            self.preflightDueOutputRoutes(now_nanos) catch |err| {
                 const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
@@ -618,7 +615,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
-            if (out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_nanos, space)) {
+            if (out.len == 0 and self.hasDueOutputForInstalledKeySpace(now_nanos, space)) {
                 return .{
                     .pending_work = .{},
                     .drain = .{ .first_error = error.BufferTooSmall },
@@ -630,7 +627,7 @@ pub fn Tls13ServerEndpointForTuple(
                 allocator,
                 now_nanos,
             );
-            const drain = if (pending_work.recovery_serviced_count == 0)
+            const drain = if (!pending_work.hasDatagramWork())
                 DatagramPathDrainResult{}
             else
                 self.drainDatagramsAcrossRecordsWithRoutePath(
@@ -653,7 +650,7 @@ pub fn Tls13ServerEndpointForTuple(
             space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
-            self.preflightDueRecoveryRoutes(now_nanos) catch |err| {
+            self.preflightDueOutputRoutes(now_nanos) catch |err| {
                 const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
@@ -661,7 +658,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             };
-            if (out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_nanos, space)) {
+            if (out.len == 0 and self.hasDueOutputForInstalledKeySpace(now_nanos, space)) {
                 return .{
                     .pending_work = .{},
                     .drain = .{ .first_error = error.BufferTooSmall },
@@ -672,7 +669,7 @@ pub fn Tls13ServerEndpointForTuple(
                 &self.lifecycle,
                 now_nanos,
             );
-            const drain = if (pending_work.recovery_serviced_count == 0)
+            const drain = if (!pending_work.hasDatagramWork())
                 DatagramPathDrainResult{}
             else
                 self.drainDatagramsAcrossRecordsWithRoutePathWithScratch(
@@ -700,7 +697,10 @@ pub fn Tls13ServerEndpointForTuple(
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
 
-            const pending_drain = if (deadline.installedKeyPollOptions(
+            const pending_drain = if (self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
             )) |options|
@@ -763,7 +763,10 @@ pub fn Tls13ServerEndpointForTuple(
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
 
-            const pending_drain = if (deadline.installedKeyPollOptions(
+            const pending_drain = if (self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
             )) |options|
@@ -831,12 +834,15 @@ pub fn Tls13ServerEndpointForTuple(
             const record = self.records.get(deadline.connection_id) orelse return error.Internal;
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
-            const drains_recovery_datagram = deadline.kind == .recovery and deadline.recovery != null and (deadline.installedKeyPollOptions(
+            const drains_datagram = self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
-            ) != null or deadline.recovery.?.space == .initial);
-            if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
-            const route_path = if (drains_recovery_datagram)
+            ) != null or (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial);
+            if (drains_datagram and out.len == 0) return error.BufferTooSmall;
+            const route_path = if (drains_datagram)
                 self.lifecycle.currentRoutePath(source_connection_id) catch |err| {
                     return .{
                         .deadline = deadline,
@@ -848,7 +854,10 @@ pub fn Tls13ServerEndpointForTuple(
             else
                 null;
 
-            const pending_work = if (deadline.installedKeyPollOptions(
+            const pending_work = if (self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
             )) |options| pending: {
@@ -857,8 +866,9 @@ pub fn Tls13ServerEndpointForTuple(
                     connection,
                     now_nanos,
                 );
-                const serviced = pending.recovery_serviced orelse break :pending pending;
-                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                if (pending.recovery_serviced) |serviced| {
+                    if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                } else if (!pending.path_validation_serviced) break :pending pending;
                 const drain = self.drainDatagramsWithRoutePath(
                     deadline.connection_id,
                     connection,
@@ -927,12 +937,15 @@ pub fn Tls13ServerEndpointForTuple(
             const record = self.records.get(deadline.connection_id) orelse return error.Internal;
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
-            const drains_recovery_datagram = deadline.kind == .recovery and deadline.recovery != null and (deadline.installedKeyPollOptions(
+            const drains_datagram = self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
-            ) != null or deadline.recovery.?.space == .initial);
-            if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
-            const route_path = if (drains_recovery_datagram)
+            ) != null or (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial);
+            if (drains_datagram and out.len == 0) return error.BufferTooSmall;
+            const route_path = if (drains_datagram)
                 self.lifecycle.currentRoutePath(source_connection_id) catch |err| {
                     return .{
                         .deadline = deadline,
@@ -944,7 +957,10 @@ pub fn Tls13ServerEndpointForTuple(
             else
                 null;
 
-            const pending_work = if (deadline.installedKeyPollOptions(
+            const pending_work = if (self.lifecycle.installedKeyPollOptionsForDueWork(
+                deadline,
+                connection,
+                now_nanos,
                 destination_connection_id_of(record),
                 source_connection_id,
             )) |options| pending: {
@@ -953,8 +969,9 @@ pub fn Tls13ServerEndpointForTuple(
                     connection,
                     now_nanos,
                 );
-                const serviced = pending.recovery_serviced orelse break :pending pending;
-                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                if (pending.recovery_serviced) |serviced| {
+                    if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                } else if (!pending.path_validation_serviced) break :pending pending;
                 const drain = self.drainDatagramsWithRoutePath(
                     deadline.connection_id,
                     connection,
@@ -1113,20 +1130,17 @@ pub fn Tls13ServerEndpointForTuple(
         ) endpoint_types.EndpointDatagramDrainResult {
             var result = endpoint_types.EndpointDatagramDrainResult{};
             while (result.datagrams_written < out.len) {
-                const datagram = self.lifecycle.pollDatagram(
+                const datagram = self.lifecycle.pollDatagramOnPath(
                     connection_id,
                     connection,
                     now_nanos,
                     options,
+                    path,
                 ) catch |err| {
                     result.first_error = err;
                     return result;
                 };
-                out[result.datagrams_written] = if (datagram) |bytes| .{
-                    .connection_id = connection_id,
-                    .datagram = bytes,
-                    .path = path,
-                } else return result;
+                out[result.datagrams_written] = datagram orelse return result;
                 result.datagrams_written += 1;
             }
             return result;
@@ -1276,7 +1290,7 @@ pub fn Tls13ServerEndpointForTuple(
                 datagram,
                 options,
             );
-            self.preflightDueRecoveryRoutes(now_nanos) catch |err| {
+            self.preflightDueOutputRoutes(now_nanos) catch |err| {
                 const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .feed = feed,
@@ -1289,7 +1303,7 @@ pub fn Tls13ServerEndpointForTuple(
                 &self.lifecycle,
                 now_nanos,
             );
-            const datagram_out = if (pending_work.recovery_serviced_count == 0)
+            const datagram_out = if (!pending_work.hasDatagramWork())
                 null
             else
                 try self.pollDatagramWithRoutePathWithScratch(
@@ -1506,8 +1520,8 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 },
             }
-            const output_path = feed.selected_output_path orelse route_path;
-            const polled = try self.lifecycle.pollDatagram(
+            const output_path = if (feed.updated_route != null) path else route_path;
+            const polled = try self.lifecycle.pollDatagramOnPath(
                 route.connection_id,
                 connection,
                 now_nanos,
@@ -1515,14 +1529,11 @@ pub fn Tls13ServerEndpointForTuple(
                     .space = .application,
                     .destination_connection_id = destination_connection_id,
                 },
+                output_path,
             );
             return .{
                 .feed = feed,
-                .datagram = if (polled) |protected_datagram| .{
-                    .connection_id = route.connection_id,
-                    .datagram = protected_datagram,
-                    .path = output_path,
-                } else null,
+                .datagram = polled,
                 .next_deadline = try self.nextDeadline(self.records.allocator),
             };
         }
@@ -1584,8 +1595,8 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 },
             }
-            const output_path = feed.selected_output_path orelse route_path;
-            const polled = try self.lifecycle.pollDatagram(
+            const output_path = if (feed.updated_route != null) path else route_path;
+            const polled = try self.lifecycle.pollDatagramOnPath(
                 route.connection_id,
                 connection,
                 now_nanos,
@@ -1593,14 +1604,11 @@ pub fn Tls13ServerEndpointForTuple(
                     .space = .application,
                     .destination_connection_id = destination_connection_id,
                 },
+                output_path,
             );
             return .{
                 .feed = feed,
-                .datagram = if (polled) |protected_datagram| .{
-                    .connection_id = route.connection_id,
-                    .datagram = protected_datagram,
-                    .path = output_path,
-                } else null,
+                .datagram = polled,
                 .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
@@ -1718,7 +1726,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 },
             }
-            const output_path = feed.selected_output_path orelse route_path;
+            const output_path = if (feed.updated_route != null) path else route_path;
             if (out.len == 0 and connection.pendingAckLargest(.application) != null) {
                 return .{
                     .feed = feed,
@@ -1806,7 +1814,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 },
             }
-            const output_path = feed.selected_output_path orelse route_path;
+            const output_path = if (feed.updated_route != null) path else route_path;
             if (out.len == 0 and connection.pendingAckLargest(.application) != null) {
                 return .{
                     .feed = feed,
@@ -1863,15 +1871,16 @@ pub fn Tls13ServerEndpointForTuple(
         ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const path = try self.lifecycle.currentRoutePath(source_connection_id_of(record));
-            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            const datagram = (try self.lifecycle.pollDatagramOnPath(
                 connection_id,
                 connection_of(record),
                 now_nanos,
-                destination_connection_id_of(record),
+                .{ .space = .application, .destination_connection_id = destination_connection_id_of(record) },
+                path,
             )) orelse return null;
             return .{
-                .datagram = datagram,
-                .path = path,
+                .datagram = datagram.datagram,
+                .path = datagram.path,
             };
         }
 
@@ -2018,7 +2027,7 @@ pub fn Tls13ServerEndpointForTuple(
                     continue;
                 }
                 const path = try self.lifecycle.currentRoutePath(view.source_connection_id);
-                const datagram = self.lifecycle.pollDatagram(
+                const datagram = self.lifecycle.pollDatagramOnPath(
                     view.connection_id,
                     view.connection,
                     now_nanos,
@@ -2027,6 +2036,7 @@ pub fn Tls13ServerEndpointForTuple(
                         .destination_connection_id = view.destination_connection_id,
                         .source_connection_id = view.source_connection_id,
                     },
+                    path,
                 ) catch |err| switch (err) {
                     error.ConnectionClosed => {
                         if (view.connection.connectionState() == .closed) {
@@ -2036,13 +2046,9 @@ pub fn Tls13ServerEndpointForTuple(
                     },
                     else => return err,
                 };
-                if (datagram) |bytes| {
+                if (datagram) |packet_output| {
                     self.records.next_poll_index = (index + 1) % views.len;
-                    return .{
-                        .connection_id = view.connection_id,
-                        .datagram = bytes,
-                        .path = path,
-                    };
+                    return packet_output;
                 }
             }
             self.records.next_poll_index = start;
@@ -2115,15 +2121,16 @@ pub fn Tls13ServerEndpointForTuple(
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const path = try self.currentRecordRoutePath(record);
             try connection_of(record).sendOnStream(stream_id, data, fin);
-            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            const datagram = (try self.lifecycle.pollDatagramOnPath(
                 connection_id,
                 connection_of(record),
                 now_nanos,
-                destination_connection_id_of(record),
+                .{ .space = .application, .destination_connection_id = destination_connection_id_of(record) },
+                path,
             )) orelse return null;
             return .{
-                .datagram = datagram,
-                .path = path,
+                .datagram = datagram.datagram,
+                .path = datagram.path,
             };
         }
 
@@ -2227,15 +2234,16 @@ pub fn Tls13ServerEndpointForTuple(
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const path = try self.currentRecordRoutePath(record);
             try connection_of(record).resetStream(stream_id, application_error_code);
-            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            const datagram = (try self.lifecycle.pollDatagramOnPath(
                 connection_id,
                 connection_of(record),
                 now_nanos,
-                destination_connection_id_of(record),
+                .{ .space = .application, .destination_connection_id = destination_connection_id_of(record) },
+                path,
             )) orelse return null;
             return .{
-                .datagram = datagram,
-                .path = path,
+                .datagram = datagram.datagram,
+                .path = datagram.path,
             };
         }
 
@@ -2337,15 +2345,16 @@ pub fn Tls13ServerEndpointForTuple(
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const path = try self.currentRecordRoutePath(record);
             try connection_of(record).stopSending(stream_id, application_error_code);
-            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            const datagram = (try self.lifecycle.pollDatagramOnPath(
                 connection_id,
                 connection_of(record),
                 now_nanos,
-                destination_connection_id_of(record),
+                .{ .space = .application, .destination_connection_id = destination_connection_id_of(record) },
+                path,
             )) orelse return null;
             return .{
-                .datagram = datagram,
-                .path = path,
+                .datagram = datagram.datagram,
+                .path = datagram.path,
             };
         }
 
@@ -4013,7 +4022,7 @@ pub fn Tls13ServerEndpointForTuple(
             pending_space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             pending_out: []DatagramPathResult,
         ) root.Error!PendingStepPathResult {
-            self.preflightDueRecoveryRoutes(now_nanos) catch |err| {
+            self.preflightDueOutputRoutes(now_nanos) catch |err| {
                 const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
@@ -4021,7 +4030,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             };
-            if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_nanos, pending_space)) {
+            if (pending_out.len == 0 and self.hasDueOutputForInstalledKeySpace(now_nanos, pending_space)) {
                 return .{
                     .pending_work = .{},
                     .pending_drain = .{ .first_error = error.BufferTooSmall },
@@ -4032,7 +4041,7 @@ pub fn Tls13ServerEndpointForTuple(
                 &self.lifecycle,
                 now_nanos,
             );
-            const pending_drain = if (pending_work.recovery_serviced_count == 0)
+            const pending_drain = if (!pending_work.hasDatagramWork())
                 DatagramPathDrainResult{}
             else
                 self.drainDatagramsAcrossRecordsWithRoutePathWithScratch(
@@ -4054,7 +4063,7 @@ pub fn Tls13ServerEndpointForTuple(
             pending_space: endpoint_types.EndpointInstalledKeyDatagramSpace,
             pending_out: []DatagramPathResult,
         ) (root.Error || endpoint.RouteError)!PendingStepPathResult {
-            self.preflightDueRecoveryRoutes(now_nanos) catch |err| {
+            self.preflightDueOutputRoutes(now_nanos) catch |err| {
                 const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
@@ -4062,7 +4071,7 @@ pub fn Tls13ServerEndpointForTuple(
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
-            if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_nanos, pending_space)) {
+            if (pending_out.len == 0 and self.hasDueOutputForInstalledKeySpace(now_nanos, pending_space)) {
                 return .{
                     .pending_work = .{},
                     .pending_drain = .{ .first_error = error.BufferTooSmall },
@@ -4074,7 +4083,7 @@ pub fn Tls13ServerEndpointForTuple(
                 allocator,
                 now_nanos,
             );
-            const pending_drain = if (pending_work.recovery_serviced_count == 0)
+            const pending_drain = if (!pending_work.hasDatagramWork())
                 DatagramPathDrainResult{}
             else
                 self.drainDatagramsAcrossRecordsWithRoutePath(

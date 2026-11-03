@@ -399,9 +399,17 @@ pub fn EndpointConnectionRegistryForTuple(
             return pending_work;
         }
 
+        fn hasDuePathValidation(self: *const Self, lifecycle: *const Lifecycle, now_nanos: i64) bool {
+            var iterator = self.records.iterator();
+            while (iterator.next()) |entry| {
+                if (lifecycle.hasDuePathValidation(entry.key_ptr.*, connection_of(entry.value_ptr.*), now_nanos)) return true;
+            }
+            return false;
+        }
+
         /// Sweep pending work, destroy closed records, and drain installed-key output.
         ///
-        /// Output is only drained when at least one recovery timer was serviced.
+        /// Output is drained after recovery or path-validation timer service.
         pub fn processPendingWorkAndDrainDatagrams(
             self: *Self,
             lifecycle: *Lifecycle,
@@ -422,12 +430,16 @@ pub fn EndpointConnectionRegistryForTuple(
                     source_connection_id,
                 );
             }
+            if (out.len == 0 and self.hasDuePathValidation(lifecycle, now_nanos)) return .{
+                .pending_work = .{},
+                .drain = .{ .first_error = error.BufferTooSmall },
+            };
             const pending_work = try self.processPendingWork(
                 lifecycle,
                 allocator,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .drain = .{},
@@ -480,11 +492,15 @@ pub fn EndpointConnectionRegistryForTuple(
         ) root.Error!endpoint_types.EndpointPendingWorkSweepDatagramDrainResult {
             _ = self.receive_view_scratch orelse return error.BufferTooSmall;
             _ = self.poll_view_scratch orelse return error.BufferTooSmall;
+            if (out.len == 0 and self.hasDuePathValidation(lifecycle, now_nanos)) return .{
+                .pending_work = .{},
+                .drain = .{ .first_error = error.BufferTooSmall },
+            };
             const pending_work = try self.processPendingWorkWithScratch(
                 lifecycle,
                 now_nanos,
             );
-            if (pending_work.recovery_serviced_count == 0) {
+            if (!pending_work.hasDatagramWork()) {
                 return .{
                     .pending_work = pending_work,
                     .drain = .{},

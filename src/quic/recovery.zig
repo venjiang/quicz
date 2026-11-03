@@ -127,6 +127,37 @@ pub const Recovery = struct {
         return after_send <= self.congestion_window;
     }
 
+    /// Reset path estimates while preserving packet accounting and diagnostics.
+    pub fn resetPath(self: *Recovery, initial_rtt_ns: u64, max_datagram_size: u16) void {
+        const previous = self.*;
+        self.* = init(.{
+            .max_datagram_size = max_datagram_size,
+            .initial_rtt_ns = initial_rtt_ns,
+            .max_ack_delay_ns = previous.max_ack_delay_ns,
+            .congestion_algorithm = previous.congestion_algorithm,
+            .pto_jitter_percentage = previous.pto_jitter_percentage,
+        });
+        self.bytes_in_flight = previous.bytes_in_flight;
+        self.packets_lost = previous.packets_lost;
+        self.packets_retransmitted = previous.packets_retransmitted;
+        self.largest_sent_packet_number = previous.largest_sent_packet_number;
+        self.largest_acked_packet_number = previous.largest_acked_packet_number;
+        self.last_sent_time_nanos = previous.last_sent_time_nanos;
+        self.prng = previous.prng;
+    }
+
+    /// Release acknowledged previous-path bytes without training this path.
+    pub fn onPreviousPathAck(self: *Recovery, bytes: usize) void {
+        self.removeBytesInFlight(bytes);
+        self.pto_count = 0;
+    }
+
+    /// Preserve loss accounting without a congestion event on this path.
+    pub fn onPreviousPathLoss(self: *Recovery, bytes: usize) void {
+        self.packets_lost +%= 1;
+        self.removeBytesInFlight(bytes);
+    }
+
     /// Return the remaining congestion-window budget for ack-eliciting bytes.
     pub fn availableCongestionWindow(self: Recovery) usize {
         if (self.bytes_in_flight >= self.congestion_window) return 0;
@@ -1076,4 +1107,26 @@ test "PN-based recovery blocks then allows growth after cutback ACK" {
     try std.testing.expect(!r.inRecoveryByPacketNumber());
     r.onPacketAckedWithUtilization(1200, 5_000_000_000, 100_000_000, 0, true);
     try std.testing.expect(r.congestion_window > cwnd_in_recovery);
+}
+
+test "path reset preserves accounting and excludes old-path ACK and loss training" {
+    var state = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ns = 333_000_000 });
+    state.bytes_in_flight = 200;
+    state.last_sent_time_nanos = 10;
+    state.congestion_window = 120_000;
+    state.smoothed_rtt_ns = 10_000_000;
+    state.resetPath(333_000_000, 1200);
+    const initial_window = state.congestion_window;
+    state.onPreviousPathAck(100);
+    try std.testing.expectEqual(@as(usize, 100), state.bytes_in_flight);
+    try std.testing.expect(state.min_rtt_ns == null);
+    try std.testing.expectEqual(@as(u64, 333_000_000), state.smoothed_rtt_ns);
+    try std.testing.expectEqual(initial_window, state.congestion_window);
+    state.onPreviousPathLoss(100);
+    try std.testing.expectEqual(@as(usize, 0), state.bytes_in_flight);
+    try std.testing.expectEqual(initial_window, state.congestion_window);
+    state.bytes_in_flight = 100;
+    state.onPacketAcked(100, 20, 30_000_000, 0);
+    try std.testing.expectEqual(@as(u64, 30_000_000), state.smoothed_rtt_ns);
+    try std.testing.expect(state.congestion_window > initial_window);
 }

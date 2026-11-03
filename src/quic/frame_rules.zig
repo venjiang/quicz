@@ -50,6 +50,14 @@ pub fn frameIsAckEliciting(decoded: frame.Frame) bool {
     };
 }
 
+/// Classify probing frames independently from ACK elicitation (RFC 9000 section 9.1).
+pub fn frameIsProbing(decoded: frame.Frame) bool {
+    return switch (decoded) {
+        .padding, .path_challenge, .path_response, .new_connection_id => true,
+        else => false,
+    };
+}
+
 pub fn frameAllowedInPacketNumberSpace(decoded: frame.Frame, space: PacketNumberSpace) bool {
     return frameAllowedInFramePacketType(decoded, defaultFramePacketTypeForSpace(space));
 }
@@ -132,6 +140,32 @@ test "ack range rules validate and locate packet numbers" {
     try std.testing.expect(ackFrameContains(ack, 6));
     try std.testing.expect(ackFrameContains(ack, 5));
     try std.testing.expect(!ackFrameContains(ack, 4));
+}
+
+test "probing frame rules are independent from ACK elicitation" {
+    const probes = [_]frame.Frame{
+        .{ .padding = .{ .len = 1 } },
+        .{ .path_challenge = .{ .data = @splat(1) } },
+        .{ .path_response = .{ .data = @splat(1) } },
+        .{ .new_connection_id = .{
+            .sequence_number = 0,
+            .retire_prior_to = 0,
+            .connection_id = &.{1},
+            .stateless_reset_token = @splat(0),
+        } },
+    };
+    for (probes) |probe| try std.testing.expect(frameIsProbing(probe));
+    const ack = frame.AckFrame{ .largest_acknowledged = 0, .ack_delay = 0, .first_ack_range = 0 };
+    const non_probes = [_]frame.Frame{
+        .ping,
+        .{ .ack = ack },
+        .{ .ack_ecn = .{ .ack = ack, .ecn_counts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 } } },
+        .{ .stream = .{ .stream_id = 0, .offset = 0, .fin = false, .data = "test" } },
+    };
+    for (non_probes) |non_probe| try std.testing.expect(!frameIsProbing(non_probe));
+    try std.testing.expect(!frameIsAckEliciting(non_probes[1]));
+    try std.testing.expect(!frameIsAckEliciting(non_probes[2]));
+    try std.testing.expect(frameIsAckEliciting(probes[1]));
 }
 
 test "packet type frame rules preserve RFC 9000 restrictions" {

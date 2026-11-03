@@ -32327,6 +32327,1164 @@ test "PATH_RESPONSE origin scope restores after successful and failed receives" 
     }
 }
 
+test "route-aware recovery ignores old-path response ACKs after an IP commit" {
+    try expectProbeRecoveryOwnership(.old_response);
+}
+
+test "route-aware recovery retains serving-path response RTT samples" {
+    try expectProbeRecoveryOwnership(.current_response);
+}
+
+test "route-aware recovery separates mixed ACK bytes and congestion timing" {
+    try expectProbeRecoveryOwnership(.mixed_ack);
+    try expectProbeRecoveryOwnership(.mixed_recovery_ack);
+}
+
+test "route-aware recovery separates ACK-driven probe losses by output path" {
+    try expectProbeRecoveryOwnership(.old_ack_loss);
+    try expectProbeRecoveryOwnership(.current_ack_loss);
+    try expectProbeRecoveryOwnership(.mixed_ack_loss);
+}
+
+test "route-aware recovery separates timer-driven probe losses by output path" {
+    try expectProbeRecoveryOwnership(.old_timer_loss);
+    try expectProbeRecoveryOwnership(.current_timer_loss);
+    try expectProbeRecoveryOwnership(.mixed_timer_loss);
+}
+
+test "route-aware recovery restores output context on success empty output and errors" {
+    const serving = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 2 }, 50_001),
+    };
+    const prior = endpoint.DatagramPath.init(endpoint.Udp4Tuple{
+        .local = serving.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    });
+    const options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = "peer" };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    connection.serving_output_path = prior;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.pollDatagramOnPath(221, &connection, ms, options, serving));
+    try std.testing.expect(connection.serving_output_path.?.eql(prior));
+    connection.serving_output_path = null;
+    const secrets = try protection.deriveInitialSecrets(.v1, "output-scope");
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try connection.sendPing();
+    const output = (try lifecycle.pollDatagramOnPath(221, &connection, 2 * ms, options, serving)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(output.datagram);
+    try std.testing.expect(connection.serving_output_path == null);
+    try std.testing.expect((try lifecycle.pollDatagramOnPath(221, &connection, 3 * ms, options, serving)) == null);
+    try std.testing.expect(connection.serving_output_path == null);
+}
+
+fn expectProbeRecoveryOwnership(scenario: enum { old_response, current_response, mixed_ack, mixed_recovery_ack, old_ack_loss, current_ack_loss, mixed_ack_loss, old_timer_loss, current_timer_loss, mixed_timer_loss }) !void {
+    const secrets = try protection.deriveInitialSecrets(.v1, "review-original");
+    const original = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const serving = endpoint.Udp4Tuple{ .local = original.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 2 }, 50_001) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try lifecycle.registerConnectionId(220, "host", original, .{});
+    _ = try lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit("host", serving, &connection);
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &.{},
+        .unpredictable_prefix = &.{},
+        .supported_versions = &.{.v1},
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = "peer" };
+    const same_path = scenario == .current_response or scenario == .current_ack_loss or scenario == .current_timer_loss;
+    const source = if (same_path) serving else original;
+    const mixed = scenario == .mixed_ack or scenario == .mixed_recovery_ack;
+    const mixed_loss = scenario == .mixed_ack_loss or scenario == .mixed_timer_loss;
+    const ack_loss = scenario == .old_ack_loss or scenario == .current_ack_loss or scenario == .mixed_ack_loss;
+    const timer_loss = scenario == .old_timer_loss or scenario == .current_timer_loss or scenario == .mixed_timer_loss;
+    var serving_bytes: usize = 0;
+    if (mixed_loss) {
+        try connection.sendPing();
+        const earlier = (try lifecycle.pollDatagramOnPath(220, &connection, ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(earlier.datagram);
+        try std.testing.expect(earlier.path.eql(serving));
+    }
+    if (mixed) {
+        connection.recovery_state.onPersistentCongestion();
+        const stream = try connection.openStream();
+        try connection.sendOnStream(stream, &([_]u8{0x61} ** 1170), false);
+        while (try lifecycle.pollDatagramOnPath(220, &connection, 2 * ms, poll_options, serving)) |ordinary| {
+            defer std.testing.allocator.free(ordinary.datagram);
+            try std.testing.expect(ordinary.path.eql(serving));
+            serving_bytes += ordinary.datagram.len;
+        }
+        try std.testing.expect(serving_bytes != 0);
+    }
+    const challenge = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = "host",
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &.{ 0x1a, 7, 7, 7, 7, 7, 7, 7, 7 });
+    defer std.testing.allocator.free(challenge);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(220, &connection, source, 3 * ms, challenge, feed_options);
+    const response = (try lifecycle.pollDatagramOnPath(220, &connection, 4 * ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expect(response.path.eql(source));
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(serving));
+    if (scenario == .mixed_recovery_ack) {
+        // Fill the current window with modeled serving-path bytes before the
+        // later off-path response. This makes recovery timing observable.
+        const remaining = connection.availableCongestionWindow(.application);
+        try std.testing.expect(remaining > response.datagram.len);
+        _ = try connection.recordPacketSentInSpace(.application, 5 * ms, remaining - response.datagram.len);
+        connection.recovery_state.onCongestionEvent(5 * ms, 6 * ms);
+        const repeated = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = "host",
+            .key_phase = false,
+            .packet_number = 1,
+        }, try packet.encodePacketNumberForHeader(1, null), secrets.client, &.{ 0x1a, 7, 7, 7, 7, 7, 7, 7, 7 });
+        defer std.testing.allocator.free(repeated);
+        _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(220, &connection, source, 6 * ms, repeated, feed_options);
+        const final_response = (try lifecycle.pollDatagramOnPath(220, &connection, 7 * ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(final_response.datagram);
+        try std.testing.expect(final_response.path.eql(source));
+        try std.testing.expectEqual(response.datagram.len, final_response.datagram.len);
+    }
+    if (ack_loss or timer_loss) {
+        const sent_at: i64 = if (ack_loss) 2000 * ms else 5 * ms;
+        try connection.sendPing();
+        const ordinary = (try lifecycle.pollDatagramOnPath(220, &connection, sent_at, poll_options, serving)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(ordinary.datagram);
+        try std.testing.expect(ordinary.path.eql(serving));
+    }
+    const last_packet = connection.next_packet_number - 1;
+    const acknowledged_range: u8 = if (mixed) @intCast(last_packet) else 0;
+    const peer_number: u64 = if (scenario == .mixed_recovery_ack) 2 else 1;
+    const ack = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = "host",
+        .key_phase = false,
+        .packet_number = peer_number,
+    }, try packet.encodePacketNumberForHeader(peer_number, null), secrets.client, &.{ 2, @intCast(last_packet), 0, 0, acknowledged_range });
+    defer std.testing.allocator.free(ack);
+    const before_ack = connection.recovery_state.congestion_window;
+    if (mixed) try std.testing.expect(connection.recovery_state.isCongestionWindowUtilized());
+    const received_at: i64 = if (ack_loss) 2010 * ms else if (timer_loss) 15 * ms else 14 * ms;
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(220, &connection, serving, received_at, ack, feed_options);
+    if (timer_loss) {
+        try std.testing.expect(connection.recovery_state.bytes_in_flight != 0);
+        const before_loss = connection.recovery_state.congestion_window;
+        const deadline = connection.loss_deadline_nanos orelse return error.TestUnexpectedResult;
+        try connection.checkLossDetectionTimeouts(deadline);
+        if (same_path or mixed_loss) try std.testing.expect(connection.recovery_state.congestion_window < before_loss) else try std.testing.expectEqual(before_loss, connection.recovery_state.congestion_window);
+    } else if (ack_loss) {
+        if (same_path or mixed_loss) try std.testing.expect(connection.recovery_state.congestion_window < before_ack) else try std.testing.expectEqual(before_ack, connection.recovery_state.congestion_window);
+    } else if (mixed) {
+        try std.testing.expect(connection.recovery_state.min_rtt_ns == null);
+        if (scenario == .mixed_recovery_ack) {
+            try std.testing.expect(connection.recovery_state.congestion_state == .recovery);
+            try std.testing.expect(connection.recovery_state.inRecoveryByPacketNumber());
+            try std.testing.expectEqual(before_ack, connection.recovery_state.congestion_window);
+        } else try std.testing.expectEqual(before_ack + serving_bytes, connection.recovery_state.congestion_window);
+    } else if (same_path) {
+        try std.testing.expectEqual(@as(?u64, 10 * ms), connection.recovery_state.min_rtt_ns);
+    } else try std.testing.expect(connection.recovery_state.min_rtt_ns == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.recovery_state.bytes_in_flight);
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(serving));
+}
+
+test "migration ACK growth excludes old-path bytes in a mixed acknowledgement" {
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    for (0..10) |i| _ = try connection.recordPacketSentInSpace(.application, @as(i64, @intCast(i + 1)) * ms, 1180);
+    // Fix the recovery observation time to isolate byte aggregation.
+    // The next test separately exercises the caller-controlled clock.
+    connection.recovery_state.last_sent_time_nanos = 10 * ms;
+    connection.resetPathRecovery();
+    _ = try connection.recordPacketSentInSpace(.application, 11 * ms, 200);
+    try connection.receiveAckInSpace(.application, 12 * ms, .{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 10,
+    });
+    try std.testing.expectEqual(@as(usize, 0), connection.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(usize, 12_200), connection.recovery_state.congestion_window);
+}
+
+test "migration ACK sampling uses packet ownership with caller-controlled timestamps" {
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    _ = try connection.recordPacketSentInSpace(.application, ms, 100);
+    connection.resetPathRecovery();
+    _ = try connection.recordPacketSentInSpace(.application, 2 * ms, 100);
+    try connection.receiveAckInSpace(.application, 3 * ms, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?u64, ms), connection.recovery_state.min_rtt_ns);
+}
+
+test "migration ACK of old packets cannot establish new-path persistent congestion" {
+    var connection = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ns = 100 * ms });
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    for ([_]i64{ 0, 10 * ms, 1000 * ms, 1100 * ms, 1200 * ms }) |sent_at|
+        _ = try connection.recordPacketSentInSpace(.application, sent_at, 100);
+    // Fix the recovery observation time to isolate previous-path loss handling.
+    connection.recovery_state.last_sent_time_nanos = 1200 * ms;
+    connection.resetPathRecovery();
+    try connection.receiveAckInSpace(.application, 1201 * ms, .{ .largest_acknowledged = 0, .ack_delay = 0, .first_ack_range = 0 });
+    try connection.receiveAckInSpace(.application, 1301 * ms, .{ .largest_acknowledged = 4, .ack_delay = 0, .first_ack_range = 0 });
+    try std.testing.expectEqual(@as(usize, 12_000), connection.recovery_state.congestion_window);
+    try std.testing.expect(connection.recovery_state.min_rtt_ns == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.recovery_state.bytes_in_flight);
+}
+
+test "legacy annotation and lifecycle byte poll retain validated output" {
+    const secrets = try protection.deriveInitialSecrets(.v1, "legacy-review");
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50000),
+    };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try lifecycle.registerConnectionId(1, "host", path, .{});
+    const challenge = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = "host",
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &.{ 0x1a, 7, 7, 7, 7, 7, 7, 7, 7 });
+    defer std.testing.allocator.free(challenge);
+    try connection.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(ms, 4, challenge, .{ .ipv4 = path });
+    const output = try lifecycle.pollProtectedShortDatagramWithInstalledKeys(1, &connection, 2 * ms, "peer");
+    defer if (output) |bytes| std.testing.allocator.free(bytes);
+    const direct = if (output == null) try connection.pollProtectedShortDatagramWithInstalledKeys(3 * ms, "peer") else null;
+    defer if (direct) |bytes| std.testing.allocator.free(bytes);
+    try std.testing.expect(output != null);
+}
+
+test "short challenge response cannot validate an undelivered expanded retry" {
+    const secrets = try protection.deriveInitialSecrets(.v1, "mtu-retry-review");
+    const old = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50000),
+    };
+    const candidate = endpoint.Udp4Tuple{ .local = old.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50001) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try client.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try client.installOneRttTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+    try lifecycle.registerConnectionId(2, "host", old, .{});
+    var options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &.{},
+        .unpredictable_prefix = &.{},
+        .supported_versions = &.{.v1},
+        .path_challenge_data = @splat(1),
+        .validate_path_mtu = true,
+    };
+    const poll = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = "peer" };
+    try client.sendPing();
+    const first = (try client.pollProtectedShortDatagramWithInstalledKeys(ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(2, &server, candidate, ms, first, options);
+    const short = (try lifecycle.pollDatagramOnPath(2, &server, 2 * ms, poll, old)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(short.datagram);
+    try std.testing.expect(short.datagram.len < 1200);
+    try client.processProtectedShortDatagramWithInstalledKeys(3 * ms, 4, short.datagram);
+    const delayed = (try client.pollProtectedShortDatagramWithInstalledKeys(4 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(delayed);
+    const stream = try client.openStream();
+    try client.sendOnStream(stream, &([_]u8{0x61} ** 512), false);
+    const credit = (try client.pollProtectedShortDatagramWithInstalledKeys(5 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(credit);
+    options.path_challenge_data = @splat(2);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(2, &server, candidate, 5 * ms, credit, options);
+    const deadline = server.pathValidationDeadline() orelse return error.TestUnexpectedResult;
+    _ = try lifecycle.processPendingWork(2, &server, deadline);
+    const expanded = (try lifecycle.pollDatagramOnPath(2, &server, deadline, poll, old)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(expanded.datagram);
+    try std.testing.expectEqual(@as(usize, 1200), expanded.datagram.len);
+    try std.testing.expect(server.hasPathChallenge(@splat(1)));
+    // The expanded retry is deliberately never delivered to the client.
+    const late = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(2, &server, candidate, deadline + ms, delayed, options);
+    try std.testing.expect(late.updated_route == null);
+    try client.sendPing();
+    const fresh = (try client.pollProtectedShortDatagramWithInstalledKeys(deadline + 2 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fresh);
+    options.path_challenge_data = @splat(3);
+    const resumed = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(2, &server, candidate, deadline + 2 * ms, fresh, options);
+    try std.testing.expect(resumed.updated_route == null);
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(old));
+    const distinct = (try lifecycle.pollDatagramOnPath(2, &server, deadline + 3 * ms, poll, old)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(distinct.datagram);
+    try std.testing.expectEqual(@as(usize, 1200), distinct.datagram.len);
+    try std.testing.expect(server.hasPathChallenge(@splat(2)));
+    try client.processProtectedShortDatagramWithInstalledKeys(deadline + 4 * ms, 4, distinct.datagram);
+    const proven = (try client.pollProtectedShortDatagramWithInstalledKeys(deadline + 5 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(proven);
+    const completed = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(2, &server, candidate, deadline + 6 * ms, proven, options);
+    try std.testing.expect(completed.updated_route != null);
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(candidate));
+}
+
+test "route-aware response scheduling skips a congestion-blocked serving head" {
+    try expectResponseScheduling(.alternate);
+}
+
+test "route-aware response scheduling retains a sendable serving head" {
+    try expectResponseScheduling(.serving_priority);
+}
+
+test "route-aware response scheduling retains credit-blocked responses" {
+    try expectResponseScheduling(.no_credit);
+}
+
+test "route-aware response scheduling reaches a later eligible source" {
+    try expectResponseScheduling(.later);
+}
+
+fn expectResponseScheduling(scenario: enum { alternate, serving_priority, no_credit, later }) !void {
+    const secrets = try protection.deriveInitialSecrets(.v1, "serving-first");
+    const serving = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const candidate = endpoint.Udp4Tuple{ .local = serving.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    const later = endpoint.Udp4Tuple{ .local = serving.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_002) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var connection = try Connection.init(std.testing.allocator, .server, .{ .max_datagram_size = 1200, .initial_congestion_window_packets = 32 });
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try lifecycle.registerConnectionId(230, "host", serving, .{});
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{ .space = .application, .out = &.{}, .unpredictable_prefix = &.{}, .supported_versions = &.{.v1} };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = "peer" };
+    const blocked = scenario != .serving_priority;
+    if (blocked) {
+        // Real protected output fills the window, without changing in-flight counters.
+        for (0..31) |n| {
+            const pn: u64 = @intCast(n);
+            const value: u8 = @intCast(n + 1);
+            const incoming = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = "host",
+                .key_phase = false,
+                .packet_number = pn,
+            }, try packet.encodePacketNumberForHeader(pn, null), secrets.client, &.{ 0x1a, value, value, value, value, value, value, value, value });
+            defer std.testing.allocator.free(incoming);
+            _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(230, &connection, serving, @as(i64, @intCast(n * 2 + 1)) * ms, incoming, feed_options);
+            const emitted = (try lifecycle.pollDatagramOnPath(230, &connection, @as(i64, @intCast(n * 2 + 2)) * ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(emitted.datagram);
+            try std.testing.expectEqual(@as(usize, 1200), emitted.datagram.len);
+        }
+        const stream = try connection.openStream();
+        try connection.sendOnStream(stream, &([_]u8{0x61} ** 1070), false);
+        const ordinary = (try lifecycle.pollDatagramOnPath(230, &connection, 63 * ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(ordinary.datagram);
+    }
+    const available = connection.availableCongestionWindow(.application);
+    if (blocked) try std.testing.expect(available >= 31 and available < 1200);
+    const sources = [_]endpoint.Udp4Tuple{ serving, candidate, later };
+    const source_count: usize = if (scenario == .later) 3 else 2;
+    const peer_number: u64 = if (blocked) 31 else 0;
+    const now: i64 = if (blocked) 64 * ms else ms;
+    for (sources[0..source_count], 0..) |source, i| {
+        const pn = peer_number + @as(u64, @intCast(i));
+        const value: u8 = 20 + @as(u8, @intCast(i));
+        const incoming = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = "host",
+            .key_phase = false,
+            .packet_number = pn,
+        }, try packet.encodePacketNumberForHeader(pn, null), secrets.client, &.{ 0x1a, value, value, value, value, value, value, value, value });
+        defer std.testing.allocator.free(incoming);
+        const origin_only = i == 1 and (scenario == .no_credit or scenario == .later);
+        if (origin_only) {
+            try connection.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(now + @as(i64, @intCast(i)) * ms, 4, incoming, .{ .ipv4 = source });
+        } else {
+            _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(230, &connection, source, now + @as(i64, @intCast(i)) * ms, incoming, feed_options);
+        }
+        if (i == 0 and blocked) try std.testing.expect((try lifecycle.pollDatagramOnPath(230, &connection, now, poll_options, serving)) == null);
+    }
+    try std.testing.expectEqual(source_count, connection.pending_path_responses.items.len);
+    const packet_number = connection.next_packet_number;
+    const output = try lifecycle.pollDatagramOnPath(230, &connection, now + @as(i64, @intCast(source_count)) * ms, poll_options, serving);
+    if (scenario == .no_credit) {
+        try std.testing.expect(output == null);
+        try std.testing.expectEqual(packet_number, connection.next_packet_number);
+        try std.testing.expectEqual(source_count, connection.pending_path_responses.items.len);
+    } else {
+        const emitted = output orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(emitted.datagram);
+        const expected = if (scenario == .serving_priority) serving else if (scenario == .later) later else candidate;
+        try std.testing.expect(emitted.path.eql(expected));
+        try std.testing.expect(emitted.datagram.len <= available);
+        try std.testing.expectEqual(source_count - 1, connection.pending_path_responses.items.len);
+        if (blocked) try std.testing.expectEqual(@as(u8, 20), connection.pending_path_responses.items[0].data[0]);
+        if (scenario == .serving_priority) {
+            try std.testing.expectEqual(@as(usize, 1200), emitted.datagram.len);
+            const next = (try lifecycle.pollDatagramOnPath(230, &connection, now + 3 * ms, poll_options, serving)) orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(next.datagram);
+            try std.testing.expect(next.path.eql(candidate));
+        }
+    }
+}
+
+test "token MTU evidence retains the minimum transmitted size across retries" {
+    for ([_][2]bool{ .{ false, true }, .{ true, false }, .{ true, true }, .{ false, false } }) |expanded| {
+        const secrets = try protection.deriveInitialSecrets(.v1, "size-evidence");
+        var connection = try Connection.init(std.testing.allocator, .server, .{});
+        defer connection.deinit();
+        try connection.validatePeerAddress();
+        try connection.confirmHandshake();
+        try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+        const token: [8]u8 = @splat(9);
+        try connection.sendPathChallenge(token);
+        try std.testing.expect(connection.pathChallengeMinimumDatagramSize(token) == null);
+        const selection = Connection.PacketSelection{ .challenge = .{ .index = 0, .include_ack = false } };
+        const first = (try connection.pollProtectedShortDatagramWithInstalledKeysAndContext(ms, "peer", selection, if (expanded[0]) 1200 else 100)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(first.datagram);
+        try std.testing.expectEqual(expanded[0], first.datagram.len == 1200);
+        const deadline = connection.pathValidationDeadline() orelse return error.TestUnexpectedResult;
+        try connection.checkPathValidationTimeouts(deadline);
+        try std.testing.expectEqual(@as(?usize, first.datagram.len), connection.pathChallengeMinimumDatagramSize(token));
+        const retry = (try connection.pollProtectedShortDatagramWithInstalledKeysAndContext(deadline, "peer", selection, if (expanded[1]) 1200 else 100)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(retry.datagram);
+        try std.testing.expectEqual(expanded[1], retry.datagram.len == 1200);
+        try std.testing.expectEqual(@as(?usize, @min(first.datagram.len, retry.datagram.len)), connection.pathChallengeMinimumDatagramSize(token));
+    }
+}
+
+test "origin-only receive does not grant route-aware probe credit" {
+    const secrets = try protection.deriveInitialSecrets(.v1, "credit-boundary");
+    const serving = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const source = endpoint.Udp4Tuple{ .local = serving.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try lifecycle.registerConnectionId(3, "host", serving, .{});
+    const challenge = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = "host",
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &.{ 0x1a, 7, 7, 7, 7, 7, 7, 7, 7 });
+    defer std.testing.allocator.free(challenge);
+    try connection.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(ms, 4, challenge, .{ .ipv4 = source });
+    const output = try lifecycle.pollDatagramOnPath(3, &connection, 2 * ms, .{ .space = .application, .destination_connection_id = "peer" }, serving);
+    if (output) |datagram| {
+        defer std.testing.allocator.free(datagram.datagram);
+        try std.testing.expect(datagram.path.eql(serving));
+    }
+    try std.testing.expectEqual(@as(usize, 1), connection.pending_path_responses.items.len);
+}
+
+test "strict migration follows a short address probe with a full-size challenge" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{ .local = old_path.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(212, "host", old_path, .{});
+    try lifecycle.registerConnectionId(212, "also", old_path, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try client.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    try client.installOneRttTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+    var options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &.{},
+        .unpredictable_prefix = &.{},
+        .supported_versions = &.{.v1},
+        .path_challenge_data = @splat(1),
+        .validate_path_mtu = true,
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = "peer" };
+    try client.sendPing();
+    const ping = (try client.pollProtectedShortDatagramWithInstalledKeys(ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(212, &server, new_path, 2 * ms, ping, options);
+    const short_probe = (try lifecycle.pollDatagramOnPath(212, &server, 3 * ms, poll_options, old_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(short_probe.datagram);
+    try std.testing.expect(short_probe.path.eql(new_path));
+    try std.testing.expect(short_probe.datagram.len < 1200);
+    try client.processProtectedShortDatagramWithInstalledKeys(4 * ms, 4, short_probe.datagram);
+    const short_response = (try client.pollProtectedShortDatagramWithInstalledKeys(5 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(short_response);
+    options.path_challenge_data = @splat(2);
+    const address_proof = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(212, &server, new_path, 6 * ms, short_response, options);
+    try std.testing.expect(address_proof.updated_route == null);
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(old_path));
+    const mtu_probe = (try lifecycle.pollDatagramOnPath(212, &server, 7 * ms, poll_options, old_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(mtu_probe.datagram);
+    try std.testing.expectEqual(@as(usize, 1200), mtu_probe.datagram.len);
+    try std.testing.expect(mtu_probe.path.eql(new_path));
+    const replay = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(212, &server, new_path, 8 * ms, short_response, options);
+    try std.testing.expect(replay.updated_route == null);
+    try std.testing.expect(server.hasPathChallenge(@splat(2)));
+    try client.processProtectedShortDatagramWithInstalledKeys(9 * ms, 4, mtu_probe.datagram);
+    const mtu_response = (try client.pollProtectedShortDatagramWithInstalledKeys(10 * ms, "host")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(mtu_response);
+    options.path_challenge_data = @splat(3);
+    const complete = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(212, &server, new_path, 11 * ms, mtu_response, options);
+    try std.testing.expect(complete.updated_route != null);
+    try std.testing.expect((try lifecycle.currentRoutePath("host")).eql(new_path));
+    try std.testing.expect((try lifecycle.currentRoutePath("also")).eql(new_path));
+    try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+}
+
+test "validated path commit updates connection CID aliases without moving another connection" {
+    const original = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const replacement = endpoint.Udp4Tuple{ .local = original.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(210, "first", original, .{});
+    try lifecycle.registerConnectionId(210, "alias", original, .{});
+    try lifecycle.registerConnectionId(211, "other", original, .{});
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    _ = try lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit("first", replacement, &connection);
+    try std.testing.expect((try lifecycle.currentRoutePath("first")).eql(replacement));
+    try std.testing.expect((try lifecycle.currentRoutePath("alias")).eql(replacement));
+    try std.testing.expect((try lifecycle.currentRoutePath("other")).eql(original));
+}
+
+test "validated path commit resets IP path recovery and retains port-only estimates" {
+    for ([_]bool{ false, true }) |ip_changed| {
+        const original = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        };
+        const replacement = endpoint.Udp4Tuple{ .local = original.local, .remote = endpoint.Udp4Address.init(if (ip_changed) .{ 127, 0, 0, 2 } else .{ 127, 0, 0, 1 }, 50_001) };
+        var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+        defer lifecycle.deinit();
+        try lifecycle.registerConnectionId(210, "first", original, .{});
+        var connection = try Connection.init(std.testing.allocator, .server, .{ .max_datagram_size = 1450 });
+        defer connection.deinit();
+        connection.recovery_state.smoothed_rtt_ns = 10 * ms;
+        connection.recovery_state.min_rtt_ns = 9 * ms;
+        connection.recovery_state.congestion_window = 120_000;
+        connection.recovery_state.bytes_in_flight = 100;
+        connection.recovery_state.packets_lost = 3;
+        connection.recovery_state.packets_retransmitted = 2;
+        _ = try lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit("first", replacement, &connection);
+        if (ip_changed) {
+            try std.testing.expectEqual(connection.config.initial_rtt_ns, connection.recovery_state.smoothed_rtt_ns);
+            try std.testing.expect(connection.recovery_state.min_rtt_ns == null);
+            try std.testing.expect(connection.recovery_state.congestion_window < 120_000);
+            try std.testing.expectEqual(@as(usize, 1200), connection.maxTxDatagramSize());
+        } else {
+            try std.testing.expectEqual(@as(u64, 10 * ms), connection.recovery_state.smoothed_rtt_ns);
+            try std.testing.expectEqual(@as(usize, 120_000), connection.recovery_state.congestion_window);
+            try std.testing.expectEqual(@as(usize, 1450), connection.maxTxDatagramSize());
+        }
+        try std.testing.expectEqual(@as(usize, 100), connection.recovery_state.bytes_in_flight);
+        try std.testing.expectEqual(@as(u64, 3), connection.recovery_state.packets_lost);
+        try std.testing.expectEqual(@as(u64, 2), connection.recovery_state.packets_retransmitted);
+    }
+}
+
+test "EndpointConnectionLifecycle separates probing validation from migration intent" {
+    const Scenario = enum { probing_only, non_probing_first, newer_original_non_probing, newer_original_probing };
+    for ([_]Scenario{ .probing_only, .non_probing_first, .newer_original_non_probing, .newer_original_probing }) |scenario| {
+        const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+        const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+        const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+        const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+        const options = EndpointFeedInstalledKeyDatagramOptions{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]packet.Version{.v1},
+            .path_challenge_data = @splat(0x91),
+        };
+        const old_path = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        };
+        const candidate_path = endpoint.Udp4Tuple{
+            .local = old_path.local,
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+        };
+        var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+        defer lifecycle.deinit();
+        try lifecycle.registerConnectionId(193, &server_dcid, old_path, .{});
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+        try server.confirmHandshake();
+        try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+
+        const seed_payload = [_]u8{ if (scenario == .probing_only) 0 else 1, 0, 0, 0 };
+        const seed = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = 1,
+        }, try packet.encodePacketNumberForHeader(1, null), secrets.client, &seed_payload);
+        defer std.testing.allocator.free(seed);
+        const started = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+            193,
+            &server,
+            candidate_path,
+            1 * ms,
+            seed,
+            options,
+            .{ .space = .application, .destination_connection_id = &client_dcid },
+        );
+        try std.testing.expect(started.feed.path_challenge_queued);
+        try std.testing.expect(started.feed.updated_route == null);
+        try std.testing.expect((started.output_path orelse return error.TestUnexpectedResult).eql(candidate_path));
+        const challenge = (started.datagram orelse return error.TestUnexpectedResult).datagram;
+        defer std.testing.allocator.free(challenge);
+        try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+        const replayed = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, old_path, 2 * ms, seed, options);
+        try std.testing.expect(replayed.updated_route == null);
+
+        const intervening_original = scenario == .newer_original_non_probing or scenario == .newer_original_probing;
+        if (intervening_original) {
+            const original_payload = [_]u8{ if (scenario == .newer_original_non_probing) 1 else 0, 0, 0, 0 };
+            const original = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = &server_dcid,
+                .key_phase = false,
+                .packet_number = 2,
+            }, try packet.encodePacketNumberForHeader(2, null), secrets.client, &original_payload);
+            defer std.testing.allocator.free(original);
+            const kept = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, old_path, 3 * ms, original, options);
+            try std.testing.expect(kept.updated_route == null);
+        }
+
+        var plaintext: [16]u8 = undefined;
+        var out = buffer.fixedWriter(&plaintext);
+        try frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = options.path_challenge_data.? } });
+        try out.writeByte(0);
+        const response_number: u64 = if (intervening_original) 3 else 2;
+        const response = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = response_number,
+        }, try packet.encodePacketNumberForHeader(response_number, null), secrets.client, out.getWritten());
+        defer std.testing.allocator.free(response);
+        const validated = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, candidate_path, 4 * ms, response, options);
+        try std.testing.expect(!validated.path_challenge_queued);
+        try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+        const may_commit = scenario == .non_probing_first or scenario == .newer_original_probing;
+        try std.testing.expectEqual(may_commit, validated.updated_route != null);
+        if (may_commit) {
+            try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(candidate_path));
+            continue;
+        }
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+
+        const ping_payload = [_]u8{ 1, 0, 0, 0 };
+        const delayed = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = 0,
+        }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &ping_payload);
+        defer std.testing.allocator.free(delayed);
+        const older = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, candidate_path, 5 * ms, delayed, options);
+        try std.testing.expect(older.updated_route == null);
+        const padding_payload = [_]u8{ 0, 0, 0, 0 };
+        const probe = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = response_number + 1,
+        }, try packet.encodePacketNumberForHeader(response_number + 1, null), secrets.client, &padding_payload);
+        defer std.testing.allocator.free(probe);
+        const still_probing = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, candidate_path, 6 * ms, probe, options);
+        try std.testing.expect(still_probing.updated_route == null);
+        try std.testing.expect(!still_probing.path_challenge_queued);
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+
+        const fresh = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = response_number + 2,
+        }, try packet.encodePacketNumberForHeader(response_number + 2, null), secrets.client, &ping_payload);
+        defer std.testing.allocator.free(fresh);
+        const selected = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(193, &server, candidate_path, 7 * ms, fresh, options);
+        try std.testing.expect(selected.updated_route != null);
+        try std.testing.expect(!selected.path_challenge_queued);
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(candidate_path));
+    }
+}
+
+test "EndpointConnectionLifecycle keeps probe responses on their receive path" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const challenge_token = [_]u8{0x93} ** 8;
+    const options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]packet.Version{.v1},
+        .path_challenge_data = @splat(0x92),
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = &client_dcid };
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const candidate_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(194, &server_dcid, old_path, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    const padding = [_]u8{ 0, 0, 0, 0 };
+    const seed = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &padding);
+    defer std.testing.allocator.free(seed);
+    const started = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(194, &server, candidate_path, 1 * ms, seed, options, poll_options);
+    const challenge = (started.datagram orelse return error.TestUnexpectedResult).datagram;
+    defer std.testing.allocator.free(challenge);
+    var payload: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&payload);
+    try frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = options.path_challenge_data.? } });
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = challenge_token } });
+    try out.writeByte(0);
+    const mixed = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 1,
+    }, try packet.encodePacketNumberForHeader(1, null), secrets.client, out.getWritten());
+    defer std.testing.allocator.free(mixed);
+    const kept = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(194, &server, candidate_path, 2 * ms, mixed, options);
+    try std.testing.expect(kept.updated_route == null);
+    try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+    const stream_id = try server.openStream();
+    try server.sendOnStream(stream_id, "committed-route", true);
+    const reply_number = server.next_packet_number;
+    const reply = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(194, &server, candidate_path, 3 * ms, mixed, options, poll_options);
+    const reply_packet = (reply.datagram orelse return error.TestUnexpectedResult).datagram;
+    defer std.testing.allocator.free(reply_packet);
+    try std.testing.expect((reply.output_path orelse return error.TestUnexpectedResult).eql(candidate_path));
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.server, reply_packet, client_dcid.len, reply_number);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var offset: usize = 0;
+    var found_response = false;
+    while (offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSliceBorrowing(opened.packet.plaintext[offset..], std.testing.allocator);
+        defer frame.deinitFrameBorrowing(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .padding => {},
+            .path_response => |response| {
+                try std.testing.expectEqualSlices(u8, &challenge_token, &response.data);
+                found_response = true;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        offset += decoded.len;
+    }
+    try std.testing.expect(found_response);
+
+    const ordinary_number = server.next_packet_number;
+    const ordinary = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(194, &server, candidate_path, 4 * ms, mixed, options, poll_options);
+    const ordinary_packet = (ordinary.datagram orelse return error.TestUnexpectedResult).datagram;
+    defer std.testing.allocator.free(ordinary_packet);
+    try std.testing.expect((ordinary.output_path orelse return error.TestUnexpectedResult).eql(old_path));
+    var ordinary_opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.server, ordinary_packet, client_dcid.len, ordinary_number);
+    defer protection.deinitProtectedShortPacket(&ordinary_opened, std.testing.allocator);
+    offset = 0;
+    var found_stream = false;
+    var found_ack = false;
+    while (offset < ordinary_opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSliceBorrowing(ordinary_opened.packet.plaintext[offset..], std.testing.allocator);
+        defer frame.deinitFrameBorrowing(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .stream => |stream| {
+                try std.testing.expectEqualStrings("committed-route", stream.data);
+                found_stream = true;
+            },
+            .ack, .ack_ecn => found_ack = true,
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        offset += decoded.len;
+    }
+    try std.testing.expect(found_stream and found_ack);
+    try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+}
+
+test "EndpointConnectionLifecycle budgets probe sources without blocking service" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const second_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xde };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]packet.Version{.v1},
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = &client_dcid };
+    const service_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const first_path = endpoint.Udp4Tuple{ .local = service_path.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    const second_path = endpoint.Udp4Tuple{ .local = service_path.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_002) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(196, &server_dcid, service_path, .{});
+    try lifecycle.registerConnectionId(197, &second_dcid, service_path, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var second = try Connection.init(std.testing.allocator, .server, .{});
+    defer second.deinit();
+    for ([_]*Connection{ &server, &second }) |connection| {
+        try connection.validatePeerAddress();
+        try connection.confirmHandshake();
+        try connection.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    }
+    var payload: [256]u8 = undefined;
+    var out = buffer.fixedWriter(&payload);
+    for (0..24) |index| {
+        try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(@as(u8, @intCast(index + 1))) } });
+    }
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(24) } });
+    const batch = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, out.getWritten());
+    defer std.testing.allocator.free(batch);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(196, &server, first_path, 1 * ms, batch, options);
+    try std.testing.expectEqual(@as(usize, 24), server.pending_path_responses.items.len);
+
+    second.datagram_context = .{ .path = endpoint.DatagramPath.init(first_path) };
+    try second.sendPathChallenge(@splat(0xa1));
+    second.datagram_context = null;
+    const second_stream = try second.openStream();
+    try second.sendOnStream(second_stream, "other-service", true);
+    const isolated = (try lifecycle.pollDatagramOnPath(197, &second, 2 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(isolated.datagram);
+    try std.testing.expect(isolated.path.eql(service_path));
+    try std.testing.expectEqual(@as(usize, 1), second.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), second.outstandingPathChallengeCount());
+
+    const stream_id = try server.openStream();
+    try server.sendOnStream(stream_id, "service-output", true);
+    var first_bytes: usize = 0;
+    var service_continued = false;
+    for (0..64) |round| {
+        const expected_number = server.next_packet_number;
+        const packet_output = (try lifecycle.pollDatagramOnPath(196, &server, @intCast((round + 3) * ms), poll_options, service_path)) orelse break;
+        defer std.testing.allocator.free(packet_output.datagram);
+        if (packet_output.path.eql(first_path)) {
+            first_bytes += packet_output.datagram.len;
+            try std.testing.expect(first_bytes <= 3 * batch.len);
+            continue;
+        }
+        try std.testing.expect(packet_output.path.eql(service_path));
+        var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.server, packet_output.datagram, client_dcid.len, expected_number);
+        defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+        var offset: usize = 0;
+        while (offset < opened.packet.plaintext.len) {
+            var decoded = try frame.decodeFrameSliceBorrowing(opened.packet.plaintext[offset..], std.testing.allocator);
+            defer frame.deinitFrameBorrowing(&decoded.frame, std.testing.allocator);
+            if (decoded.frame == .stream) {
+                try std.testing.expectEqualStrings("service-output", decoded.frame.stream.data);
+                service_continued = true;
+            }
+            offset += decoded.len;
+        }
+        break;
+    }
+    try std.testing.expect(first_bytes > 0 and service_continued);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+    batch[batch.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(196, &server, first_path, 80 * ms, batch, options));
+    batch[batch.len - 1] ^= 1;
+    try std.testing.expect((try lifecycle.pollDatagramOnPath(196, &server, 81 * ms, poll_options, service_path)) == null);
+
+    out = buffer.fixedWriter(&payload);
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(24) } });
+    const cross_source = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 1,
+    }, try packet.encodePacketNumberForHeader(1, null), secrets.client, out.getWritten());
+    defer std.testing.allocator.free(cross_source);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(196, &server, second_path, 90 * ms, cross_source, options);
+    try std.testing.expectEqual(@as(usize, 2), server.pending_path_responses.items.len);
+    const cross_reply = (try lifecycle.pollDatagramOnPath(196, &server, 91 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(cross_reply.datagram);
+    try std.testing.expect(cross_reply.path.eql(second_path));
+    try std.testing.expect(cross_reply.datagram.len <= 3 * cross_source.len);
+    const ack = (try lifecycle.pollDatagramOnPath(196, &server, 92 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack.datagram);
+    try std.testing.expect(ack.path.eql(service_path));
+    try std.testing.expect((try lifecycle.pollDatagramOnPath(196, &server, 93 * ms, poll_options, service_path)) == null);
+
+    const retry = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 2,
+    }, try packet.encodePacketNumberForHeader(2, null), secrets.client, out.getWritten());
+    defer std.testing.allocator.free(retry);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(196, &server, first_path, 100 * ms, retry, options);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+    const resumed = (try lifecycle.pollDatagramOnPath(196, &server, 101 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(resumed.datagram);
+    try std.testing.expect(resumed.path.eql(first_path));
+    first_bytes += resumed.datagram.len;
+    try std.testing.expect(first_bytes <= 3 * (batch.len + retry.len));
+
+    const ping = [_]u8{ 1, 0, 0, 0 };
+    const second_input = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &second_dcid,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &ping);
+    defer std.testing.allocator.free(second_input);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(197, &second, first_path, 110 * ms, second_input, options);
+    _ = lifecycle.retireConnection(196);
+    const second_probe = (try lifecycle.pollDatagramOnPath(197, &second, 111 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_probe.datagram);
+    try std.testing.expect(second_probe.path.eql(first_path));
+    try std.testing.expect(second_probe.datagram.len <= 3 * second_input.len);
+}
+
+test "EndpointConnectionLifecycle services validation retries without ordinary in-flight packets" {
+    try expectValidationRetryRecovery(.none);
+}
+
+test "EndpointConnectionLifecycle accepts a sent response while its retry is blocked" {
+    try expectValidationRetryRecovery(.pending);
+}
+
+test "EndpointConnectionLifecycle ignores a late response after candidate expiry" {
+    try expectValidationRetryRecovery(.expired);
+}
+
+fn expectValidationRetryRecovery(response_window: enum { none, pending, expired }) !void {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    var options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]packet.Version{.v1},
+        .path_challenge_data = @splat(0xa2),
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{ .space = .application, .destination_connection_id = &client_dcid };
+    const service_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const candidate_path = endpoint.Udp4Tuple{ .local = service_path.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001) };
+    const replacement_path = endpoint.Udp4Tuple{ .local = service_path.local, .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_002) };
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(198, &server_dcid, service_path, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    const ping_payload = [_]u8{ 1, 0, 0, 0 };
+    const initial = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &ping_payload);
+    defer std.testing.allocator.free(initial);
+    _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(198, &server, candidate_path, 1 * ms, initial, options);
+    const first = (try lifecycle.pollDatagramOnPath(198, &server, 2 * ms, poll_options, service_path)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first.datagram);
+    try std.testing.expect(first.path.eql(candidate_path));
+    var probe_count: usize = 1;
+    var peer_number: u64 = 1;
+    var now_nanos: i64 = 2 * ms;
+    var expired = false;
+    var blocked_retry = false;
+    for (0..8) |round| {
+        if (server.sent_packets.items.len != 0) {
+            const last_sent = server.sent_packets.items[server.sent_packets.items.len - 1].packet_number;
+            var ack_payload: [32]u8 = undefined;
+            var out = buffer.fixedWriter(&ack_payload);
+            try frame.encodeFrame(out.writer(), .{ .ack = .{ .largest_acknowledged = last_sent, .ack_delay = 0, .first_ack_range = 0 } });
+            const ack = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = &server_dcid,
+                .key_phase = false,
+                .packet_number = peer_number,
+            }, try packet.encodePacketNumberForHeader(peer_number, null), secrets.client, out.getWritten());
+            defer std.testing.allocator.free(ack);
+            peer_number += 1;
+            now_nanos += ms;
+            _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(198, &server, service_path, now_nanos, ack, options);
+            try std.testing.expect(server.lossDetectionTimerDeadline() == null);
+        }
+        const due = lifecycle.nextDeadline(198, &server) orelse return error.TestUnexpectedResult;
+        const pto_nanos: i64 = @intCast(server.recovery_state.ptoNs());
+        if (round == 0) {
+            const initial_pto: i64 = @intCast(3 * server.config.initial_rtt_ns + server.config.max_ack_delay_ns);
+            try std.testing.expect(due.deadline_nanos <= 2 * ms + @max(pto_nanos, initial_pto));
+        } else {
+            const initial_pto = 3 * server.config.initial_rtt_ns + server.config.max_ack_delay_ns;
+            try std.testing.expect(due.deadline_nanos <= ms + @as(i64, @intCast(3 * initial_pto)));
+        }
+        now_nanos = due.deadline_nanos;
+        _ = try lifecycle.processPendingWork(198, &server, now_nanos);
+        if (try lifecycle.pollDatagramOnPath(198, &server, now_nanos, poll_options, service_path)) |packet_output| {
+            defer std.testing.allocator.free(packet_output.datagram);
+            if (packet_output.path.eql(candidate_path)) {
+                probe_count += 1;
+            } else {
+                try std.testing.expect(packet_output.path.eql(service_path));
+            }
+        }
+        if (server.pendingPathChallengeCount() != 0 and server.outstandingPathChallengeCount() == 0) {
+            blocked_retry = true;
+            if (response_window == .pending) {
+                const response = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                    .dcid = &server_dcid,
+                    .key_phase = false,
+                    .packet_number = peer_number,
+                }, try packet.encodePacketNumberForHeader(peer_number, null), secrets.client, &.{ 0x1b, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2 });
+                defer std.testing.allocator.free(response);
+                _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(198, &server, candidate_path, now_nanos + ms, response, options);
+                try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+                try std.testing.expect(!server.hasPathChallenge(@splat(0xa2)));
+                try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(service_path));
+                return;
+            }
+        }
+        if (server.failedPathValidationCount() == 1) {
+            expired = true;
+            break;
+        }
+    }
+    try std.testing.expect(expired and blocked_retry);
+    try std.testing.expectEqual(@as(usize, 2), probe_count);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
+    try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(service_path));
+    if (response_window == .expired) {
+        const late = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = peer_number,
+        }, try packet.encodePacketNumberForHeader(peer_number, null), secrets.client, &.{ 0x1b, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2, 0xa2 });
+        defer std.testing.allocator.free(late);
+        peer_number += 1;
+        _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(198, &server, service_path, now_nanos + ms, late, options);
+        try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(service_path));
+    }
+    options.path_challenge_data = @splat(0xa3);
+    const replacement = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .key_phase = false,
+        .packet_number = peer_number,
+    }, try packet.encodePacketNumberForHeader(peer_number, null), secrets.client, &ping_payload);
+    defer std.testing.allocator.free(replacement);
+    const restarted = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(198, &server, replacement_path, now_nanos + ms, replacement, options);
+    try std.testing.expect(restarted.path_challenge_queued);
+    try std.testing.expect(restarted.updated_route == null);
+}
+
+test "selective probe polling preserves queued frames when byte allowance is exhausted" {
+    for ([_]bool{ false, true }) |responding| {
+        const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+        const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+        const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+        try server.confirmHandshake();
+        try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+        if (responding) {
+            var payload: [16]u8 = undefined;
+            var out = buffer.fixedWriter(&payload);
+            try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(0x94) } });
+            try server.processDatagram(0, out.getWritten());
+        } else {
+            try server.sendPathChallenge(@splat(0x94));
+        }
+        const selection = if (responding)
+            Connection.PacketSelection{ .response = .{ .index = 0, .include_ack = false } }
+        else
+            Connection.PacketSelection{ .challenge = .{ .index = 0, .include_ack = false } };
+        const packet_number = server.next_packet_number;
+        const sent_count = server.sent_packets.items.len;
+        const blocked = try server.pollProtectedShortDatagramWithInstalledKeysAndContext(1 * ms, &dcid, selection, 0);
+        defer if (blocked) |packet_output| std.testing.allocator.free(packet_output.datagram);
+        try std.testing.expect(blocked == null);
+        try std.testing.expectEqual(packet_number, server.next_packet_number);
+        try std.testing.expectEqual(sent_count, server.sent_packets.items.len);
+        if (responding) {
+            try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
+            try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+        }
+        const allowed = (try server.pollProtectedShortDatagramWithInstalledKeysAndContext(2 * ms, &dcid, selection, null)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(allowed.datagram);
+        try std.testing.expect(allowed.path_context == null);
+        try std.testing.expectEqual(packet_number + 1, server.next_packet_number);
+        try std.testing.expectEqual(sent_count + 1, server.sent_packets.items.len);
+        if (responding) try std.testing.expect(server.pendingAckLargest(.application) != null);
+    }
+}
+
 test "EndpointConnectionLifecycle automatic validation keeps its candidate path" {
     for ([_]bool{ false, true }) |respond_on_original| {
         const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };

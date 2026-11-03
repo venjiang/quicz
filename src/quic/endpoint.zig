@@ -125,12 +125,32 @@ pub const Udp6Tuple = struct {
     }
 };
 
-/// Value-only origin metadata for a queued UDP response.
+/// Address-family-tagged UDP path metadata retained with validation frames.
 pub const DatagramPath = union(enum) {
     ipv4: Udp4Tuple,
     ipv6: Udp6Tuple,
 
-    /// Compare complete tuples without mapping between address families.
+    /// Copy one supported endpoint tuple without retaining caller storage.
+    pub fn init(path: anytype) DatagramPath {
+        if (@TypeOf(path) == Udp4Tuple) return .{ .ipv4 = path };
+        if (@TypeOf(path) == Udp6Tuple) return .{ .ipv6 = path };
+        @compileError("Expected an IPv4 or IPv6 UDP tuple");
+    }
+
+    /// Return the tuple only when its address family matches the caller.
+    pub fn toTuple(self: DatagramPath, comptime Tuple: type) ?Tuple {
+        if (Tuple == Udp4Tuple) return switch (self) {
+            .ipv4 => |path| path,
+            .ipv6 => null,
+        };
+        if (Tuple == Udp6Tuple) return switch (self) {
+            .ipv6 => |path| path,
+            .ipv4 => null,
+        };
+        @compileError("Expected an IPv4 or IPv6 UDP tuple");
+    }
+
+    /// Compare both local and remote endpoints, including IPv6 scope IDs.
     pub fn eql(self: DatagramPath, other: DatagramPath) bool {
         return switch (self) {
             .ipv4 => |path| switch (other) {
@@ -1098,9 +1118,15 @@ fn EndpointRouterForTuple(comptime Path: type) type {
 
             const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
             const route = &self.routes.items[index];
-            if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
-
-            route.path = new_path;
+            for (self.routes.items) |alias| {
+                if (alias.connection_id != route.connection_id or alias.destination_connection_id.len == 0) continue;
+                if (!alias.path.eql(new_path) and alias.active_migration_disabled) return error.ActiveMigrationDisabled;
+            }
+            // One connection has one committed serving path across its CID aliases.
+            // Validate every alias before changing any route.
+            for (self.routes.items) |*alias| {
+                if (alias.connection_id == route.connection_id and alias.destination_connection_id.len != 0) alias.path = new_path;
+            }
             return resultForRoute(Path, route.*, new_path);
         }
 

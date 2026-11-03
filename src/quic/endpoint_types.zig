@@ -192,6 +192,8 @@ pub const EndpointConnectionDeadlineKind = enum {
     recovery,
     /// Retained 1-RTT keys should be discarded after their PTO retain window.
     key_discard,
+    /// Path-challenge retry or automatic validation expiry is due.
+    path_validation,
 };
 
 /// Earliest endpoint-visible deadline for one caller-owned connection.
@@ -215,6 +217,10 @@ pub const EndpointConnectionDeadline = struct {
         destination_connection_id: []const u8,
         source_connection_id: []const u8,
     ) ?EndpointPollInstalledKeyDatagramOptions {
+        if (self.kind == .path_validation) return .{
+            .space = .application,
+            .destination_connection_id = destination_connection_id,
+        };
         if (self.kind != .recovery) return null;
         const timer = self.recovery orelse return null;
         return EndpointPollInstalledKeyDatagramOptions.fromRecoveryDeadline(
@@ -293,6 +299,9 @@ pub const EndpointFeedInstalledKeyDatagramOptions = struct {
     /// Optional PATH_CHALLENGE payload to queue after receiving from a changed path.
     /// Use fresh unpredictable bytes for each new attempt. Retries retain their token.
     path_challenge_data: ?[8]u8 = null,
+    /// Require a full-size challenge before automatic migration commits.
+    /// Supply fresh challenge data on each changed-path receive for a follow-up.
+    validate_path_mtu: bool = false,
 };
 
 /// Result from one socket-loop pending-work pass for a connection handle.
@@ -305,6 +314,8 @@ pub const EndpointPendingWorkResult = struct {
     key_discard_serviced: bool = false,
     /// Loss/PTO timer serviced for the connection, if due.
     recovery_serviced: ?EndpointLossDetectionTimerDeadline = null,
+    /// Existing path-challenge timers or candidate expiry were serviced.
+    path_validation_serviced: bool = false,
 };
 
 /// Result from processing pending endpoint work and polling a recovery datagram.
@@ -337,6 +348,13 @@ pub const EndpointPendingWorkSweepResult = struct {
     key_discard_serviced_count: usize = 0,
     /// Number of due loss/PTO timers serviced.
     recovery_serviced_count: usize = 0,
+    /// Number of path-validation retry or expiry passes serviced.
+    path_validation_serviced_count: usize = 0,
+
+    /// Report whether timer service can have queued datagram output.
+    pub fn hasDatagramWork(self: EndpointPendingWorkSweepResult) bool {
+        return self.recovery_serviced_count != 0 or self.path_validation_serviced_count != 0;
+    }
 };
 
 /// Result from a pending-work sweep followed by next wakeup selection.
@@ -653,6 +671,13 @@ pub fn ForTuple(comptime Path: type) type {
             output_path: ?Path = null,
             /// Next endpoint-visible deadline for the selected connection after feed and poll.
             next_deadline: ?EndpointConnectionDeadline = null,
+        };
+
+        /// One protected output packet with its independently selected UDP path.
+        pub const EndpointDatagramPathResult = struct {
+            connection_id: u64,
+            datagram: []u8,
+            path: Path,
         };
 
         pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
