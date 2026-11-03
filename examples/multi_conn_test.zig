@@ -13,12 +13,15 @@ const port: u16 = 4455;
 const num_conns: usize = 3;
 const streams_per_conn: usize = 2;
 const stream_payload_len: usize = 512 * 1024;
+const reclaim_timeout_ms: i64 = 10_000;
+var finished_handlers: std.atomic.Value(usize) = .init(0);
 
 const alpn = [_][]const u8{"hq-interop"};
 
 /// Per-connection handler (std.http model): handles one connection's echo,
 /// runs as its own task so it never blocks the accept loop or other conns.
 fn handleConnection(conn: ServerConnection) std.Io.Cancelable!void {
+    defer _ = finished_handlers.fetchAdd(1, .release);
     // std.http per-connection handler: read request data, write response.
     var c = conn;
     std.debug.print("[handler {d}] waiting for {d} streams...\n", .{ c.id, streams_per_conn });
@@ -39,6 +42,9 @@ fn handleConnection(conn: ServerConnection) std.Io.Cancelable!void {
         stream.send(&.{}, true) catch {}; // FIN the echoed stream.
         std.debug.print("[handler {d}] stream {d} echoed {d} bytes\n", .{ c.id, stream.id, total });
     }
+    // Stream FIN is not connection close. Retain the handler until the
+    // existing transport boundary confirms the connection is terminal.
+    try c.waitClosed();
 }
 
 /// Abrupt-close session: open a stream, send partial data WITHOUT a FIN,
@@ -125,14 +131,24 @@ pub fn main() !void {
     try client_group.concurrent(io, abruptSession, .{ allocator, io });
     try client_group.await(io);
     if (@atomicLoad(bool, &session_failed, .acquire)) return error.EchoMismatch;
-    // Give the drive task a few loops to observe the closes and reclaim
-    // connection state, then assert nothing leaked.
-    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(300), .awake) catch {};
-    while (!server.mutex.tryLock()) std.atomic.spinLoopHint();
-    const live = server.conns.count();
-    server.mutex.unlock();
-    std.debug.print("[server] live connections after reap window: {d}\n", .{live});
-    if (live != 0) return error.ConnectionLeak;
+    // Client completion does not mean the server has processed its queued
+    // close datagrams. Require handler completion and actual reclamation.
+    // The example watchdog starts after the client tasks finish. It does
+    // not change each connection's independent idle or close deadline.
+    const reclaim_started = std.Io.Timestamp.now(io, .awake);
+    while (true) {
+        while (!server.mutex.tryLock()) std.atomic.spinLoopHint();
+        const live = server.conns.count();
+        server.mutex.unlock();
+        const finished = finished_handlers.load(.acquire);
+        if (finished == num_conns + 1 and live == 0) break;
+        if (reclaim_started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() >= reclaim_timeout_ms) {
+            std.debug.print("[server] reclamation timed out: finished_handlers={d}/{d} live_connections={d}\n", .{ finished, num_conns + 1, live });
+            return error.ReclamationTimedOut;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+    std.debug.print("[server] finished handlers={d}; live connections=0\n", .{finished_handlers.load(.acquire)});
     std.debug.print("multi-connection test done\n", .{});
     server.stop();
 }

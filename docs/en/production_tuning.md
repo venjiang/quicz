@@ -1,6 +1,6 @@
 # Production Tuning Guide
 
-Updated: 2026-08-10.
+Updated: 2026-11-03.
 
 This document covers recommended configuration for deploying quicz in
 production environments. Connection-level parameters are set via
@@ -116,6 +116,30 @@ I/O, routing, and stream delivery automatically. A few deployment notes:
 - **Certificates on Linux x86_64**: use an RSA certificate (Zig 0.16 `std.crypto`
   has a P-256/P-384/Ed25519 signature-verification codegen bug on x86_64);
   aarch64 and macOS use ECDSA fine.
+
+## Validate Runtime Shutdown
+
+Stream EOF does not establish connection closure. `Client.close()` queues
+an asynchronous close request. The server can still have earlier datagrams
+to process after the client task finishes.
+
+Server handlers can use `ServerConnection.waitClosed()` to wait for a peer
+close or another terminal transport state. Handler completion and runtime
+state reclamation are separate conditions.
+
+Run `zig build run-multi-conn-test` to validate the complete example. It
+requires all four handlers to finish and the runtime connection-state map
+to become empty. Its ten-second watchdog starts after all client tasks
+finish. Each connection retains its own idle and close deadlines.
+
+In a controlled negative run, omitting the normal clients' close requests
+left three active connections and only one completed handler. The example
+returned `ReclamationTimedOut`. This verifies rejection of that negative
+case. The watchdog alone does not guarantee when every connection expires.
+
+The former fixed 300ms delay could report `ConnectionLeak` while the drive
+task still processed datagrams before a queued close. The example now
+checks completion. Runtime close, recovery and idle policies are unchanged.
 
 ## Related Documents
 
