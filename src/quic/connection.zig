@@ -706,6 +706,8 @@ pub const Connection = struct {
     pending_path_responses: std.ArrayList([8]u8),
     pending_path_challenges: std.ArrayList(PendingPathChallenge),
     outstanding_path_challenges: std.ArrayList(OutstandingPathChallenge),
+    /// Exact-token observation owned by one synchronous protected receive call.
+    path_response_observation: ?struct { token: [8]u8, matched: bool = false } = null,
     failed_path_validations: usize,
     active_connection_ids: std.ArrayList(ActiveConnectionId),
     local_connection_ids: std.ArrayList(LocalConnectionId),
@@ -1530,6 +1532,17 @@ pub const Connection = struct {
     /// Return transmitted PATH_CHALLENGE frames awaiting a matching PATH_RESPONSE.
     pub fn outstandingPathChallengeCount(self: Connection) usize {
         return self.outstanding_path_challenges.items.len;
+    }
+
+    /// Return whether a token is queued or still awaiting a response, including retries.
+    pub fn hasPathChallenge(self: *const Connection, token: [8]u8) bool {
+        for (self.pending_path_challenges.items) |challenge| {
+            if (std.mem.eql(u8, &challenge.data, &token)) return true;
+        }
+        for (self.outstanding_path_challenges.items) |challenge| {
+            if (std.mem.eql(u8, &challenge.data, &token)) return true;
+        }
+        return false;
     }
 
     /// Return PATH_CHALLENGE validations that exhausted the retry budget.
@@ -4255,6 +4268,24 @@ pub const Connection = struct {
         var state = self.peer_one_rtt_key_phase_state orelse return error.InvalidPacket;
         try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(now_nanos, &state, dcid_len, datagram);
         self.peer_one_rtt_key_phase_state = state;
+    }
+
+    /// Process installed-key input and report consumption of one exact response token.
+    ///
+    /// Authentication, deduplication, frame errors and key updates retain their
+    /// existing behavior. Responses to other probes cannot satisfy this observation.
+    /// The observation ends on return, including errors, and needs no allocation.
+    pub fn processProtectedShortDatagramWithInstalledKeysOrCloseAndObservePathResponse(
+        self: *Connection,
+        now_nanos: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        token: [8]u8,
+    ) Error!bool {
+        self.path_response_observation = .{ .token = token };
+        defer self.path_response_observation = null;
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(now_nanos, dcid_len, datagram);
+        return self.path_response_observation.?.matched;
     }
 
     fn processDecodedProtectedShortDatagram(
@@ -10747,6 +10778,9 @@ pub const Connection = struct {
     fn receivePathResponseFrame(self: *Connection, path_response: frame.PathResponseFrame) Error!void {
         const challenge_index = self.pathResponseChallengeIndex(path_response.data) orelse return error.InvalidPacket;
         _ = self.outstanding_path_challenges.orderedRemove(challenge_index);
+        if (self.path_response_observation) |*observation| {
+            if (std.mem.eql(u8, &observation.token, &path_response.data)) observation.matched = true;
+        }
     }
 
     fn receiveStopSendingFrame(self: *Connection, stop_sending: frame.StopSendingFrame) Error!void {

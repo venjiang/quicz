@@ -141,14 +141,63 @@ This is local regression evidence, not a new physical-network acceptance.
 This guard uses existing receive state. It adds no candidate table, retry
 engine or public interface.
 
-Candidate/token ownership remains separate. The current commit decision
-still observes a decreased outstanding challenge count. Exact ownership,
-probing-only packet rules, retry output, amplification and CID coherence
-need later slices before production integration. The local reference
+Automatic candidate ownership is the next slice below. Explicit manual
+probes still use their prior count-based commit policy. Probing-only
+packet rules, retry output, amplification and CID coherence need later
+slices before production integration. The local reference
 [quic-go path manager](https://github.com/quic-go/quic-go/blob/add7529015e46cda13441129d3081020f1baddc1/path_manager.go)
 associates tokens with path records, then separately decides whether to
 switch. It does not justify committing the tuple carrying any matching
 response. No reference source code is copied into this implementation.
+
+### Automatic Validation Ownership
+
+Status: local validation and independent review passed. Production
+integration remains pending. The explicit-commit regression failed before
+the correction and passed after it.
+
+[RFC 9000 sections 8.2.2 and 8.2.3](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2.3)
+allow a matching response on any path. That response validates the path
+where the challenge was sent. Its source does not acquire that validation.
+The earlier plan to reject every response from a different tuple was
+incorrect. Candidate ownership must survive such a response.
+
+The installed-key feed retains one automatic candidate per connection
+handle: its tuple, token and validation state. Connection retains the
+existing challenge queues, retry count and PTO. Its scoped receive
+observation reports consumption of one exact token. Multiple response
+frames cannot replace an earlier match. The observation ends when receive
+returns, including errors. No second parser or retry engine is added.
+
+| Input while B is the candidate | Validation | Route |
+| --- | --- | --- |
+| B's matching response arrives on B with a new highest number. | B succeeds. | Commit B. |
+| B's matching response arrives on A or C. | B succeeds. | Keep A. |
+| B later sends a new highest packet. | Retain B's success. | Commit B. |
+| A replay or lower packet number arrives on B. | Keep its existing status. | Keep A. |
+| Another probe's valid response arrives. | Do not validate B. | Keep A. |
+| Authentication or frame processing fails. | Do not record success. | Keep A. |
+| B's challenge enters the existing retry queue. | Retain B and its token. | Keep A. |
+| B's retries expire. | Remove B before processing the next input. | Keep A. |
+| An explicit commit selects D while B is validated. | Remove B's success. | Keep D. |
+| An explicit commit selects D while B is pending. | Mark B superseded until its token is consumed or expires. | Keep D. |
+| A superseded B response arrives, even with a new highest number. | Consume the old token without starting a candidate. | Keep D. |
+| The connection is retired. | Remove its candidate. | Retire its routes. |
+
+The caller supplies fresh unpredictable tokens for distinct attempts.
+Candidate storage is bounded by connection handles. Capacity is reserved
+before a challenge is queued. The shared successful route-commit helper
+supersedes earlier automatic ownership. It leaves unrelated probes intact.
+Without an automatic owner, manual probes retain their prior feed policy.
+Explicit lower-level migration helpers keep their compatibility behavior. Timer-only cleanup,
+candidate output policy and multiple CID commits remain separate work.
+These checks do not establish production roaming or physical-network
+acceptance, and they do not change Mons dependency pins.
+
+Final related checks passed 32/32. The complete suite passed 2029/2029.
+The actual multi-connection example completed all four handlers and
+reclaimed every runtime connection. The controlled-NAT matrix passed its
+eight positive cases. Both negative controls timed out as expected.
 
 ## Deliberately not implemented yet
 

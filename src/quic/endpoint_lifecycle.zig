@@ -296,6 +296,11 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
     const PathResults = endpoint_types.ForTuple(Path);
     return struct {
         const Self = @This();
+        const PathValidation = struct {
+            path: Path,
+            token: [8]u8,
+            state: enum { pending, validated, superseded } = .pending,
+        };
 
         /// Destination-CID router owned by this endpoint lifecycle.
         router: PathEndpoint.EndpointRouter,
@@ -303,6 +308,8 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
         recovery_timers: EndpointLossDetectionTimers,
         /// Per-UDP-path ECN validation state owned by this endpoint lifecycle.
         ecn_paths: PathEndpoint.EcnPathPolicy,
+        /// One automatic validation candidate per caller-owned connection handle.
+        path_validations: std.AutoHashMap(u64, PathValidation),
 
         /// Create an endpoint lifecycle owner with empty routes and timers.
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -321,11 +328,13 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                 .router = PathEndpoint.EndpointRouter.initWithOptions(allocator, router_options),
                 .recovery_timers = EndpointLossDetectionTimers.init(allocator),
                 .ecn_paths = PathEndpoint.EcnPathPolicy.init(allocator),
+                .path_validations = std.AutoHashMap(u64, PathValidation).init(allocator),
             };
         }
 
         /// Release route and timer storage owned by this endpoint lifecycle.
         pub fn deinit(self: *Self) void {
+            self.path_validations.deinit();
             self.ecn_paths.deinit();
             self.recovery_timers.deinit();
             self.router.deinit();
@@ -1232,6 +1241,15 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             connection: *Connection,
         ) endpoint.RouteError!endpoint.RouteResult {
             const updated = try self.router.updateRoutePathFromValidatedDatagram(destination_connection_id, new_path);
+            if (self.path_validations.getPtr(updated.connection_id)) |validation| {
+                if (connection.hasPathChallenge(validation.token)) {
+                    // Retain ownership until the old probe is consumed or expires.
+                    // Its response must not become an unrelated manual validation.
+                    validation.state = .superseded;
+                } else {
+                    _ = self.path_validations.remove(updated.connection_id);
+                }
+            }
             connection.resetSpinBitForPath();
             return updated;
         }
@@ -1692,10 +1710,11 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
         ///
         /// This matches `feedDatagramWithInstalledKeys()` for Version Negotiation,
         /// stateless reset, new Initial, Handshake, 0-RTT, and drop actions. For
-        /// routed 1-RTT application packets, it additionally commits the endpoint
-        /// route only when authenticated processing consumes an outstanding
-        /// PATH_CHALLENGE response from the changed UDP tuple. When the caller
-        /// supplies `path_challenge_data`, only a successfully processed changed-path
+        /// routed 1-RTT application packets, automatic challenges retain their
+        /// candidate tuple and token. A matching response on any path validates
+        /// that candidate. A new highest packet from its tuple permits commit.
+        /// Without an automatic candidate, manual probes retain their prior policy.
+        /// With `path_challenge_data`, only a successfully processed changed-path
         /// application packet that advances the Application receive cursor can
         /// queue one PATH_CHALLENGE. Validation already pending or completed by
         /// this datagram does not queue another. The result exposes the UDP tuple
@@ -1736,17 +1755,53 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             datagram,
                         ),
                         .application => {
+                            if (self.path_validations.get(connection_id)) |validation| {
+                                if (validation.state != .validated and !connection.hasPathChallenge(validation.token)) {
+                                    _ = self.path_validations.remove(connection_id);
+                                }
+                            }
+                            const had_candidate = self.path_validations.contains(connection_id);
                             const outstanding_before = connection.outstandingPathChallengeCount();
                             const receive_cursor_before = connection.next_peer_packet_number;
-                            try self.processProtectedShortDatagramWithInstalledKeysOrClose(
-                                connection_id,
-                                connection,
-                                now_nanos,
-                                route.destination_connection_id.asSlice().len,
-                                datagram,
-                            );
+                            var superseded_response = false;
+                            if (self.path_validations.getPtr(connection_id)) |validation| {
+                                const matched = connection.processProtectedShortDatagramWithInstalledKeysOrCloseAndObservePathResponse(
+                                    now_nanos,
+                                    route.destination_connection_id.asSlice().len,
+                                    datagram,
+                                    validation.token,
+                                ) catch |err| {
+                                    self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+                                    return err;
+                                };
+                                if (matched) {
+                                    if (validation.state == .superseded) {
+                                        superseded_response = true;
+                                    } else {
+                                        validation.state = .validated;
+                                    }
+                                }
+                                try self.armRecoveryTimerFromConnection(connection_id, connection);
+                                if (validation.state != .validated and !connection.hasPathChallenge(validation.token)) {
+                                    _ = self.path_validations.remove(connection_id);
+                                }
+                            } else {
+                                try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+                                    connection_id,
+                                    connection,
+                                    now_nanos,
+                                    route.destination_connection_id.asSlice().len,
+                                    datagram,
+                                );
+                            }
                             const outstanding_after = connection.outstandingPathChallengeCount();
-                            const updated_route: ?endpoint.RouteResult = if (route.path_changed and outstanding_after < outstanding_before)
+                            const advances_cursor = connection.next_peer_packet_number > receive_cursor_before;
+                            const candidate_validated = if (self.path_validations.get(connection_id)) |validation|
+                                validation.state == .validated and validation.path.eql(path) and advances_cursor
+                            else
+                                false;
+                            const manual_validated = !had_candidate and outstanding_after < outstanding_before;
+                            const updated_route: ?endpoint.RouteResult = if (route.path_changed and (candidate_validated or manual_validated))
                                 try self.updateRoutePathFromValidatedDatagramAndResetSpinBit(
                                     route.destination_connection_id.asSlice(),
                                     path,
@@ -1757,13 +1812,20 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             var path_challenge_queued = false;
                             // A discarded replay or an accepted older packet must
                             // not turn its observed tuple into a new validation.
-                            if (updated_route == null and route.path_changed and
-                                connection.next_peer_packet_number > receive_cursor_before and
+                            if (updated_route == null and !superseded_response and route.path_changed and
+                                advances_cursor and !self.path_validations.contains(connection_id) and
                                 connection.pendingPathChallengeCount() == 0 and
                                 connection.outstandingPathChallengeCount() == 0)
                             {
                                 if (options.path_challenge_data) |challenge_data| {
+                                    // Reserve ownership before queueing so allocation
+                                    // failure cannot leave an unowned automatic probe.
+                                    try self.path_validations.ensureUnusedCapacity(1);
                                     try connection.sendPathChallenge(challenge_data);
+                                    self.path_validations.putAssumeCapacityNoClobber(connection_id, .{
+                                        .path = path,
+                                        .token = challenge_data,
+                                    });
                                     path_challenge_queued = true;
                                 }
                             }
@@ -12731,8 +12793,9 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
             );
         }
 
-        /// Retire all routes and any armed recovery timer for one connection handle.
+        /// Retire all routes, automatic validation and recovery timers for one connection handle.
         pub fn retireConnection(self: *Self, connection_id: u64) EndpointConnectionRetireResult {
+            _ = self.path_validations.remove(connection_id);
             _ = self.ecn_paths.resetConnection(connection_id);
             return .{
                 .routes_retired = self.router.retireConnectionRoutes(connection_id),

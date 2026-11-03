@@ -291,6 +291,7 @@ pub const EndpointFeedInstalledKeyDatagramOptions = struct {
     /// Versions supported by this endpoint for Initial accept/VN classification.
     supported_versions: []const packet.Version,
     /// Optional PATH_CHALLENGE payload to queue after receiving from a changed path.
+    /// Use fresh unpredictable bytes for each new attempt. Retries retain their token.
     path_challenge_data: ?[8]u8 = null,
 };
 
