@@ -16,6 +16,62 @@ const StunBinding = @import("stun_binding.zig").Binding;
 
 const log = std.log.scoped(.quicz_runtime);
 
+fn routedHandshakeOutput(comptime Runtime: type) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const protection = quicz.protection;
+    const Path = if (Runtime == Server) endpoint.Udp4Tuple else endpoint.Udp6Tuple;
+    const Family = @import("udp_address.zig").ForTuple(Path);
+    const address: std.Io.net.IpAddress = if (Runtime == Server) .{ .ip4 = .loopback(0) } else .{ .ip6 = .loopback(0) };
+    const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer peer.close(io);
+    var server = try Runtime.init(allocator, io, .{
+        .port = 0,
+        .alpn = &.{},
+        .cert_der = &.{},
+        .private_key = &.{},
+    });
+    defer server.deinit();
+    const server_cid: [8]u8 = @splat(0x61);
+    const peer_cid: [8]u8 = @splat(0x62);
+    const peer_secret: [protection.traffic_secret_len]u8 = @splat(0x63);
+    const server_secret: [protection.traffic_secret_len]u8 = @splat(0x64);
+    const record = try allocator.create(ServerRecord);
+    {
+        errdefer allocator.destroy(record);
+        record.* = .{ .handle = 1, .transport = try Tls13ServerTransport.init(allocator, .{ .max_datagram_size = 1200 }, .{}) };
+        errdefer record.deinit();
+        try record.transport.setOriginalDestinationConnectionId(&server_cid);
+        try record.transport.setLocalInitialSourceConnectionId(&server_cid);
+        try record.transport.setPeerInitialSourceConnectionId(&peer_cid);
+        try record.connectionRef().installHandshakeTrafficSecrets(.{ .local = server_secret, .peer = peer_secret });
+        try record.connectionRef().validatePeerAddress();
+        try server.server_ep.records.adopt(1, record);
+    }
+    const path = Path{ .local = Family.fromIp(server.socket.address).?, .remote = Family.fromIp(peer.address).? };
+    try server.server_ep.lifecycle.registerConnectionId(1, &server_cid, path, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{ .local = peer_secret, .peer = server_secret });
+    try client.sendPingInSpace(.handshake);
+    const incoming = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(1, &server_cid, &peer_cid)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(incoming);
+    server.processDatagram(io, allocator, peer.address, incoming);
+    var buffer: [2048]u8 = undefined;
+    const reply = try peer.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(200) } });
+    try std.testing.expect(std.meta.eql(reply.from, server.socket.address));
+    const header = try protection.peekProtectedLongPacketInfo(reply.data);
+    try std.testing.expect(header.packet_type == .handshake);
+}
+
+test "IPv4 routed Handshake sends and frees its populated output buffer" {
+    try routedHandshakeOutput(Server);
+}
+
+test "IPv6 routed Handshake sends and frees its populated output buffer" {
+    try routedHandshakeOutput(IPv6Server);
+}
+
 fn registerValidatedHandoff(coordinator: *quicz.connectivity.shared_punch_coordinator.SharedPunchCoordinator, remote: std.Io.net.IpAddress, attempt_id: quicz.connectivity.punch_wire.AttemptId) !void {
     const wire = quicz.connectivity.punch_wire;
     const key: wire.Key = @splat(0x42);
@@ -2226,7 +2282,8 @@ pub fn ServerForTuple(comptime Path: type) type {
                                             }
                                         },
                                         .handshake => |hs| {
-                                            for (handshake_out[0..hs.backend.backend.drain.datagrams_written]) |o| {
+                                            // A single Handshake packet drains into the generic output buffer.
+                                            for (initial_out[0..hs.backend.backend.drain.datagrams_written]) |o| {
                                                 self.socket.send(io, &dest, o.datagram) catch |e| log.err("drive: send routed handshake response: {}", .{e});
                                                 allocator.free(o.datagram);
                                             }
