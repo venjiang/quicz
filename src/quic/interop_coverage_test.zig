@@ -106,7 +106,7 @@ test "interop retry: Retry packet with integrity tag" {
         .dcid = &dcid,
         .scid = &scid,
         .token = "retry-token-for-interop",
-        .integrity_tag = [_]u8{0} ** 16,
+        .integrity_tag = @as([16]u8, @splat(0)),
     };
 
     const datagram = try protection.encodeRetryPacketWithIntegrity(
@@ -178,7 +178,7 @@ test "interop multiplexing: multiple concurrent streams" {
 // ── keyupdate ──
 
 test "interop keyupdate: 1-RTT key phase transition" {
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = protection.deriveAes128PacketProtectionKeys(secret);
 
     // Initial key phase state
@@ -206,8 +206,8 @@ test "interop keyupdate: 1-RTT key phase transition" {
 test "interop chacha20: ChaCha20-Poly1305 AEAD roundtrip" {
     const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 
-    const key = [_]u8{0x42} ** 32;
-    const nonce = [_]u8{0x01} ** 12;
+    const key = @as([32]u8, @splat(0x42));
+    const nonce = @as([12]u8, @splat(0x01));
     const plaintext = "QUIC chacha20 interop test payload";
     const aad = "header";
 
@@ -281,7 +281,7 @@ test "interop combined: full lifecycle with key update" {
     try conn.sendOnStream(stream_id, "initial data", false);
 
     // Key update
-    const secret = [_]u8{0x42} ** 32;
+    const secret = @as([32]u8, @splat(0x42));
     const keys = protection.deriveAes128PacketProtectionKeys(secret);
     var key_phase = protection.Aes128KeyPhaseState.init(keys, false);
     key_phase.initiateKeyUpdate();

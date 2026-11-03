@@ -42,7 +42,7 @@ quicz：TLS 1.3、QUIC stream、恢复、迁移、multipath
 ```bash
 zig build mobile-static \
   -Dtarget=aarch64-ios \
-  -Doptimize=ReleaseSafe \
+  -Doptimize=safe \
   --prefix /tmp/quicz-ios
 ```
 
@@ -64,15 +64,36 @@ zig build run-mobile-latency-server -- 4433 passive-punch
 wildcard socket的bound endpoint可能返回`0.0.0.0`。平台候选收集必须把bound port与可达接口地址组合，
 不得向peer发布wildcard地址。
 
-## 明确尚未实现
+## 原生 IPv6 蜂窝验收
 
-- 真实STUN服务与蜂窝网络验证。
-- Relay候选交换与真实NAT打洞验证。
+2026-11-02，协议源码 `148acc7e` 通过独立实体 iPhone 与 Mac 的三次原生 IPv6 蜂窝 P2P 验收。
+手机实际使用 `pdp_ip0`，Wi-Fi 关闭。双方使用明确的全局 IPv6 地址，不使用应用数据 Relay。
+每次均通过双向认证 probe、CA 和主机名校验、100 轮 64 字节精确回显、FIN、同 socket 检查及 close/destroy。
+三次 App 退出码均为 0。验收复用已有 IPv6 C ABI 和 runtime，没有修改协议实现。
+
+该结果不代表所有 IPv4 NAT 场景已修复。手机到 Mac 的 IPv4 双 NAT 打洞仍未通过，接收计数为 0。
+专用端口抓包已确认每次 5 个主机 probe 到达 `en0` 出站接口，未观察到 peer 回包。
+两次手机同 socket 的 STUN A-B-A 对照均显示：公网 IP 和端口随目的端点改变，返回 A 后恢复原映射。
+这证明该 STUN 映射不能向任意 peer 泛化，但尚未唯一定位丢包节点或过滤行为。
+后续手机到受控公网 IPv4 对端的两次连接均通过认证打洞、证书校验、100 轮精确回显、FIN 和同 socket 检查。
+双方退出码均为 0。公网对端观察到的手机源端口在两次测试中均不同于 STUN 候选端口。
+临时对照端只在已认证 probe 到达后学习来源，再完成双向证明并交给现有 QUIC runtime，没有使用应用数据 Relay。
+这证明本次公网 IPv4 路径可用，不等于零收包的手机到 Mac 双 NAT 路径已通过。临时服务和文件已清理。
+本轮 IPv6 候选来自系统接口，不覆盖公网 IPv6 STUN、前后台、网络切换或长时稳定性。
+具体边界和证据见[当前验收记录](../../backlog.md)。
+
+Zig 0.17 工具链迁移的本轮验收已完成。下方连接能力的独立待办不阻塞本轮迁移结项，也不因迁移结项而自动变为已通过。
+结项范围和已完成 CI 的固定证据见[迁移记录](../../backlog.md)。
+
+## 尚未实现或未完成验收
+
+- 手机到 Mac 的 IPv4 双 NAT 打洞尚未通过验收。
+- Relay 候选交换尚未实现。
 - Rendezvous和Relay datagram协议。
-- 实体iPhone生命周期与真实蜂窝网络验证。
+- 实体 iPhone 前后台、网络切换和长时运行尚未完成验收。
 - 活动应用stream在Relay与Direct路径之间无感迁移。
 
-能力位不得提前声明这些未完成能力。
+能力位仅说明相应 API 已实现，不能替代真实网络验收，也不保证某个候选可达。尚未实现的协议不得提前声明。
 
 ## 验收顺序
 

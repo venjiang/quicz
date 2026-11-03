@@ -21,19 +21,19 @@ fn recvTimeout() std.Io.Timeout {
 }
 
 fn recvTimeoutForDeadline(io: std.Io, deadline_nanos: ?i64) std.Io.Timeout {
-    const now_nanos = std.Io.Clock.awake.now(io).toMilliseconds() * 1_000_000; // ms→ns
+    const now_nanos: i64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
     const timeout_nanos = if (deadline_nanos) |deadline|
         @max(@as(i64, 0), deadline - now_nanos)
     else
         2_000_000_000; // 2s in ns
     return .{ .duration = .{
         .clock = .awake,
-        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_nanos / 1_000_000)),
+        .raw = std.Io.Duration.fromNanoseconds(timeout_nanos),
     } };
 }
 
-fn nowMillis(io: std.Io) i64 {
-    return std.Io.Clock.awake.now(io).toMilliseconds() * 1_000_000; // ms→ns
+fn nowNanos(io: std.Io) i64 {
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
 
 fn require(condition: bool) !void {
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [client_max_datagram_size]u8 = undefined;
 
-    const client_initial = try client_endpoint.begin(nowMillis(io), &scratch);
+    const client_initial = try client_endpoint.begin(nowNanos(io), &scratch);
     defer allocator.free(client_initial);
     try socket.send(io, &server_address, client_initial);
 
@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
     var sent_finished = false;
     while (received_handshake_datagrams < 8 and !client_endpoint.handshakeConfirmed()) : (received_handshake_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        const received_result = try client_endpoint.receive(nowNanos(io), &scratch, received.data);
         try require(received_result.route.connection_id == client_handle);
         const progress = received_result.transport;
         if (progress.retry_received) {
@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var sent_application_packets: usize = 0;
     while (sent_application_packets < 4) : (sent_application_packets += 1) {
-        const stream_packet = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
+        const stream_packet = (try client_endpoint.pollApplicationDatagram(nowNanos(io))) orelse break;
         defer allocator.free(stream_packet);
         try active_socket.send(io, &server_address, stream_packet);
     }
@@ -160,13 +160,13 @@ pub fn main(init: std.process.Init) !void {
             null;
         const received = active_socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
             error.Timeout => {
-                const serviced = (try client_endpoint.serviceDueDeadline(nowMillis(io))) orelse continue;
+                const serviced = (try client_endpoint.serviceDueDeadline(nowNanos(io))) orelse continue;
                 switch (serviced) {
                     .recovery => {
                         recovery_timer_services += 1;
                         var retransmission_count: usize = 0;
                         while (retransmission_count < 4) : (retransmission_count += 1) {
-                            const retransmission = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
+                            const retransmission = (try client_endpoint.pollApplicationDatagram(nowNanos(io))) orelse break;
                             defer allocator.free(retransmission);
                             try active_socket.send(io, &server_address, retransmission);
                         }
@@ -182,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
             dropped_responses += 1;
             continue;
         }
-        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        const received_result = try client_endpoint.receive(nowNanos(io), &scratch, received.data);
         try require(received_result.route.connection_id == client_handle);
         const progress = received_result.transport;
         if (progress.outbound_handshake) |client_finished| {
@@ -191,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var response_packets: usize = 0;
         while (response_packets < 2) : (response_packets += 1) {
-            const response = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
+            const response = (try client_endpoint.pollApplicationDatagram(nowNanos(io))) orelse break;
             defer allocator.free(response);
             try active_socket.send(io, &server_address, response);
         }
@@ -217,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const close_packet = (try client_endpoint.close(0, 0, "process echo complete", nowMillis(io))) orelse return error.UnexpectedState;
+    const close_packet = (try client_endpoint.close(0, 0, "process echo complete", nowNanos(io))) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
     try active_socket.send(io, &server_address, close_packet);
     const client_close_deadline = client_endpoint.closeDeadline() orelse return error.UnexpectedState;

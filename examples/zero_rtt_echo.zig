@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     // Simulate: handshake completes, server sends NewSessionTicket.
     // In a real connection the ticket arrives via the CRYPTO stream;
     // here we construct it directly.
-    const psk_from_handshake = [_]u8{0xDE} ** 32;
+    const psk_from_handshake = @as([32]u8, @splat(0xDE));
     const ticket_nonce = try allocator.dupe(u8, "nonce-001");
     try mgr.cache.store(.{
         .server_id = try allocator.dupe(u8, server_id),
@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     const reject_nonce = try allocator.dupe(u8, "nonce-002");
     try mgr.cache.store(.{
         .server_id = try allocator.dupe(u8, reject_server),
-        .psk = [_]u8{0xAA} ** 32,
+        .psk = @as([32]u8, @splat(0xAA)),
         .lifetime_sec = 3600,
         .age_add = 0,
         .nonce = reject_nonce,
@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     const no_early_nonce = try allocator.dupe(u8, "nonce-003");
     try mgr.cache.store(.{
         .server_id = try allocator.dupe(u8, no_early_server),
-        .psk = [_]u8{0xBB} ** 32,
+        .psk = @as([32]u8, @splat(0xBB)),
         .lifetime_sec = 3600,
         .age_add = 0,
         .nonce = no_early_nonce,

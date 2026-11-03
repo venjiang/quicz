@@ -18,9 +18,9 @@ Build everything in ReleaseFast — the Debug build is a measurement artifact
 (compiler codegen, not library logic):
 
 ```bash
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 # or per target
-zig build run-multi-client-bench -Doptimize=ReleaseFast
+zig build run-multi-client-bench -Doptimize=fast
 ```
 
 ## 1. Cross-host: client on host A, server on host B
@@ -41,7 +41,7 @@ var server = try Server.init(allocator, io, .{
 On **host B** (server):
 
 ```bash
-zig build run-io-echo -Doptimize=ReleaseFast   # or run-h3-server for H3
+zig build run-io-echo -Doptimize=fast   # or run-h3-server for H3
 ```
 
 On **host A** (client), point `Client.Config.server_host` at B's IP and
@@ -71,7 +71,7 @@ benchmark split across them:
 # host build: cross-compile the x86_64 binary (or compile inside the container)
 zig build-exe -target x86_64-linux-musl --dep quicz \
     -Mroot=examples/multi_client_bench.zig -Mquicz=src/lib.zig \
-    -OReleaseFast -lc --name qmc-bench-x64
+    -Ofast -lc --name qmc-bench-x64
 
 # two containers on one bridge network
 docker run -d --name bench-server --network bridge --entrypoint sleep <quicz-linux-img> infinity
@@ -141,7 +141,7 @@ grow and how throughput degrades:
 ```bash
 for loss in 0 0.5 1 3 5; do
     tc qdisc add dev eth0 root netem loss "${loss}%"
-    zig build run-quic-bench-hs -Doptimize=ReleaseFast 2>&1 | tee /tmp/hs_loss${loss}.log
+    zig build run-quic-bench-hs -Doptimize=fast 2>&1 | tee /tmp/hs_loss${loss}.log
     tc qdisc del dev eth0 root
 done
 ```
@@ -161,7 +161,7 @@ throughput. Run it across hosts to include real RTT:
 ```bash
 # host B: run the server portion (patch the example to bind 0.0.0.0)
 # host A: 16 clients, real network
-zig build run-multi-client-bench -Doptimize=ReleaseFast
+zig build run-multi-client-bench -Doptimize=fast
 ```
 
 Expected output (ReleaseFast, loopback reference):
@@ -186,7 +186,7 @@ mkdir -p "$BENCH_DIR"
 
 ## 6. Checklist before trusting a number
 
-1. Build `-Doptimize=ReleaseFast` (never Debug).
+1. Build `-Doptimize=fast` (never Debug).
 2. Sanity-check the raw path with `iperf3`; quicz should land within a
    reasonable factor of the link's UDP/TCP ceiling per connection.
 3. On Linux x86_64 use an RSA certificate.

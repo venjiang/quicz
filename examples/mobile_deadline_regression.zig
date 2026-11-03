@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
     const started = std.Io.Timestamp.now(io, .awake);
     const outcome = mobile.quicz_mobile_client_connect_timeout(silent_client, 100);
     mobile.quicz_mobile_client_destroy(silent_client);
-    if (outcome != @intFromEnum(mobile.Result.connection_timed_out)) return error.TimeoutNotReported;
+    if (outcome != @backingInt(mobile.Result.connection_timed_out)) return error.TimeoutNotReported;
     if (started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() > 500) return error.TimeoutNotBounded;
     if (comptime builtin.os.tag.isDarwin()) {
         var current: std.posix.sigset_t = undefined;

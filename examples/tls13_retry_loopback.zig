@@ -111,7 +111,7 @@ pub fn main() !void {
     defer server_socket.close(io);
 
     // === TLS 握手 setup（参考 tls13_path_validation_loopback.zig）===
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };

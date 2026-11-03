@@ -36,7 +36,7 @@ pub fn protectedLongDatagramWireLen(
 ) Error!usize {
     if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
     if (header.dcid.len > max_connection_id_len or header.scid.len > max_connection_id_len) return error.InvalidPacket;
-    if (@intFromEnum(header.version) == 0) return error.InvalidPacket;
+    if (@backingInt(header.version) == 0) return error.InvalidPacket;
     if (header.packet_type == .retry) return error.InvalidPacket;
     if (header.packet_type != .initial and header.token.len != 0) return error.InvalidPacket;
     const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
@@ -413,7 +413,7 @@ test "protected datagram wire length rejects invalid packet number lengths" {
 }
 
 test "protected datagram wire length rejects invalid packet envelopes" {
-    var too_long_cid = [_]u8{0} ** (max_connection_id_len + 1);
+    var too_long_cid = @as([(max_connection_id_len + 1)]u8, @splat(0));
     const header = packet.LongHeader{
         .packet_type = .handshake,
         .version = .v1,
@@ -433,7 +433,7 @@ test "protected datagram wire length rejects invalid packet envelopes" {
     try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
 
     invalid = header;
-    invalid.version = @enumFromInt(0);
+    invalid.version = @fromBackingInt(@intCast(0));
     try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
 
     invalid = header;
@@ -545,7 +545,7 @@ test "stream count wire length rejects values above the stream count limit" {
 
 test "new connection id wire length rejects invalid local ids" {
     var cid = [_]u8{1};
-    const token = [_]u8{0} ** 16;
+    const token = @as([16]u8, @splat(0));
     try std.testing.expectError(error.InvalidPacket, newConnectionIdFrameWireLen(.{
         .sequence_number = max_quic_varint + 1,
         .retire_prior_to = 0,

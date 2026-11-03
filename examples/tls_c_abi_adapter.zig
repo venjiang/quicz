@@ -42,11 +42,11 @@ fn requireCStatus(status: anytype) ExampleError!void {
 }
 
 fn tlsStatus(status: anytype) quicz.TlsBackendStatus {
-    return @enumFromInt(@as(c_int, @intCast(status)));
+    return @fromBackingInt(@intCast(@as(c_int, @intCast(status))));
 }
 
 fn cPacketSpace(space: quicz.TlsBackendPacketSpace) c.enum_quicz_tls_backend_packet_space {
-    return @intCast(@intFromEnum(space));
+    return @intCast(@backingInt(space));
 }
 
 fn cDemoReceive(

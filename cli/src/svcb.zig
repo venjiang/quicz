@@ -190,7 +190,7 @@ fn parseSvcResponse(allocator: std.mem.Allocator, packet: []const u8, expected_i
     var response = std.Io.net.HostName.DnsResponse.init(packet) catch return .{};
     var info = HttpsSvcInfo{ .query_ok = true };
     while (response.next() catch return info) |answer| {
-        const record_type: u16 = @intFromEnum(answer.rr);
+        const record_type: u16 = @backingInt(answer.rr);
         if (record_type != svc_type_https) continue;
         const data = answer.packet[answer.data_off..][0..answer.data_len];
         const parsed = parseSvcRdata(allocator, answer.packet, answer.data_off, data) catch continue;

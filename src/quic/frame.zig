@@ -245,7 +245,7 @@ fn decodeFrameType(reader: anytype) !u64 {
 }
 
 fn frameTypeId(comptime frame_type: FrameType) u64 {
-    return @intFromEnum(frame_type);
+    return @backingInt(frame_type);
 }
 
 fn validateAckRangeCountFitsReader(reader: anytype, range_count: usize) FrameError!void {
@@ -434,20 +434,20 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             if (padding.len == 0) return error.InvalidPaddingLength;
             var i: usize = 0;
             while (i < padding.len) : (i += 1) {
-                try writer.writeByte(@intFromEnum(FrameType.padding));
+                try writer.writeByte(@backingInt(FrameType.padding));
             }
         },
         .ping => {
-            try writer.writeByte(@intFromEnum(FrameType.ping));
+            try writer.writeByte(@backingInt(FrameType.ping));
         },
         .ack => |ack| {
             try validateAckFrame(ack);
-            try writer.writeByte(@intFromEnum(FrameType.ack));
+            try writer.writeByte(@backingInt(FrameType.ack));
             try encodeAckFrameFields(writer, ack);
         },
         .ack_ecn => |ack_ecn| {
             try validateAckEcnFrame(ack_ecn);
-            try writer.writeByte(@intFromEnum(FrameType.ack_ecn));
+            try writer.writeByte(@backingInt(FrameType.ack_ecn));
             try encodeAckFrameFields(writer, ack_ecn.ack);
             try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ect0_count);
             try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ect1_count);
@@ -455,28 +455,28 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         },
         .reset_stream => |reset| {
             try validateResetStreamFrame(reset);
-            try writer.writeByte(@intFromEnum(FrameType.reset_stream));
+            try writer.writeByte(@backingInt(FrameType.reset_stream));
             try packet.encodeVarInt(writer, reset.stream_id);
             try packet.encodeVarInt(writer, reset.application_error_code);
             try packet.encodeVarInt(writer, reset.final_size);
         },
         .stop_sending => |stop_sending| {
             try validateStopSendingFrame(stop_sending);
-            try writer.writeByte(@intFromEnum(FrameType.stop_sending));
+            try writer.writeByte(@backingInt(FrameType.stop_sending));
             try packet.encodeVarInt(writer, stop_sending.stream_id);
             try packet.encodeVarInt(writer, stop_sending.application_error_code);
         },
         .new_token => |new_token| {
             try validateNewTokenFrame(new_token);
 
-            try writer.writeByte(@intFromEnum(FrameType.new_token));
+            try writer.writeByte(@backingInt(FrameType.new_token));
             try packet.encodeVarInt(writer, new_token.token.len);
             try writer.writeAll(new_token.token);
         },
         .stream => |stream| {
             try validateStreamFrame(stream);
 
-            var frame_type: u8 = @intFromEnum(FrameType.stream);
+            var frame_type: u8 = @backingInt(FrameType.stream);
             if (stream.offset != 0) {
                 frame_type |= 0x04; // OFF bit
             }
@@ -496,57 +496,57 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         .crypto => |crypto| {
             try validateFrameSliceEndOffset(crypto.offset, crypto.data);
 
-            try writer.writeByte(@intFromEnum(FrameType.crypto));
+            try writer.writeByte(@backingInt(FrameType.crypto));
             try packet.encodeVarInt(writer, crypto.offset);
             try packet.encodeVarInt(writer, crypto.data.len);
             try writer.writeAll(crypto.data);
         },
         .max_data => |max_data| {
             try validateFrameVarInt(max_data.maximum_data);
-            try writer.writeByte(@intFromEnum(FrameType.max_data));
+            try writer.writeByte(@backingInt(FrameType.max_data));
             try packet.encodeVarInt(writer, max_data.maximum_data);
         },
         .max_stream_data => |max_stream_data| {
             try validateMaxStreamDataFrame(max_stream_data);
-            try writer.writeByte(@intFromEnum(FrameType.max_stream_data));
+            try writer.writeByte(@backingInt(FrameType.max_stream_data));
             try packet.encodeVarInt(writer, max_stream_data.stream_id);
             try packet.encodeVarInt(writer, max_stream_data.maximum_stream_data);
         },
         .max_streams_bidi => |max_streams| {
             try validateStreamCount(max_streams.maximum_streams);
-            try writer.writeByte(@intFromEnum(FrameType.max_streams_bidi));
+            try writer.writeByte(@backingInt(FrameType.max_streams_bidi));
             try packet.encodeVarInt(writer, max_streams.maximum_streams);
         },
         .max_streams_uni => |max_streams| {
             try validateStreamCount(max_streams.maximum_streams);
-            try writer.writeByte(@intFromEnum(FrameType.max_streams_uni));
+            try writer.writeByte(@backingInt(FrameType.max_streams_uni));
             try packet.encodeVarInt(writer, max_streams.maximum_streams);
         },
         .data_blocked => |data_blocked| {
             try validateFrameVarInt(data_blocked.maximum_data);
-            try writer.writeByte(@intFromEnum(FrameType.data_blocked));
+            try writer.writeByte(@backingInt(FrameType.data_blocked));
             try packet.encodeVarInt(writer, data_blocked.maximum_data);
         },
         .stream_data_blocked => |stream_data_blocked| {
             try validateStreamDataBlockedFrame(stream_data_blocked);
-            try writer.writeByte(@intFromEnum(FrameType.stream_data_blocked));
+            try writer.writeByte(@backingInt(FrameType.stream_data_blocked));
             try packet.encodeVarInt(writer, stream_data_blocked.stream_id);
             try packet.encodeVarInt(writer, stream_data_blocked.maximum_stream_data);
         },
         .streams_blocked_bidi => |streams_blocked| {
             try validateStreamCount(streams_blocked.maximum_streams);
-            try writer.writeByte(@intFromEnum(FrameType.streams_blocked_bidi));
+            try writer.writeByte(@backingInt(FrameType.streams_blocked_bidi));
             try packet.encodeVarInt(writer, streams_blocked.maximum_streams);
         },
         .streams_blocked_uni => |streams_blocked| {
             try validateStreamCount(streams_blocked.maximum_streams);
-            try writer.writeByte(@intFromEnum(FrameType.streams_blocked_uni));
+            try writer.writeByte(@backingInt(FrameType.streams_blocked_uni));
             try packet.encodeVarInt(writer, streams_blocked.maximum_streams);
         },
         .new_connection_id => |new_connection_id| {
             try validateNewConnectionIdFrame(new_connection_id);
 
-            try writer.writeByte(@intFromEnum(FrameType.new_connection_id));
+            try writer.writeByte(@backingInt(FrameType.new_connection_id));
             try packet.encodeVarInt(writer, new_connection_id.sequence_number);
             try packet.encodeVarInt(writer, new_connection_id.retire_prior_to);
             try writer.writeByte(@as(u8, @intCast(new_connection_id.connection_id.len)));
@@ -555,20 +555,20 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         },
         .retire_connection_id => |retire_connection_id| {
             try validateFrameVarInt(retire_connection_id.sequence_number);
-            try writer.writeByte(@intFromEnum(FrameType.retire_connection_id));
+            try writer.writeByte(@backingInt(FrameType.retire_connection_id));
             try packet.encodeVarInt(writer, retire_connection_id.sequence_number);
         },
         .path_challenge => |path_challenge| {
-            try writer.writeByte(@intFromEnum(FrameType.path_challenge));
+            try writer.writeByte(@backingInt(FrameType.path_challenge));
             try writer.writeAll(&path_challenge.data);
         },
         .path_response => |path_response| {
-            try writer.writeByte(@intFromEnum(FrameType.path_response));
+            try writer.writeByte(@backingInt(FrameType.path_response));
             try writer.writeAll(&path_response.data);
         },
         .connection_close => |close| {
             try validateConnectionCloseFrame(close);
-            try writer.writeByte(@intFromEnum(FrameType.connection_close));
+            try writer.writeByte(@backingInt(FrameType.connection_close));
             try packet.encodeVarInt(writer, close.error_code);
             try packet.encodeVarInt(writer, close.frame_type);
             try packet.encodeVarInt(writer, close.reason_phrase.len);
@@ -576,16 +576,16 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         },
         .application_close => |close| {
             try validateApplicationCloseFrame(close);
-            try writer.writeByte(@intFromEnum(FrameType.application_close));
+            try writer.writeByte(@backingInt(FrameType.application_close));
             try packet.encodeVarInt(writer, close.error_code);
             try packet.encodeVarInt(writer, close.reason_phrase.len);
             try writer.writeAll(close.reason_phrase);
         },
         .handshake_done => {
-            try writer.writeByte(@intFromEnum(FrameType.handshake_done));
+            try writer.writeByte(@backingInt(FrameType.handshake_done));
         },
         .datagram => |dg| {
-            try writer.writeByte(@intFromEnum(FrameType.datagram_with_length));
+            try writer.writeByte(@backingInt(FrameType.datagram_with_length));
             try packet.encodeVarInt(writer, dg.data.len);
             try writer.writeAll(dg.data);
         },
@@ -598,9 +598,9 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
 pub fn decodeFrameSlice(data: []const u8, allocator: std.mem.Allocator) !DecodedFrame {
     if (data.len == 0) return error.EndOfStream;
 
-    if (data[0] == @intFromEnum(FrameType.padding)) {
+    if (data[0] == @backingInt(FrameType.padding)) {
         var len: usize = 0;
-        while (len < data.len and data[len] == @intFromEnum(FrameType.padding)) : (len += 1) {}
+        while (len < data.len and data[len] == @backingInt(FrameType.padding)) : (len += 1) {}
         return .{ .frame = .{ .padding = .{ .len = len } }, .len = len };
     }
 
@@ -632,9 +632,9 @@ pub fn decodeFrameBorrowing(reader: anytype, allocator: std.mem.Allocator) !Fram
 pub fn decodeFrameSliceBorrowing(data: []const u8, allocator: std.mem.Allocator) !DecodedFrame {
     if (data.len == 0) return error.EndOfStream;
 
-    if (data[0] == @intFromEnum(FrameType.padding)) {
+    if (data[0] == @backingInt(FrameType.padding)) {
         var plen: usize = 0;
-        while (plen < data.len and data[plen] == @intFromEnum(FrameType.padding)) : (plen += 1) {}
+        while (plen < data.len and data[plen] == @backingInt(FrameType.padding)) : (plen += 1) {}
         return .{ .frame = .{ .padding = .{ .len = plen } }, .len = plen };
     }
 
@@ -891,7 +891,7 @@ fn decodeFrameImpl(reader: anytype, allocator: std.mem.Allocator, comptime borro
     }
 
     // RFC 9221 DATAGRAM with length (0x31)
-    if (frame_type == @intFromEnum(FrameType.datagram_with_length)) {
+    if (frame_type == @backingInt(FrameType.datagram_with_length)) {
         const len = (try packet.decodeVarInt(reader)).value;
         const data = try buffer.readBytes(reader, allocator, len, borrow);
         return .{ .datagram = .{ .data = data } };
@@ -930,10 +930,10 @@ test "encode/decode stream frame roundtrip" {
 
 test "decodeFrameSlice aggregates consecutive padding" {
     const wire = [_]u8{
-        @intFromEnum(FrameType.padding),
-        @intFromEnum(FrameType.padding),
-        @intFromEnum(FrameType.padding),
-        @intFromEnum(FrameType.ping),
+        @backingInt(FrameType.padding),
+        @backingInt(FrameType.padding),
+        @backingInt(FrameType.padding),
+        @backingInt(FrameType.ping),
     };
 
     const padding = try decodeFrameSlice(&wire, std.testing.allocator);
@@ -1025,7 +1025,7 @@ test "stream and crypto frames reject end offsets above varint maximum" {
 
     var crypto_wire: [32]u8 = undefined;
     var crypto_out = buffer.fixedWriter(&crypto_wire);
-    try crypto_out.writeByte(@intFromEnum(FrameType.crypto));
+    try crypto_out.writeByte(@backingInt(FrameType.crypto));
     try packet.encodeVarInt(crypto_out.writer(), max_quic_varint);
     try packet.encodeVarInt(crypto_out.writer(), 1);
     try crypto_out.writeByte('x');
@@ -1184,7 +1184,7 @@ test "ack frame encoders reject oversized varint fields before writing" {
 
 test "ack_ecn with truncated ecn counts frees decoded ranges" {
     const wire = [_]u8{
-        @intFromEnum(FrameType.ack_ecn),
+        @backingInt(FrameType.ack_ecn),
         0x08, // largest acknowledged
         0x00, // ack delay
         0x01, // one additional ACK range
@@ -1213,7 +1213,7 @@ test "ack frame additional ranges must not underflow packet numbers" {
     } }));
 
     const wire = [_]u8{
-        @intFromEnum(FrameType.ack),
+        @backingInt(FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x01, // one additional ACK range
@@ -1229,7 +1229,7 @@ test "ack frame additional ranges must not underflow packet numbers" {
 test "ack frame range count must fit remaining payload before allocation" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const wire = [_]u8{
-        @intFromEnum(FrameType.ack),
+        @backingInt(FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x01, // one additional ACK range
@@ -1252,7 +1252,7 @@ test "ack frame first range cannot exceed largest acknowledged" {
     } }));
 
     const wire = [_]u8{
-        @intFromEnum(FrameType.ack),
+        @backingInt(FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x00, // no additional ACK ranges
@@ -1358,7 +1358,7 @@ test "new_token frame rejects empty token" {
     try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .new_token = .{ .token = "" } }));
 
     const wire = [_]u8{
-        @intFromEnum(FrameType.new_token),
+        @backingInt(FrameType.new_token),
         0x00, // invalid empty token length
     };
     var in = buffer.fixedReader(&wire);
@@ -1377,7 +1377,7 @@ test "frame encoders reject oversized variable data lengths before writing" {
     out = buffer.fixedWriter(&buf);
     try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .connection_close = .{
         .error_code = 0,
-        .frame_type = @intFromEnum(FrameType.padding),
+        .frame_type = @backingInt(FrameType.padding),
         .reason_phrase = oversized_data,
     } }));
     try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
@@ -1395,7 +1395,7 @@ test "close frame encoders reject oversized varint fields before writing" {
     var out = buffer.fixedWriter(&buf);
     try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .connection_close = .{
         .error_code = max_quic_varint + 1,
-        .frame_type = @intFromEnum(FrameType.padding),
+        .frame_type = @backingInt(FrameType.padding),
         .reason_phrase = "",
     } }));
     try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
@@ -1418,7 +1418,7 @@ test "close frame encoders reject oversized varint fields before writing" {
 
 test "control frame encoders reject oversized varint fields before writing" {
     const oversized = max_quic_varint + 1;
-    const token = [_]u8{0} ** 16;
+    const token = @as([16]u8, @splat(0));
     const cid = [_]u8{0xaa};
 
     var buf: [64]u8 = undefined;
@@ -1567,14 +1567,14 @@ test "stream count frames reject values above max stream count" {
 
     var max_streams_wire: [16]u8 = undefined;
     var max_streams_out = buffer.fixedWriter(&max_streams_wire);
-    try max_streams_out.writeByte(@intFromEnum(FrameType.max_streams_uni));
+    try max_streams_out.writeByte(@backingInt(FrameType.max_streams_uni));
     try packet.encodeVarInt(max_streams_out.writer(), max_stream_count + 1);
     var max_streams_in = buffer.fixedReader(max_streams_out.getWritten());
     try std.testing.expectError(error.InvalidFrameValue, decodeFrame(max_streams_in.reader(), std.testing.allocator));
 
     var streams_blocked_wire: [16]u8 = undefined;
     var streams_blocked_out = buffer.fixedWriter(&streams_blocked_wire);
-    try streams_blocked_out.writeByte(@intFromEnum(FrameType.streams_blocked_bidi));
+    try streams_blocked_out.writeByte(@backingInt(FrameType.streams_blocked_bidi));
     try packet.encodeVarInt(streams_blocked_out.writer(), max_stream_count + 1);
     var streams_blocked_in = buffer.fixedReader(streams_blocked_out.getWritten());
     try std.testing.expectError(error.InvalidFrameValue, decodeFrame(streams_blocked_in.reader(), std.testing.allocator));
@@ -1721,7 +1721,7 @@ test "new_connection_id validates cid length retire order and token length" {
     }));
 
     const zero_len_wire = [_]u8{
-        @intFromEnum(FrameType.new_connection_id),
+        @backingInt(FrameType.new_connection_id),
         0x01, // sequence number
         0x00, // retire prior to
         0x00, // invalid connection id length
@@ -1730,7 +1730,7 @@ test "new_connection_id validates cid length retire order and token length" {
     try std.testing.expectError(error.InvalidConnectionIdLength, decodeFrame(zero_len_in.reader(), std.testing.allocator));
 
     const bad_retire_wire = [_]u8{
-        @intFromEnum(FrameType.new_connection_id),
+        @backingInt(FrameType.new_connection_id),
         0x01, // sequence number
         0x02, // retire prior to exceeds sequence number
         0x01, // connection id length
@@ -1740,7 +1740,7 @@ test "new_connection_id validates cid length retire order and token length" {
     try std.testing.expectError(error.InvalidFrameValue, decodeFrame(bad_retire_in.reader(), std.testing.allocator));
 
     const truncated_token_wire = [_]u8{
-        @intFromEnum(FrameType.new_connection_id),
+        @backingInt(FrameType.new_connection_id),
         0x01, // sequence number
         0x00, // retire prior to
         0x01, // connection id length
@@ -1837,7 +1837,7 @@ test "encode/decode connection_close frame roundtrip" {
 
     const input = Frame{ .connection_close = .{
         .error_code = 0x0a,
-        .frame_type = @intFromEnum(FrameType.stream),
+        .frame_type = @backingInt(FrameType.stream),
         .reason_phrase = "flow control violation",
     } };
     try encodeFrame(out.writer(), input);
@@ -1850,7 +1850,7 @@ test "encode/decode connection_close frame roundtrip" {
     switch (parsed) {
         .connection_close => |frame| {
             try std.testing.expectEqual(@as(u64, 0x0a), frame.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(FrameType.stream)), frame.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(FrameType.stream)), frame.frame_type);
             try std.testing.expectEqualStrings("flow control violation", frame.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -1883,9 +1883,9 @@ test "encode/decode application_close frame roundtrip" {
 
 test "connection close with truncated reason fails" {
     const wire = [_]u8{
-        @intFromEnum(FrameType.connection_close),
+        @backingInt(FrameType.connection_close),
         0x01, // error code
-        @intFromEnum(FrameType.stream),
+        @backingInt(FrameType.stream),
         0x04, // reason length
         'n',
         'o',

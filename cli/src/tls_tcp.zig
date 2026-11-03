@@ -32,6 +32,59 @@ const ContentType = struct {
     const application_data: u8 = 23;
 };
 
+test "write fragments application data into bounded TLS records" {
+    const payload: [record_max * 2 + 17]u8 = @splat(0x42);
+    var ciphertext: [payload.len + 3 * (5 + tag_len + 1)]u8 = undefined;
+    var out = std.Io.Writer.fixed(&ciphertext);
+    var in = std.Io.Reader.fixed(&.{});
+    var stream: TlsStream = .{
+        .in = &in,
+        .out = &out,
+        .write_key = @splat(1),
+        .write_iv = @splat(2),
+        .read_key = @splat(3),
+        .read_iv = @splat(4),
+    };
+    try stream.write(&payload);
+    var records = std.Io.Reader.fixed(out.buffered());
+    var record_buf: [record_max + 256]u8 = undefined;
+    var plain: [record_max + 1]u8 = undefined;
+    var sequence: u64 = 0;
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const record = try readRecord(&records, &record_buf);
+        const decoded = try openRecord(record.payload, &plain, stream.write_key, stream.write_iv, &sequence);
+        try std.testing.expectEqual(ContentType.application_data, decoded.content_type);
+        try std.testing.expect(decoded.data.len <= record_max);
+        try std.testing.expectEqualSlices(u8, payload[offset..][0..decoded.data.len], decoded.data);
+        offset += decoded.data.len;
+    }
+    try std.testing.expectEqual(@as(u64, 3), sequence);
+    try std.testing.expectEqual(sequence, stream.write_seq);
+}
+
+test "read accepts encrypted close notify as EOF" {
+    var ciphertext: [64]u8 = undefined;
+    const secret: [16]u8 = @splat(1);
+    const iv: [12]u8 = @splat(2);
+    var sequence: u64 = 0;
+    const len = sealRecord(&ciphertext, ContentType.alert, &.{ 1, 0 }, secret, iv, &sequence);
+    var in = std.Io.Reader.fixed(ciphertext[0..len]);
+    var out = std.Io.Writer.fixed(&.{});
+    var stream: TlsStream = .{
+        .in = &in,
+        .out = &out,
+        .write_key = secret,
+        .write_iv = iv,
+        .read_key = secret,
+        .read_iv = iv,
+    };
+    var plaintext: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try stream.read(&plaintext));
+    try std.testing.expectEqual(@as(usize, 0), try stream.read(&plaintext));
+    try std.testing.expect(!stream.write_closed);
+}
+
 const HandshakeType = struct {
     const client_hello: u8 = 1;
     const server_hello: u8 = 2;
@@ -127,7 +180,7 @@ const Decrypted = struct {
     data: []const u8,
 };
 
-/// Decrypt one TLS record payload. `out` must hold `payload.len` bytes.
+/// Decrypt one TLS record payload. `out` must hold `payload.len - tag_len` bytes.
 fn openRecord(
     payload: []const u8,
     out: []u8,
@@ -138,6 +191,8 @@ fn openRecord(
     if (payload.len < tag_len + 1) return error.DecryptionFailed;
     const cipher_len = payload.len;
     const plaintext_len = cipher_len - tag_len;
+    // The limit includes content type and padding (RFC 8446 section 5.4).
+    if (plaintext_len > record_max + 1) return error.RecordOversize;
     var aad: [5]u8 = undefined;
     writeRecordHeader(&aad, ContentType.application_data, cipher_len);
     var tag: [tag_len]u8 = undefined;
@@ -391,9 +446,12 @@ pub const TlsStream = struct {
     write_key: [16]u8,
     write_iv: [12]u8,
     write_seq: u64 = 0,
+    // Record or I/O failure also terminates output, without a graceful alert.
+    write_closed: bool = false,
     read_key: [16]u8,
     read_iv: [12]u8,
     read_seq: u64 = 0,
+    read_closed: bool = false,
     dec_buf: [record_max + 256]u8 = undefined,
     dec_start: usize = 0,
     dec_end: usize = 0,
@@ -414,7 +472,7 @@ pub const TlsStream = struct {
         // 2. X25519 key exchange.
         var x25519_secret: [32]u8 = undefined;
         tls13.secureRandomBytes(&x25519_secret);
-        const x25519_public = try X25519.recoverPublicKey(x25519_secret);
+        const x25519_public = X25519.recoverPublicKey(x25519_secret);
         const shared_secret = try X25519.scalarmult(x25519_secret, client_key);
 
         // 3. ServerHello (plaintext).
@@ -532,8 +590,11 @@ pub const TlsStream = struct {
         };
     }
 
-    /// Read decrypted application data; returns 0 on EOF/close.
+    /// Read decrypted application data. Peer close_notify returns 0.
+    /// Record and I/O errors terminate output and propagate unchanged.
     pub fn read(self: *TlsStream, buf: []u8) !usize {
+        if (self.read_closed) return 0;
+        errdefer self.write_closed = true;
         if (self.dec_start < self.dec_end) {
             const available = self.dec_end - self.dec_start;
             const n = @min(available, buf.len);
@@ -548,8 +609,13 @@ pub const TlsStream = struct {
         if (len > self.dec_buf.len) return error.RecordOversize;
         try readN(self.in, self.dec_buf[0..len]);
         if (header[0] == ContentType.application_data) {
-            var plain: [record_max]u8 = undefined;
+            var plain: [record_max + 1]u8 = undefined;
             const dec = try openRecord(self.dec_buf[0..len], &plain, self.read_key, self.read_iv, &self.read_seq);
+            if (dec.content_type == ContentType.alert) {
+                if (dec.data.len != 2 or dec.data[1] != 0) return error.TlsAlert;
+                self.read_closed = true;
+                return 0;
+            }
             if (dec.content_type != ContentType.application_data) return error.UnexpectedMessage;
             const n = @min(dec.data.len, buf.len);
             @memcpy(buf[0..n], dec.data[0..n]);
@@ -566,10 +632,208 @@ pub const TlsStream = struct {
         return error.UnexpectedMessage;
     }
 
+    /// Write bounded application records. I/O errors terminate output.
     pub fn write(self: *TlsStream, data: []const u8) !void {
+        if (self.write_closed) return error.StreamClosed;
+        errdefer self.write_closed = true;
         var rec: [record_max + 64]u8 = undefined;
-        const n = sealRecord(&rec, ContentType.application_data, data, self.write_key, self.write_iv, &self.write_seq);
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const count = @min(record_max, data.len - offset);
+            const n = sealRecord(&rec, ContentType.application_data, data[offset..][0..count], self.write_key, self.write_iv, &self.write_seq);
+            try self.out.writeAll(rec[0..n]);
+            offset += count;
+        }
+        try self.out.flush();
+    }
+
+    /// Send close_notify unless output already ended or failed. Repeated calls do not send another alert.
+    pub fn end(self: *TlsStream) !void {
+        if (self.write_closed) return;
+        self.write_closed = true;
+        var rec: [64]u8 = undefined;
+        const n = sealRecord(&rec, ContentType.alert, &.{ 1, 0 }, self.write_key, self.write_iv, &self.write_seq);
         try self.out.writeAll(rec[0..n]);
         try self.out.flush();
     }
 };
+
+test "read accepts a full sized application record" {
+    const payload: [record_max]u8 = @splat(0x42);
+    var ciphertext: [record_max + 64]u8 = undefined;
+    const secret: [16]u8 = @splat(1);
+    const iv: [12]u8 = @splat(2);
+    var sequence: u64 = 0;
+    const len = sealRecord(&ciphertext, ContentType.application_data, &payload, secret, iv, &sequence);
+    var in = std.Io.Reader.fixed(ciphertext[0..len]);
+    var out = std.Io.Writer.fixed(&.{});
+    var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
+    var plaintext: [record_max]u8 = undefined;
+    try std.testing.expectEqual(record_max, try stream.read(&plaintext));
+    try std.testing.expectEqualSlices(u8, &payload, &plaintext);
+}
+
+test "read accepts padding within the TLSInnerPlaintext limit" {
+    const content_len = record_max - 239;
+    var padded: [record_max]u8 = @splat(0);
+    @memset(padded[0..content_len], 0x42);
+    padded[content_len] = ContentType.application_data;
+    var ciphertext: [record_max + 256 + 5]u8 = undefined;
+    const secret: [16]u8 = @splat(1);
+    const iv: [12]u8 = @splat(2);
+    var sequence: u64 = 0;
+    // The embedded type precedes padding, including the final zero from sealRecord.
+    const len = sealRecord(&ciphertext, 0, &padded, secret, iv, &sequence);
+    var in = std.Io.Reader.fixed(ciphertext[0..len]);
+    var out = std.Io.Writer.fixed(&.{});
+    var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
+    var plaintext: [record_max]u8 = undefined;
+    try std.testing.expectEqual(content_len, try stream.read(&plaintext));
+    try std.testing.expect(std.mem.allEqual(u8, plaintext[0..content_len], 0x42));
+}
+
+test "read rejects a TLSInnerPlaintext that exceeds the limit through padding" {
+    var padded: [record_max + 239]u8 = @splat(0);
+    @memset(padded[0..record_max], 0x42);
+    padded[record_max] = ContentType.application_data;
+    var ciphertext: [record_max + 256 + 5]u8 = undefined;
+    const secret: [16]u8 = @splat(1);
+    const iv: [12]u8 = @splat(2);
+    var sequence: u64 = 0;
+    const len = sealRecord(&ciphertext, 0, &padded, secret, iv, &sequence);
+    var in = std.Io.Reader.fixed(ciphertext[0..len]);
+    var out = std.Io.Writer.fixed(&.{});
+    var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
+    var plaintext: [record_max]u8 = undefined;
+    try std.testing.expectError(error.RecordOversize, stream.read(&plaintext));
+    try stream.end();
+    try std.testing.expectEqual(@as(u64, 0), stream.write_seq);
+    try std.testing.expectError(error.StreamClosed, stream.write("late"));
+}
+
+test "fatal read errors suppress close notify and later writes" {
+    const Failure = enum { authentication, record_size, alert, content_type, truncated };
+    for (std.enums.values(Failure)) |failure| {
+        var ciphertext: [128]u8 = undefined;
+        const secret: [16]u8 = @splat(1);
+        const iv: [12]u8 = @splat(2);
+        var sequence: u64 = 0;
+        var len: usize = 0;
+        const expected: anyerror = switch (failure) {
+            .authentication => blk: {
+                len = sealRecord(&ciphertext, ContentType.application_data, "request", secret, iv, &sequence);
+                ciphertext[len - 1] ^= 1;
+                break :blk error.DecryptionFailed;
+            },
+            .record_size => blk: {
+                writeRecordHeader(&ciphertext, ContentType.application_data, record_max + 257);
+                len = 5;
+                break :blk error.RecordOversize;
+            },
+            .alert => blk: {
+                len = sealRecord(&ciphertext, ContentType.alert, &.{ 2, 20 }, secret, iv, &sequence);
+                break :blk error.TlsAlert;
+            },
+            .content_type => blk: {
+                len = sealRecord(&ciphertext, ContentType.handshake, &.{1}, secret, iv, &sequence);
+                break :blk error.UnexpectedMessage;
+            },
+            .truncated => blk: {
+                ciphertext[0] = ContentType.application_data;
+                len = 1;
+                break :blk error.EndOfStream;
+            },
+        };
+        var in = std.Io.Reader.fixed(ciphertext[0..len]);
+        var reply: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&reply);
+        var stream: TlsStream = .{ .in = &in, .out = &out, .write_key = secret, .write_iv = iv, .read_key = secret, .read_iv = iv };
+        var plaintext: [128]u8 = undefined;
+        try std.testing.expectError(expected, stream.read(&plaintext));
+        try std.testing.expect(stream.write_closed);
+        try stream.end();
+        try stream.end();
+        try std.testing.expectEqual(@as(usize, 0), out.end);
+        try std.testing.expectEqual(@as(u64, 0), stream.write_seq);
+        try std.testing.expectError(error.StreamClosed, stream.write("late"));
+    }
+}
+
+test "failed application write or flush suppresses close notify and output retries" {
+    const Sink = struct {
+        writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+        calls: usize = 0,
+
+        fn drain(writer: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @alignCast(@fieldParentPtr("writer", writer));
+            self.calls += 1;
+            return error.WriteFailed;
+        }
+    };
+    for ([_]bool{ false, true }) |buffered| {
+        var in = std.Io.Reader.fixed(&.{});
+        var sink: Sink = .{};
+        var ciphertext: [128]u8 = undefined;
+        if (buffered) sink.writer.buffer = &ciphertext;
+        var stream: TlsStream = .{
+            .in = &in,
+            .out = &sink.writer,
+            .write_key = @splat(1),
+            .write_iv = @splat(2),
+            .read_key = @splat(3),
+            .read_iv = @splat(4),
+        };
+        try std.testing.expectError(error.WriteFailed, stream.write("response"));
+        try std.testing.expect(stream.write_closed);
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+        const sequence_after_failure = stream.write_seq;
+        try stream.end();
+        try stream.end();
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+        try std.testing.expectEqual(sequence_after_failure, stream.write_seq);
+        try std.testing.expectError(error.StreamClosed, stream.write("late"));
+        try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    }
+}
+
+test "end sends one encrypted close notify and rejects further writes" {
+    var ciphertext: [64]u8 = undefined;
+    var in = std.Io.Reader.fixed(&.{});
+    var out = std.Io.Writer.fixed(&ciphertext);
+    var stream: TlsStream = .{
+        .in = &in,
+        .out = &out,
+        .write_key = @splat(1),
+        .write_iv = @splat(2),
+        .read_key = @splat(3),
+        .read_iv = @splat(4),
+    };
+    try stream.end();
+    const length = out.end;
+    try stream.end();
+    try std.testing.expectEqual(length, out.end);
+    try std.testing.expectEqual(@as(u64, 1), stream.write_seq);
+    try std.testing.expectError(error.StreamClosed, stream.write("late"));
+    var sequence: u64 = 0;
+    var plaintext: [32]u8 = undefined;
+    const decoded = try openRecord(out.buffered()[5..], &plaintext, stream.write_key, stream.write_iv, &sequence);
+    try std.testing.expectEqual(ContentType.alert, decoded.content_type);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, decoded.data);
+}
+
+test "failed end remains write closed without retrying the alert" {
+    var in = std.Io.Reader.fixed(&.{});
+    var out = std.Io.Writer.fixed(&.{});
+    var stream: TlsStream = .{
+        .in = &in,
+        .out = &out,
+        .write_key = @splat(1),
+        .write_iv = @splat(2),
+        .read_key = @splat(3),
+        .read_iv = @splat(4),
+    };
+    try std.testing.expectError(error.WriteFailed, stream.end());
+    try std.testing.expectError(error.StreamClosed, stream.write("late"));
+    try stream.end();
+    try std.testing.expectEqual(@as(u64, 1), stream.write_seq);
+}

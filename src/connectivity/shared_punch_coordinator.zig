@@ -233,8 +233,8 @@ test "shared coordinator isolates concurrent attempts on one receive loop" {
     const second_remote = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 2 }, .port = 4_002 } };
     var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 2);
     defer coordinator.deinit();
-    try coordinator.register(first_remote, try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{}), 0);
-    try coordinator.register(second_remote, try .init(.{0x42} ** 32, .{0x22} ** 16, .{0xa2} ** 16, .{}), 0);
+    try coordinator.register(first_remote, try .init(@splat(0x41), @splat(0x11), @splat(0xa1), .{}), 0);
+    try coordinator.register(second_remote, try .init(@splat(0x42), @splat(0x22), @splat(0xa2), .{}), 0);
 
     const first_probe = switch (coordinator.next(0)) {
         .probe => |outbound| outbound,
@@ -246,8 +246,8 @@ test "shared coordinator isolates concurrent attempts on one receive loop" {
     };
     try std.testing.expect(!std.mem.eql(u8, &first_probe.attempt_id, &second_probe.attempt_id));
 
-    const first_remote_probe = wire.encode(.{0x41} ** 32, .{ .kind = .probe, .attempt_id = .{0x11} ** 16, .nonce = .{0xb1} ** 16 });
-    const second_remote_probe = wire.encode(.{0x42} ** 32, .{ .kind = .probe, .attempt_id = .{0x22} ** 16, .nonce = .{0xb2} ** 16 });
+    const first_remote_probe = wire.encode(@splat(0x41), .{ .kind = .probe, .attempt_id = @splat(0x11), .nonce = @splat(0xb1) });
+    const second_remote_probe = wire.encode(@splat(0x42), .{ .kind = .probe, .attempt_id = @splat(0x22), .nonce = @splat(0xb2) });
     const first_ack = switch (coordinator.receive(first_remote, 1, &first_remote_probe)) {
         .acknowledgement => |outbound| outbound,
         else => return error.ExpectedAcknowledgement,
@@ -256,16 +256,16 @@ test "shared coordinator isolates concurrent attempts on one receive loop" {
         .acknowledgement => |outbound| outbound,
         else => return error.ExpectedAcknowledgement,
     };
-    try std.testing.expectEqual(@as([16]u8, @splat(0x11)), (try wire.decode(.{0x41} ** 32, &first_ack.packet)).attempt_id);
-    try std.testing.expectEqual(@as([16]u8, @splat(0x22)), (try wire.decode(.{0x42} ** 32, &second_ack.packet)).attempt_id);
+    try std.testing.expectEqual(@as([16]u8, @splat(0x11)), (try wire.decode(@splat(0x41), &first_ack.packet)).attempt_id);
+    try std.testing.expectEqual(@as([16]u8, @splat(0x22)), (try wire.decode(@splat(0x42), &second_ack.packet)).attempt_id);
 
-    const first_acknowledgement = wire.encode(.{0x41} ** 32, .{ .kind = .acknowledgement, .attempt_id = .{0x11} ** 16, .nonce = .{0xa1} ** 16 });
-    const second_acknowledgement = wire.encode(.{0x42} ** 32, .{ .kind = .acknowledgement, .attempt_id = .{0x22} ** 16, .nonce = .{0xa2} ** 16 });
-    try std.testing.expectEqual(Event{ .validated = .{0x11} ** 16 }, coordinator.receive(first_remote, 2, &first_acknowledgement));
-    try std.testing.expectEqual(Event{ .validated = .{0x22} ** 16 }, coordinator.receive(second_remote, 2, &second_acknowledgement));
-    var first = try coordinator.takeValidated(.{0x11} ** 16);
+    const first_acknowledgement = wire.encode(@splat(0x41), .{ .kind = .acknowledgement, .attempt_id = @splat(0x11), .nonce = @splat(0xa1) });
+    const second_acknowledgement = wire.encode(@splat(0x42), .{ .kind = .acknowledgement, .attempt_id = @splat(0x22), .nonce = @splat(0xa2) });
+    try std.testing.expectEqual(Event{ .validated = @splat(0x11) }, coordinator.receive(first_remote, 2, &first_acknowledgement));
+    try std.testing.expectEqual(Event{ .validated = @splat(0x22) }, coordinator.receive(second_remote, 2, &second_acknowledgement));
+    var first = try coordinator.takeValidated(@splat(0x11));
     defer first.deinit();
-    var second = try coordinator.takeValidated(.{0x22} ** 16);
+    var second = try coordinator.takeValidated(@splat(0x22));
     defer second.deinit();
     try std.testing.expectEqual(first_remote, first.remote);
     try std.testing.expectEqual(second_remote, second.remote);
@@ -276,12 +276,12 @@ test "shared coordinator rejects wrong source and cancellation does not cross at
     const other = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 2 }, .port = 4_002 } };
     var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 2);
     defer coordinator.deinit();
-    try coordinator.register(remote, try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{}), 0);
-    try coordinator.register(other, try .init(.{0x42} ** 32, .{0x22} ** 16, .{0xa2} ** 16, .{}), 0);
-    const first_probe = wire.encode(.{0x41} ** 32, .{ .kind = .probe, .attempt_id = .{0x11} ** 16, .nonce = .{0xb1} ** 16 });
+    try coordinator.register(remote, try .init(@splat(0x41), @splat(0x11), @splat(0xa1), .{}), 0);
+    try coordinator.register(other, try .init(@splat(0x42), @splat(0x22), @splat(0xa2), .{}), 0);
+    const first_probe = wire.encode(@splat(0x41), .{ .kind = .probe, .attempt_id = @splat(0x11), .nonce = @splat(0xb1) });
     try std.testing.expectEqual(Event.idle, coordinator.receive(other, 1, &first_probe));
-    try std.testing.expect(coordinator.remove(.{0x11} ** 16));
-    const second_probe = wire.encode(.{0x42} ** 32, .{ .kind = .probe, .attempt_id = .{0x22} ** 16, .nonce = .{0xb2} ** 16 });
+    try std.testing.expect(coordinator.remove(@splat(0x11)));
+    const second_probe = wire.encode(@splat(0x42), .{ .kind = .probe, .attempt_id = @splat(0x22), .nonce = @splat(0xb2) });
     try std.testing.expect(coordinator.receive(other, 1, &second_probe) != .idle);
 }
 
@@ -289,7 +289,7 @@ test "shared coordinator exposes absolute probe deadlines" {
     const remote = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 4_001 } };
     var coordinator = try SharedPunchCoordinator.init(std.testing.allocator, 1);
     defer coordinator.deinit();
-    try coordinator.register(remote, try .init(.{0x41} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{
+    try coordinator.register(remote, try .init(@splat(0x41), @splat(0x11), @splat(0xa1), .{
         .initial_retry_ms = 100,
         .maximum_retry_ms = 200,
         .max_attempts = 2,

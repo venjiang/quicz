@@ -59,13 +59,13 @@ pub fn isGreaseFrameType(frame_type: u64) bool {
 pub fn isIgnorableHeaderPrefixFrame(frame_type: u64) bool {
     if (isGreaseFrameType(frame_type)) return true;
     return switch (frame_type) {
-        @intFromEnum(FrameType.data),
-        @intFromEnum(FrameType.headers),
-        @intFromEnum(FrameType.cancel_push),
-        @intFromEnum(FrameType.settings),
-        @intFromEnum(FrameType.push_promise),
-        @intFromEnum(FrameType.goaway),
-        @intFromEnum(FrameType.max_push_id),
+        @backingInt(FrameType.data),
+        @backingInt(FrameType.headers),
+        @backingInt(FrameType.cancel_push),
+        @backingInt(FrameType.settings),
+        @backingInt(FrameType.push_promise),
+        @backingInt(FrameType.goaway),
+        @backingInt(FrameType.max_push_id),
         => false,
         else => true,
     };
@@ -153,7 +153,7 @@ test "HTTP/3 DATA frame encode/decode roundtrip" {
     var buf: [256]u8 = undefined;
     var out = buffer.fixedWriter(&buf);
     const payload = "hello http3";
-    try encodeFrame(out.writer(), .{ .frame_type = @intFromEnum(FrameType.data), .payload = payload });
+    try encodeFrame(out.writer(), .{ .frame_type = @backingInt(FrameType.data), .payload = payload });
 
     const written = out.getWritten();
     const result = try decodeFrame(written);
@@ -166,7 +166,7 @@ test "HTTP/3 HEADERS frame encode/decode roundtrip" {
     var buf: [256]u8 = undefined;
     var out = buffer.fixedWriter(&buf);
     const payload = "qpack-encoded-headers";
-    try encodeFrame(out.writer(), .{ .frame_type = @intFromEnum(FrameType.headers), .payload = payload });
+    try encodeFrame(out.writer(), .{ .frame_type = @backingInt(FrameType.headers), .payload = payload });
 
     const written = out.getWritten();
     const result = try decodeFrame(written);
@@ -180,11 +180,11 @@ test "HTTP/3 SETTINGS frame encode/decode roundtrip" {
     // SETTINGS payload: max_field_section_size=8192
     var settings_payload: [16]u8 = undefined;
     var sout = buffer.fixedWriter(&settings_payload);
-    try encodeVarInt(sout.writer(), @intFromEnum(SettingId.max_field_section_size));
+    try encodeVarInt(sout.writer(), @backingInt(SettingId.max_field_section_size));
     try encodeVarInt(sout.writer(), 8192);
     const sp = sout.getWritten();
 
-    try encodeFrame(out.writer(), .{ .frame_type = @intFromEnum(FrameType.settings), .payload = sp });
+    try encodeFrame(out.writer(), .{ .frame_type = @backingInt(FrameType.settings), .payload = sp });
 
     const written = out.getWritten();
     const result = try decodeFrame(written);
@@ -216,8 +216,8 @@ test "HTTP/3 oversized frame payload is rejected" {
 }
 
 test "HTTP/3 stream type values" {
-    try std.testing.expectEqual(@as(u64, 0x00), @intFromEnum(StreamType.control));
-    try std.testing.expectEqual(@as(u64, 0x01), @intFromEnum(StreamType.push));
-    try std.testing.expectEqual(@as(u64, 0x02), @intFromEnum(StreamType.qpack_encoder));
-    try std.testing.expectEqual(@as(u64, 0x03), @intFromEnum(StreamType.qpack_decoder));
+    try std.testing.expectEqual(@as(u64, 0x00), @backingInt(StreamType.control));
+    try std.testing.expectEqual(@as(u64, 0x01), @backingInt(StreamType.push));
+    try std.testing.expectEqual(@as(u64, 0x02), @backingInt(StreamType.qpack_encoder));
+    try std.testing.expectEqual(@as(u64, 0x03), @backingInt(StreamType.qpack_decoder));
 }

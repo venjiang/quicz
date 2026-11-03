@@ -15,7 +15,7 @@ set -eux
 # PIC/TLS is handled at final link via lld -no-pie below.)
 zig build-lib --dep quicz -Mroot=src/quic/fuzz_c_abi.zig -Mquicz=src/lib.zig \
     -femit-bin="$OUT/quicz_fuzz_drive.o" \
-    -OReleaseSafe \
+    -Osafe \
     -lc \
     --name quicz_fuzz_drive
 

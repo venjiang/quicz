@@ -47,7 +47,7 @@ It does not refer to an application domain.
   by flow control, reset, STOP_SENDING, and the stream state machine.
 - Transport parameters: QUIC handshake configuration such as stream limits,
   ACK delay, max UDP payload size, preferred_address, and version information.
-- TLS backend: the adapter around the external TLS library. The backend owns the
+- TLS backend: the boundary around the pure Zig implementation or an external TLS library. The backend owns the
   TLS transcript, traffic secrets, and QUIC TLS callbacks. quicz packetizes
   CRYPTO bytes, installs packet protection keys, and drives transport state.
 - Traffic secrets: TLS-produced inputs for Handshake and 1-RTT packet protection
@@ -162,9 +162,8 @@ keys came from a mock backend or a C TLS backend.
 
 ### TLS Integration Boundary
 
-The TLS boundary supports two paths: (1) the pure Zig TLS 1.3 implementation in `src/tls/tls13.zig` (9524 lines, 222 tests) with ECDSA P-256, X25519, AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, ALPN, SNI, and certificate chain verification — no C dependencies; (2) the legacy C-ABI `TlsBackend`/`CryptoBackend` adapter for OpenSSL interop testing. The build uses Zig 0.16's recommended
-`addTranslateC` + `@import("c")` path, rather than handwritten C ABI
-`extern fn` or `extern struct` declarations.
+The TLS boundary supports two paths: (1) the pure Zig TLS 1.3 implementation in `src/tls/tls13.zig` (9524 lines, 222 tests) with ECDSA P-256, X25519, AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, ALPN, SNI, and certificate chain verification — no C dependencies; (2) the legacy C-ABI `TlsBackend`/`CryptoBackend` adapter for OpenSSL interop testing. On Zig 0.17, the build uses the official `translate-c` package to translate C headers.
+The examples import the translated module with `@import("c")`.
 
 The TLS backend is responsible for:
 
@@ -172,7 +171,7 @@ The TLS backend is responsible for:
 - consuming TLS handshake bytes from QUIC CRYPTO frames;
 - producing the next TLS CRYPTO bytes;
 - exposing peer transport parameters and traffic secrets through callbacks;
-- notifying quicz when TLS considers the handshake confirmed.
+- reporting TLS handshake progress and server-side confirmation.
 
 quicz is responsible for:
 
@@ -222,6 +221,39 @@ behavior runs end to end.
 6. quicz applies peer transport parameters, installs packet protection keys, and
    discards old packet number spaces when the boundary is reached.
 
+TLS completion does not confirm a QUIC client handshake.
+The server confirms its handshake when TLS completes.
+The client confirms its handshake only after it receives `HANDSHAKE_DONE`.
+The server queues this frame without discarding pending Handshake CRYPTO output.
+Recovery retransmits `HANDSHAKE_DONE` after loss or PTO until an ACK covers an in-flight or retained lost copy.
+The connection retains the packet numbers of the 32 most recently declared-lost copies, without retaining their packet buffers.
+A matching ACK cancels pending copies and prevents later loss of another copy from queuing the frame again.
+
+The client transport retains up to 32 protected packets while their receive keys are unavailable.
+Each entry owns a copy of the protected packet. Packet length cannot exceed the configured `max_datagram_size`.
+The default limit permits 43200 packet bytes. The transport discards new arrivals when the queue is full.
+
+After TLS installs keys, the transport processes queued Handshake packets before queued 1-RTT packets.
+The owned TLS backend supplies client 1-RTT keys only after it validates the server Finished.
+The queue does not acknowledge packets or advance packet numbers before decryption.
+
+A valid Retry clears the old queue. Accepted Version Negotiation abandons the old attempt and its retained packets.
+Ignored Version Negotiation on an active connection leaves the queue unchanged.
+The negotiated-version history of a fresh attempt does not invalidate its new packets.
+Transport close, idle expiry, and deinitialization release retained copies.
+Endpoint deadline, reset, close, and VN paths discard packets after shutdown or supersession, including error returns.
+Owners that drive a borrowed Connection directly use `discardObsoletePackets()` for this cleanup.
+
+Authenticated frame errors and certificate failures keep their existing error paths.
+See `src/quic/tls13_client_reordering_tests.zig` for the ordering, ownership, and cleanup regressions.
+This follows the encryption-level buffering model in [RFC 9001, Section 4.1.4](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.4).
+
+The client runtime also drains Initial and Handshake output before polling application output.
+It can therefore acknowledge processed packets while TLS still waits for later handshake bytes.
+Initial keys use the original or Retry DCID, independently of the packet header's current peer CID.
+The route-bound poll mirrors recovery state and uses the same obsolete-packet cleanup.
+The wire regression in `src/runtime/client.zig` decrypts both ACK spaces before TLS completes.
+
 ### 1-RTT Stream Path
 
 1. The application or example opens a stream and writes data.
@@ -239,6 +271,16 @@ behavior runs end to end.
 3. The endpoint suppresses routes that must not send again and removes routing
    state for the closed connection.
 4. Recovery and timers stop producing send-side effects for cleaned-up routes.
+
+For `runtime.Client`, `close()` queues an application close without waiting.
+The caller can use `waitClosed(timeout_ms)` to retain the socket until the protocol closing or draining period ends.
+Timeout or cancellation ends only that wait. The driver remains active.
+Completion does not prove that the peer received a close packet.
+The driver answers peer packets during closing, with exponential response suppression.
+It sends no response during draining or after closure.
+`deinit()` still cancels tasks and releases resources immediately.
+Call `close()` and then `waitClosed()` before `deinit()` when the closing period must finish.
+The mobile C ABI does not change.
 
 ## Extension Entry Points
 

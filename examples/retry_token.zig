@@ -23,8 +23,8 @@ pub fn main() !void {
     defer server_lifecycle.deinit();
     const connection_handle: u64 = 1;
 
-    const token_secret: quicz.address_validation_token.Secret = [_]u8{0x42} ** quicz.address_validation_token.secret_len;
-    const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x19} ** quicz.address_validation_token.nonce_len;
+    const token_secret: quicz.address_validation_token.Secret = @as([quicz.address_validation_token.secret_len]u8, @splat(0x42));
+    const token_nonce: quicz.address_validation_token.Nonce = @as([quicz.address_validation_token.nonce_len]u8, @splat(0x19));
     const client_path = clientPath(50_000);
     const changed_client_path = clientPath(50_001);
     var token_policy = quicz.endpoint.AddressValidationPolicy.init(allocator, token_secret, .{
@@ -60,7 +60,7 @@ pub fn main() !void {
         .dcid = &client_initial_scid,
         .scid = &retry_scid,
         .token = "token",
-        .integrity_tag = [_]u8{0} ** quicz.protection.aead_tag_len,
+        .integrity_tag = @as([quicz.protection.aead_tag_len]u8, @splat(0)),
     };
     const v2_retry_datagram = try quicz.protection.encodeRetryPacketWithIntegrity(
         allocator,

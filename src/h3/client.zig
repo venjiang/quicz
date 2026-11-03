@@ -241,14 +241,14 @@ pub const H3Client = struct {
         while (pos < data.len) {
             const frame = try h3_frame.decodeFrame(data[pos..]);
             switch (frame.frame.frame_type) {
-                @intFromEnum(h3_frame.FrameType.settings) => {
+                @backingInt(h3_frame.FrameType.settings) => {
                     const settings = try h3_connection.Settings.decodePayload(frame.frame.payload);
                     self.settings_received = true;
                     if (settings.qpack_max_table_capacity != 0) {
                         try self.setPeerMaxTableCapacity(settings.qpack_max_table_capacity);
                     }
                 },
-                @intFromEnum(h3_frame.FrameType.goaway) => {
+                @backingInt(h3_frame.FrameType.goaway) => {
                     const last_stream_id = try h3_connection.H3Connection.decodeGoawayPayload(frame.frame.payload);
                     try self.processGoaway(last_stream_id);
                 },
@@ -570,7 +570,7 @@ pub const H3Client = struct {
                     else => return e,
                 };
             }
-            if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+            if (frame.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
                 return error.ExpectedHeadersFrame;
             }
             if (frame.frame.payload.len > self.local_max_field_section_size) {
@@ -672,7 +672,7 @@ pub const H3Client = struct {
     /// encoder-stream progress).
     pub fn feedResponseBytes(self: *H3Client, stream_id: u64, data: []const u8) !?h3_request.DecodedResponse {
         const frame = try h3_frame.decodeFrame(data);
-        if (frame.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+        if (frame.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
             return error.ExpectedHeadersFrame;
         }
         try self.checkFieldSectionSize(data);
@@ -1082,7 +1082,7 @@ test "H3Client streams a request body via sendRequestStreamed" {
         fn send(ctx: *anyopaque, sid: u64, data: []const u8, fin: bool) !void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (sid == 3) return; // client encoder/decoder streams (3, 7)
-            if (data.len > 0 and data[0] == @intFromEnum(h3_frame.FrameType.data)) {
+            if (data.len > 0 and data[0] == @backingInt(h3_frame.FrameType.data)) {
                 if (self.block_data) {
                     self.block_data = false;
                     return error.FlowControlBlocked;
@@ -1147,7 +1147,7 @@ test "H3Client sendRequestStreamed retries a flow-control-blocked chunk" {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             _ = fin;
             if (sid == 3) return;
-            if (data.len > 0 and data[0] == @intFromEnum(h3_frame.FrameType.data)) {
+            if (data.len > 0 and data[0] == @backingInt(h3_frame.FrameType.data)) {
                 if (self.block_data) {
                     self.block_data = false;
                     return error.FlowControlBlocked;

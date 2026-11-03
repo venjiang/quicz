@@ -30,7 +30,7 @@ pub const VersionCompatibility = struct {
 };
 
 fn isZeroVersion(version: packet.Version) bool {
-    return @intFromEnum(version) == 0;
+    return @backingInt(version) == 0;
 }
 
 /// Return whether `negotiated_version` can use `original_version`'s first flight.
@@ -44,12 +44,12 @@ pub fn canConvertFirstFlightVersion(
     compatibilities: []const VersionCompatibility,
 ) bool {
     if (!isNegotiableVersion(original_version) or !isNegotiableVersion(negotiated_version)) return false;
-    if (@intFromEnum(original_version) == @intFromEnum(negotiated_version)) return true;
+    if (@backingInt(original_version) == @backingInt(negotiated_version)) return true;
     for (compatibilities) |compatibility| {
         if (!isNegotiableVersion(compatibility.original_version) or
             !isNegotiableVersion(compatibility.negotiated_version)) continue;
-        if (@intFromEnum(compatibility.original_version) == @intFromEnum(original_version) and
-            @intFromEnum(compatibility.negotiated_version) == @intFromEnum(negotiated_version))
+        if (@backingInt(compatibility.original_version) == @backingInt(original_version) and
+            @backingInt(compatibility.negotiated_version) == @backingInt(negotiated_version))
         {
             return true;
         }
@@ -88,8 +88,8 @@ pub fn selectCompatibleVersion(
 }
 
 test "canConvertFirstFlightVersion rejects zero and reserved versions" {
-    const zero: packet.Version = @enumFromInt(0);
-    const reserved: packet.Version = @enumFromInt(0x0a0a0a0a);
+    const zero: packet.Version = @fromBackingInt(@intCast(0));
+    const reserved: packet.Version = @fromBackingInt(@intCast(0x0a0a0a0a));
 
     try std.testing.expect(!canConvertFirstFlightVersion(zero, zero, &[_]VersionCompatibility{}));
     try std.testing.expect(!canConvertFirstFlightVersion(reserved, reserved, &[_]VersionCompatibility{}));

@@ -18,6 +18,7 @@ const buffer = @import("buffer.zig");
 const clock = @import("../time/clock.zig");
 const duration_mod = @import("../time/duration.zig");
 const lib = @import("../lib.zig");
+const tls13_test_support = @import("tls13_test_support.zig");
 
 // Aliases for names used by tests.
 const Connection = conn_mod.Connection;
@@ -362,7 +363,7 @@ test "init validates initial stream count limits" {
 }
 
 test "PreferredAddress owns fixed connection ID storage" {
-    const reset_token = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid = [_]u8{ 0xc1, 0xc2, 0xc3 };
     const preferred = try PreferredAddress.init(
         .{ 192, 0, 2, 10 },
@@ -377,7 +378,7 @@ test "PreferredAddress owns fixed connection ID storage" {
     try std.testing.expectError(error.InvalidPacket, PreferredAddress.init(
         .{ 192, 0, 2, 10 },
         4433,
-        .{0} ** 16,
+        @splat(0),
         4434,
         &[_]u8{},
         reset_token,
@@ -419,7 +420,7 @@ test "localTransportParameters exposes configured receive limits" {
 }
 
 test "selectCompatibleVersion requires explicit directional first-flight compatibility" {
-    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const reserved_version: packet.Version = @fromBackingInt(@intCast(0x1a2a3a4a));
     const client_versions = [_]packet.Version{ .v1, .v2 };
     const preferred_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
     const client_version_information = transport_parameters.VersionInformation{
@@ -540,7 +541,7 @@ test "compatible version transport parameter bytes OrClose reports version negot
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -550,11 +551,11 @@ test "compatible version transport parameter bytes OrClose reports version negot
 test "version_information transport parameter validation follows endpoint role" {
     const v2_first = [_]packet.Version{ .v2, .v1 };
     const v1_only = [_]packet.Version{.v1};
-    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const reserved_version: packet.Version = @fromBackingInt(@intCast(0x1a2a3a4a));
     const v1_with_reserved = [_]packet.Version{ .v1, reserved_version };
 
     try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
-        .chosen_version = @enumFromInt(0),
+        .chosen_version = @fromBackingInt(@intCast(0)),
         .available_versions = &v1_only,
     }));
     try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
@@ -757,7 +758,7 @@ test "localTransportParameters advertises server stateless reset token only" {
 }
 
 test "localTransportParameters advertises server preferred address only" {
-    const reset_token = [_]u8{0x44} ** packet.stateless_reset_token_len;
+    const reset_token = @as([packet.stateless_reset_token_len]u8, @splat(0x44));
     const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const preferred = try PreferredAddress.init(
         .{ 203, 0, 113, 7 },
@@ -884,7 +885,7 @@ test "applyPeerTransportParameterBytesOrClose queues close for malformed extensi
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -920,7 +921,7 @@ test "applyPeerTransportParameterBytesOrClose queues close for invalid peer para
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -963,7 +964,7 @@ test "applyPeerTransportParameterBytesOrClose queues close for version negotiati
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -1175,7 +1176,7 @@ test "applyPeerTransportParameters rejects invalid peer values without mutation"
     defer conn.deinit();
 
     const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-    const preferred = try PreferredAddress.init(.{ 203, 0, 113, 9 }, 4433, .{0} ** 16, 4434, &[_]u8{0xc1}, token);
+    const preferred = try PreferredAddress.init(.{ 203, 0, 113, 9 }, 4433, @splat(0), 4434, &[_]u8{0xc1}, token);
     try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
         .stateless_reset_token = token,
         .initial_max_data = 1,
@@ -1201,7 +1202,7 @@ test "applyPeerTransportParameters validates retry_source_connection_id" {
         .dcid = &client_scid,
         .scid = &retry_scid,
         .token = "retry-token-for-client-address",
-        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
     };
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
@@ -1328,8 +1329,8 @@ test "issueRetryDatagram rejects invalid Retry issuance without mutation" {
 }
 
 test "address-bound Retry token validation consumes token and validates address" {
-    const secret: address_validation_token.Secret = [_]u8{0x42} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x19} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x42));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x19));
     const peer_address = "203.0.113.7:4433";
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -1372,8 +1373,8 @@ test "address-bound Retry token validation consumes token and validates address"
 }
 
 test "address-bound Retry token rejects wrong address or expiration without consuming" {
-    const secret: address_validation_token.Secret = [_]u8{0x21} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x84} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x21));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x84));
     const peer_address = "198.51.100.3:4433";
 
     var server = try Connection.init(std.testing.allocator, .server, .{});
@@ -1422,8 +1423,8 @@ test "address-bound Retry token rejects wrong address or expiration without cons
 }
 
 test "address-bound NEW_TOKEN validates peer address without one-time Retry state" {
-    const secret: address_validation_token.Secret = [_]u8{0xa5} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xa5));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x5a));
     const peer_address = "192.0.2.9:4433";
 
     var issuer = try Connection.init(std.testing.allocator, .server, .{});
@@ -1460,8 +1461,8 @@ test "address-bound NEW_TOKEN validates peer address without one-time Retry stat
 }
 
 test "EndpointConnectionLifecycle validates path token and arms unblocked server" {
-    const secret: address_validation_token.Secret = [_]u8{0xc5} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0xd6} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xc5));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0xd6));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 9 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 7 }, 50_000),
@@ -1552,7 +1553,7 @@ test "EndpointConnectionLifecycle validates path token and arms unblocked server
 }
 
 test "EndpointConnectionLifecycle refreshes recovery timer when address token validation rejects closed connection" {
-    const secret: address_validation_token.Secret = [_]u8{0xb4} ** address_validation_token.secret_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xb4));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 49 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 47 }, 50_000),
@@ -1576,7 +1577,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when address token va
     try lifecycle.armRecoveryTimerFromConnection(702, &server);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try server.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadline());
 
     try std.testing.expectError(
@@ -1599,8 +1600,8 @@ test "EndpointConnectionLifecycle refreshes recovery timer when address token va
 }
 
 test "EndpointConnectionLifecycle validates Retry token and consumes pending state" {
-    const secret: address_validation_token.Secret = [_]u8{0xe1} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x9b} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xe1));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x9b));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 19 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 17 }, 50_000),
@@ -1713,7 +1714,7 @@ test "EndpointConnectionLifecycle validates Retry token and consumes pending sta
 }
 
 test "EndpointConnectionLifecycle refreshes recovery timer when Retry token validation rejects closed connection" {
-    const secret: address_validation_token.Secret = [_]u8{0xc7} ** address_validation_token.secret_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xc7));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 59 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 57 }, 50_000),
@@ -1737,7 +1738,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when Retry token vali
     try lifecycle.armRecoveryTimerFromConnection(703, &server);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try server.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadline());
 
     try std.testing.expectError(
@@ -1759,8 +1760,8 @@ test "EndpointConnectionLifecycle refreshes recovery timer when Retry token vali
 }
 
 test "EndpointConnectionLifecycle accepts Retry follow-up Initial through lifecycle helper" {
-    const secret: address_validation_token.Secret = [_]u8{0xf1} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x2c} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xf1));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x2c));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 29 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 27 }, 50_000),
@@ -1870,8 +1871,8 @@ test "EndpointConnectionLifecycle accepts Retry follow-up Initial through lifecy
 }
 
 test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
-    const secret: address_validation_token.Secret = [_]u8{0xb5} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x7a} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xb5));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x7a));
     const peer_address = "192.0.2.29:4433";
 
     var issuer = try Connection.init(std.testing.allocator, .server, .{});
@@ -1902,11 +1903,11 @@ test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
 }
 
 test "address-bound NEW_TOKEN validates with rotated secrets" {
-    const previous_secret: address_validation_token.Secret = [_]u8{0xa5} ** address_validation_token.secret_len;
-    const current_secret: address_validation_token.Secret = [_]u8{0x5c} ** address_validation_token.secret_len;
+    const previous_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xa5));
+    const current_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x5c));
     const secrets = [_]address_validation_token.Secret{ current_secret, previous_secret };
     const current_only = [_]address_validation_token.Secret{current_secret};
-    const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x5a));
     const peer_address = "192.0.2.19:4433";
 
     var issuer = try Connection.init(std.testing.allocator, .server, .{});
@@ -2349,7 +2350,7 @@ test "processDatagramOrClose queues protocol violation close for conflicting CRY
     switch (conn.pending_close orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("crypto data", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -2379,7 +2380,7 @@ test "processDatagramOrClose queues protocol violation close for conflicting pen
     switch (conn.pending_close orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("crypto data", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -2913,7 +2914,7 @@ test "driveCryptoBackendInSpace rejects closing connection before backend callba
 
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
 
     var backend = TrackingBackend{};
     var scratch: [64]u8 = undefined;
@@ -3032,8 +3033,8 @@ test "driveCryptoBackendAcrossSpaces pulls Initial and Handshake output in one c
         .initial_outbound = "server hello",
         .handshake_outbound = "encrypted extensions",
         .secrets = .{
-            .local = [_]u8{0x11} ** protection.traffic_secret_len,
-            .peer = [_]u8{0x22} ** protection.traffic_secret_len,
+            .local = @as([protection.traffic_secret_len]u8, @splat(0x11)),
+            .peer = @as([protection.traffic_secret_len]u8, @splat(0x22)),
         },
     };
     defer backend.deinit();
@@ -3619,7 +3620,7 @@ test "driveCryptoBackendInSpaceWithCompatibleVersionOrClose queues version negot
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -3727,7 +3728,7 @@ test "driveCryptoBackendInSpaceOrClose queues close for invalid peer transport p
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -3783,7 +3784,7 @@ test "driveCryptoBackendInSpaceOrClose queues crypto close for backend receive e
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.cryptoErrorCode(80), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("crypto error", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -3863,7 +3864,7 @@ test "driveCryptoBackendInSpaceOrClose emits protected Handshake CONNECTION_CLOS
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -4154,7 +4155,7 @@ test "sendCrypto rolls back partial fragmentation when later offsets cannot fit"
     var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
     defer conn.deinit();
 
-    const data = [_]u8{'x'} ** 65;
+    const data = @as([65]u8, @splat('x'));
     try std.testing.expectError(error.BufferTooSmall, conn.sendCrypto(&data));
     try std.testing.expectEqual(@as(u64, 0), conn.crypto_send_offset);
     try std.testing.expectEqual(@as(usize, 0), conn.crypto_send_queue.items.len);
@@ -4353,7 +4354,7 @@ test "pollTx re-fragments queued stream data after the peer packet budget shrink
     try std.testing.expect(client.pendingAckLargest(.application) != null);
 
     const stream_id = try client.openStream();
-    const payload = [_]u8{'p'} ** 4096;
+    const payload = @as([4096]u8, @splat('p'));
     try client.sendOnStream(stream_id, &payload, true);
     try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
     client.peer_max_udp_payload_size = 1200;
@@ -4831,7 +4832,7 @@ test "loss detection timer is disarmed in closing and draining states" {
 
     _ = try closing.recordPacketSentInSpace(.application, 10 * ms, 100);
     try std.testing.expect(closing.lossDetectionTimerDeadline() != null);
-    try closing.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try closing.closeConnection(0, @backingInt(frame.FrameType.stream), "done");
 
     try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), closing.lossDetectionTimerDeadline());
@@ -5224,7 +5225,7 @@ test "EndpointLossDetectionTimers disarms closing connections" {
     try timers.armFromConnection(77, &conn);
     try std.testing.expectEqual(@as(usize, 1), timers.count());
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.stream), "done");
     try timers.armFromConnection(77, &conn);
 
     try std.testing.expectEqual(@as(usize, 0), timers.count());
@@ -11448,7 +11449,7 @@ test "EndpointConnectionLifecycle selects deadline across caller-owned connectio
         .initial_rtt_ns = 100000000,
     });
     defer closing_conn.deinit();
-    try closing_conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try closing_conn.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var close_payload_buf: [64]u8 = undefined;
     _ = (try closing_conn.pollTx(20 * ms, &close_payload_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = closing_conn.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -13001,7 +13002,7 @@ test "EndpointConnectionLifecycle feed pending-work step retires due close" {
     try lifecycle.registerConnectionId(100, &dcid, path, .{ .sequence_number = 0 });
     _ = try conn.recordPacketSentInSpace(.application, 10 * ms, 100);
     try lifecycle.armRecoveryTimerFromConnection(100, &conn);
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try conn.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = conn.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -13182,7 +13183,7 @@ test "EndpointConnectionLifecycle feed pending-work poll step retires due close 
     try lifecycle.registerConnectionId(105, &local_dcid, path, .{ .sequence_number = 0 });
     _ = try conn.recordPacketSentInSpace(.application, 10 * ms, 100);
     try lifecycle.armRecoveryTimerFromConnection(105, &conn);
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try conn.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = conn.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -13308,7 +13309,7 @@ test "EndpointConnectionLifecycle feed pending-work drain step retires due close
     try lifecycle.registerConnectionId(102, &local_dcid, path, .{ .sequence_number = 0 });
     _ = try conn.recordPacketSentInSpace(.application, 10 * ms, 100);
     try lifecycle.armRecoveryTimerFromConnection(102, &conn);
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try conn.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = conn.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -13595,7 +13596,7 @@ test "EndpointConnectionLifecycle single feed pending-work explicit drain stops 
     try lifecycle.registerConnectionId(109, &local_dcid, path, .{ .sequence_number = 0 });
     _ = try conn.recordPacketSentInSpace(.application, 10 * ms, 100);
     try lifecycle.armRecoveryTimerFromConnection(109, &conn);
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try conn.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = conn.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -14677,7 +14678,7 @@ test "EndpointConnectionLifecycle feed pending-work close backend deadline step 
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -15221,7 +15222,7 @@ test "EndpointConnectionLifecycle feed pending-work close backend poll queues cl
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -29911,7 +29912,7 @@ test "EndpointConnectionLifecycle retires route and timer after close timeout cl
     try lifecycle.registerConnectionId(56, &closing_cid, path, .{ .sequence_number = 0 });
     _ = try closing.recordPacketSentInSpace(.application, 10 * ms, 100);
     try lifecycle.armRecoveryTimerFromConnection(56, &closing);
-    try closing.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    try closing.closeConnection(0, @backingInt(frame.FrameType.ping), "done");
     var out_buf: [64]u8 = undefined;
     _ = (try closing.pollTx(11 * ms, &out_buf)) orelse return error.TestUnexpectedResult;
     const closing_deadline = closing.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -30096,7 +30097,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when Version Negotiat
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
 
     try std.testing.expectError(error.ConnectionClosed, lifecycle.processVersionNegotiationDatagram(
@@ -30149,7 +30150,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when Version Negotiat
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
 
     try std.testing.expectError(error.ConnectionClosed, lifecycle.processVersionNegotiationFollowupDatagram(
@@ -31353,7 +31354,7 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose polls Initial
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -31709,7 +31710,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when accepted Initial
     try lifecycle.armRecoveryTimerFromConnection(203, &server);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try server.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadline());
 
     try std.testing.expectError(error.ConnectionClosed, lifecycle.processAcceptedProtectedInitialDatagram(
@@ -32275,7 +32276,7 @@ test "EndpointConnectionLifecycle path-update feed poll surfaces close only afte
     try std.testing.expect(queued_ping.len != 0);
 
     const invalid_packet_number = server.nextPeerPacketNumber(.application);
-    const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+    const illegal_plaintext = [_]u8{@backingInt(frame.FrameType.handshake_done)} ++ (@as([31]u8, @splat(0)));
     const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &server_dcid,
         .spin_bit = false,
@@ -32385,8 +32386,8 @@ test "EndpointConnectionLifecycle commits preferred address migration" {
 test "EndpointConnectionLifecycle registers replacement connection IDs" {
     const cid0 = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
     const cid1 = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
-    const token0 = [_]u8{0x42} ** packet.stateless_reset_token_len;
-    const token1 = [_]u8{0x24} ** packet.stateless_reset_token_len;
+    const token0 = @as([packet.stateless_reset_token_len]u8, @splat(0x42));
+    const token1 = @as([packet.stateless_reset_token_len]u8, @splat(0x24));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
@@ -32429,9 +32430,9 @@ test "EndpointConnectionLifecycle rolls back issued connection ID route failures
     const occupied_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
     const rollback_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
     const committed_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x02 };
-    const occupied_token = [_]u8{0x42} ** packet.stateless_reset_token_len;
-    const rollback_token = [_]u8{0x24} ** packet.stateless_reset_token_len;
-    const committed_token = [_]u8{0x18} ** packet.stateless_reset_token_len;
+    const occupied_token = @as([packet.stateless_reset_token_len]u8, @splat(0x42));
+    const rollback_token = @as([packet.stateless_reset_token_len]u8, @splat(0x24));
+    const committed_token = @as([packet.stateless_reset_token_len]u8, @splat(0x18));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
@@ -32468,7 +32469,7 @@ test "EndpointConnectionLifecycle rolls back issued connection ID route failures
 
 test "EndpointConnectionLifecycle refreshes recovery timer when issuing connection ID rejects closed connection" {
     const cid = [_]u8{ 0xc0, 0xff, 0xee, 0x03 };
-    const token = [_]u8{0x33} ** packet.stateless_reset_token_len;
+    const token = @as([packet.stateless_reset_token_len]u8, @splat(0x33));
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
@@ -32486,7 +32487,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when issuing connecti
     try lifecycle.armRecoveryTimerFromConnection(51, &conn);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadline());
 
     try std.testing.expectError(
@@ -32776,7 +32777,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when protected long r
     defer std.testing.allocator.free(initial);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -32825,7 +32826,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when protected long i
     defer std.testing.allocator.free(initial);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -32875,7 +32876,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when protected long c
     defer std.testing.allocator.free(initial);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -32926,7 +32927,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when protected long p
     defer std.testing.allocator.free(initial);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -33200,7 +33201,7 @@ test "EndpointConnectionLifecycle long OrClose poll returns close output after f
 
     var plaintext: [1200]u8 = undefined;
     @memset(&plaintext, 0);
-    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+    plaintext[0] = @backingInt(frame.FrameType.handshake_done);
 
     const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -33276,7 +33277,7 @@ test "EndpointConnectionLifecycle long backend OrClose poll returns close output
 
     var plaintext: [1200]u8 = undefined;
     @memset(&plaintext, 0);
-    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+    plaintext[0] = @backingInt(frame.FrameType.handshake_done);
 
     const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -33375,7 +33376,7 @@ test "EndpointConnectionLifecycle long OrClose drain returns close output after 
 
     var plaintext: [1200]u8 = undefined;
     @memset(&plaintext, 0);
-    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+    plaintext[0] = @backingInt(frame.FrameType.handshake_done);
 
     const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -33737,7 +33738,7 @@ test "EndpointConnectionLifecycle routed long backend OrClose drains close outpu
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -35547,7 +35548,7 @@ test "EndpointConnectionLifecycle routed protected OrClose queues close after au
     {
         var plaintext: [1200]u8 = undefined;
         @memset(&plaintext, 0);
-        plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+        plaintext[0] = @backingInt(frame.FrameType.handshake_done);
         const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
             .version = .v1,
             .dcid = &original_dcid,
@@ -35592,7 +35593,7 @@ test "EndpointConnectionLifecycle routed protected OrClose queues close after au
         switch (client.peerClose() orelse return error.TestUnexpectedResult) {
             .connection => |close| {
                 try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-                try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+                try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.handshake_done)), close.frame_type);
                 try std.testing.expectEqualStrings("packet type", close.reason_phrase);
             },
             else => return error.TestUnexpectedResult,
@@ -41112,7 +41113,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key Ha
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -41439,7 +41440,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key Ha
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -41836,7 +41837,7 @@ test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -41966,7 +41967,7 @@ test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -42426,8 +42427,8 @@ test "EndpointConnectionLifecycle drives crypto backend across ordered spaces in
         .initial_outbound = "server hello",
         .handshake_outbound = "encrypted extensions",
         .secrets = .{
-            .local = [_]u8{0x33} ** protection.traffic_secret_len,
-            .peer = [_]u8{0x44} ** protection.traffic_secret_len,
+            .local = @as([protection.traffic_secret_len]u8, @splat(0x33)),
+            .peer = @as([protection.traffic_secret_len]u8, @splat(0x44)),
         },
     };
     defer backend.deinit();
@@ -42551,8 +42552,8 @@ test "EndpointConnectionLifecycle drives backends across ordered spaces for mult
         .initial_outbound = "server hello",
         .handshake_outbound = "encrypted extensions",
         .secrets = .{
-            .local = [_]u8{0x51} ** protection.traffic_secret_len,
-            .peer = [_]u8{0x52} ** protection.traffic_secret_len,
+            .local = @as([protection.traffic_secret_len]u8, @splat(0x51)),
+            .peer = @as([protection.traffic_secret_len]u8, @splat(0x52)),
         },
     };
     defer first_backend.deinit();
@@ -42560,8 +42561,8 @@ test "EndpointConnectionLifecycle drives backends across ordered spaces for mult
         .initial_outbound = "server hi",
         .handshake_outbound = "cert",
         .secrets = .{
-            .local = [_]u8{0x61} ** protection.traffic_secret_len,
-            .peer = [_]u8{0x62} ** protection.traffic_secret_len,
+            .local = @as([protection.traffic_secret_len]u8, @splat(0x61)),
+            .peer = @as([protection.traffic_secret_len]u8, @splat(0x62)),
         },
     };
     defer second_backend.deinit();
@@ -42630,7 +42631,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer after strict backend 
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
     try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadline());
 
     var backend = TrackingBackend{};
@@ -42689,7 +42690,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer after compatible back
     try lifecycle.armRecoveryTimerFromConnection(53, &conn);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadline());
 
     var backend = TrackingBackend{};
@@ -43646,7 +43647,7 @@ test "EndpointConnectionLifecycle caller-keyed long backend OrClose drains close
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -44013,7 +44014,7 @@ test "EndpointConnectionLifecycle routed caller-keyed long backend OrClose polls
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -44262,7 +44263,7 @@ test "EndpointConnectionLifecycle processes long datagram through backend OrClos
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -45053,7 +45054,7 @@ test "EndpointConnectionLifecycle installed-key Handshake backend OrClose drains
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -45151,7 +45152,7 @@ test "EndpointConnectionLifecycle drives close-propagating crypto backend and re
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -45882,7 +45883,7 @@ test "EndpointConnectionLifecycle drives compatible-version close path and refre
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -46034,7 +46035,7 @@ test "EndpointConnectionLifecycle drives compatible-version close-propagating cr
     switch (second.pending_close orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -46179,7 +46180,7 @@ test "EndpointConnectionLifecycle drives compatible-version cross-space close sw
     switch (second.pending_close orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -46254,7 +46255,7 @@ test "EndpointConnectionLifecycle refreshes installed-key Handshake OrClose erro
 
     var invalid_payload: [1200]u8 = undefined;
     @memset(&invalid_payload, 0);
-    invalid_payload[0] = @intFromEnum(frame.FrameType.handshake_done);
+    invalid_payload[0] = @backingInt(frame.FrameType.handshake_done);
     const invalid_handshake = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
         .dcid = &server_scid,
@@ -46294,7 +46295,7 @@ test "EndpointConnectionLifecycle refreshes installed-key Handshake OrClose erro
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.handshake_done)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -46766,7 +46767,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key ze
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -46818,7 +46819,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key ze
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -46867,7 +46868,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed zer
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -46916,7 +46917,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed zer
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -46966,7 +46967,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when explicit key pha
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47017,7 +47018,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-owned key
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47066,7 +47067,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when explicit key upd
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47121,7 +47122,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-owned key
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47283,7 +47284,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed sho
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47331,7 +47332,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed sho
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47495,7 +47496,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key sh
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -47545,7 +47546,7 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key sh
     defer std.testing.allocator.free(first);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.crypto), "done");
     var close_buf: [64]u8 = undefined;
     _ = (try client.pollTx(11 * ms, &close_buf)) orelse return error.TestUnexpectedResult;
     const close_deadline = client.closeDeadline() orelse return error.TestUnexpectedResult;
@@ -48055,7 +48056,7 @@ test "processDatagram rejects invalid payload in packet-threshold losses when la
         .ack_delay = 0,
         .first_ack_range = 0,
     } });
-    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+    try payload.writer().writeByte(@backingInt(frame.FrameType.handshake_done));
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(70 * ms, payload.getWritten()));
 }
@@ -48075,7 +48076,7 @@ test "processDatagram rejects invalid payload in time-threshold losses when late
         .ack_delay = 0,
         .first_ack_range = 0,
     } });
-    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+    try payload.writer().writeByte(@backingInt(frame.FrameType.handshake_done));
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(900 * ms, payload.getWritten()));
 }
@@ -48108,7 +48109,7 @@ test "processDatagram rejects invalid payload in persistent congestion when late
         .ack_delay = 0,
         .first_ack_range = 0,
     } });
-    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+    try payload.writer().writeByte(@backingInt(frame.FrameType.handshake_done));
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1300 * ms, payload.getWritten()));
 }
@@ -48488,7 +48489,7 @@ test "invalid payload rejects invalid payload in connection-level PTO backoff re
         .ack_delay = 0,
         .first_ack_range = 0,
     } });
-    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+    try payload.writer().writeByte(@backingInt(frame.FrameType.handshake_done));
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.handshake, 70, payload.getWritten()));
 }
@@ -48600,7 +48601,7 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try std.testing.expectError(error.InvalidPacket, conn.recordPacketSentInSpace(.initial, 700 * ms, 100));
     try std.testing.expectError(error.InvalidPacket, conn.sendCryptoInSpace(.initial, "x"));
     try std.testing.expectError(error.InvalidPacket, conn.queueAckForReceivedPacketInSpace(.initial));
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.initial, 700, &ping));
     try std.testing.expectError(error.InvalidPacket, conn.discardPacketNumberSpace(.application));
 }
@@ -48632,12 +48633,12 @@ test "server Handshake receive discards Initial space after valid payload" {
     var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try server.processDatagramInSpace(.initial, 0, &ping);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
 
     const invalid_handshake = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
+        @backingInt(frame.FrameType.ping),
         0xff,
     };
     try std.testing.expectError(error.InvalidPacket, server.processDatagramInSpace(.handshake, 1, &invalid_handshake));
@@ -48679,7 +48680,7 @@ test "protected Handshake packet commits discard Initial at the RFC 9001 boundar
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try server.processDatagramInSpace(.initial, 0, &ping);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
     try server.processProtectedLongDatagramInSpace(.handshake, 11, secrets.client, protected);
@@ -49209,7 +49210,7 @@ test "processRetryDatagram stores token and Initial packetization reuses it" {
         .dcid = &client_scid,
         .scid = &retry_scid,
         .token = retry_token,
-        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
     };
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
@@ -49252,7 +49253,7 @@ test "processRetryDatagram rejects invalid or duplicate Retry without mutation" 
         .dcid = &client_scid,
         .scid = &retry_scid,
         .token = retry_token,
-        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
     };
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
@@ -49284,7 +49285,7 @@ test "processRetryDatagram rejects invalid or duplicate Retry without mutation" 
 test "processVersionNegotiationDatagram selects mutual version once" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
-    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const reserved_version: packet.Version = @fromBackingInt(@intCast(0x1a2a3a4a));
     const client_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
     const server_versions = [_]packet.Version{ reserved_version, .v2 };
     var raw: [64]u8 = undefined;
@@ -49411,7 +49412,7 @@ test "processVersionNegotiationDatagram ignores packets after Retry" {
         .dcid = &client_scid,
         .scid = &retry_scid,
         .token = retry_token,
-        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        .integrity_tag = @as([protection.aead_tag_len]u8, @splat(0)),
     };
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
@@ -49575,7 +49576,7 @@ test "processVersionNegotiationDatagram ignores packets after non-Initial peer p
         .versions = &server_versions,
     });
     const version_negotiation = out.getWritten();
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
 
     inline for (.{ PacketNumberSpace.handshake, PacketNumberSpace.application }) |space| {
         var client = try Connection.init(std.testing.allocator, .client, .{
@@ -49602,7 +49603,7 @@ test "processVersionNegotiationDatagram ignores packets after non-Initial peer p
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
-    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const reserved_version: packet.Version = @fromBackingInt(@intCast(0x1a2a3a4a));
     const client_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
     const server_versions = [_]packet.Version{reserved_version};
     var raw: [64]u8 = undefined;
@@ -50802,8 +50803,8 @@ test "client rejects protected zero RTT receive before packet mutation" {
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
     var plaintext: [16]u8 = undefined;
-    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
-    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+    @memset(&plaintext, @backingInt(frame.FrameType.padding));
+    plaintext[0] = @backingInt(frame.FrameType.ping);
 
     const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -50843,8 +50844,8 @@ test "processProtectedZeroRttDatagram rejects oversized UDP datagram before muta
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     var plaintext: [16]u8 = undefined;
-    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
-    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+    @memset(&plaintext, @backingInt(frame.FrameType.padding));
+    plaintext[0] = @backingInt(frame.FrameType.ping);
 
     const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -50910,10 +50911,10 @@ test "processProtectedShortDatagram routes protected 1-RTT payload" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
 
     const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
@@ -50937,8 +50938,8 @@ test "processProtectedShortDatagram rejects oversized UDP datagram before mutati
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     var plaintext: [16]u8 = undefined;
-    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
-    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+    @memset(&plaintext, @backingInt(frame.FrameType.padding));
+    plaintext[0] = @backingInt(frame.FrameType.ping);
 
     const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &server_dcid,
@@ -51005,7 +51006,7 @@ test "protected long and zero RTT datagrams discard while closing or draining" {
     var closing = try Connection.init(std.testing.allocator, .client, .{});
     defer closing.deinit();
 
-    try closing.closeConnection(0, @intFromEnum(frame.FrameType.stream), "closing");
+    try closing.closeConnection(0, @backingInt(frame.FrameType.stream), "closing");
     try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
     try std.testing.expect(closing.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), try closing.processProtectedLongDatagramOrClose(10, .{
@@ -51102,10 +51103,10 @@ test "spin bit disabled and invalid packets do not update modeled state" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
     const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &server_dcid,
@@ -51778,9 +51779,9 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(3));
     const stale_generation_0_keys = secrets.client;
     const stale_ping_plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
     const stale_generation_0_ping = try protection.protectShortPacketAes128(
         std.testing.allocator,
@@ -52095,8 +52096,8 @@ test "EndpointConnectionLifecycle single pending-work selects after key discard"
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x8a} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x8b} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x8a));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x8b));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52141,8 +52142,8 @@ test "EndpointConnectionLifecycle single pending-work poll reports key discard w
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x8c} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x8d} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x8c));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x8d));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52186,8 +52187,8 @@ test "EndpointConnectionLifecycle single explicit pending-work poll reports key 
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x98} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x99} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x98));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x99));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52231,8 +52232,8 @@ test "EndpointConnectionLifecycle single pending-work drain reports key discard 
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x8e} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x8f} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x8e));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x8f));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52279,8 +52280,8 @@ test "EndpointConnectionLifecycle single explicit pending-work drain reports key
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x9a} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x9b} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x9a));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x9b));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52327,8 +52328,8 @@ test "EndpointConnectionLifecycle cross pending-work poll reports key discard wi
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x90} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x91} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x90));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x91));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52382,8 +52383,8 @@ test "EndpointConnectionLifecycle cross pending-work drain reports key discard w
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x92} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x93} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x92));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x93));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52440,8 +52441,8 @@ test "EndpointConnectionLifecycle cross explicit pending-work poll reports key d
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x94} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x95} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x94));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x95));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52497,8 +52498,8 @@ test "EndpointConnectionLifecycle cross explicit pending-work drain reports key 
 
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
-    const local_secret = [_]u8{0x96} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x97} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x96));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x97));
     try conn.confirmHandshake();
     try conn.installOneRttTrafficSecrets(.{
         .local = local_secret,
@@ -52559,8 +52560,8 @@ test "EndpointConnectionLifecycle cross due-deadline poll reports key discard wi
     defer fast.deinit();
     var slow = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer slow.deinit();
-    const local_secret = [_]u8{0x9c} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x9d} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x9c));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x9d));
     try fast.confirmHandshake();
     try slow.confirmHandshake();
     try fast.installOneRttTrafficSecrets(.{
@@ -52631,8 +52632,8 @@ test "EndpointConnectionLifecycle cross due-deadline drain reports key discard w
     defer fast.deinit();
     var slow = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer slow.deinit();
-    const local_secret = [_]u8{0x9e} ** protection.traffic_secret_len;
-    const peer_secret = [_]u8{0x9f} ** protection.traffic_secret_len;
+    const local_secret = @as([protection.traffic_secret_len]u8, @splat(0x9e));
+    const peer_secret = @as([protection.traffic_secret_len]u8, @splat(0x9f));
     try fast.confirmHandshake();
     try slow.confirmHandshake();
     try fast.installOneRttTrafficSecrets(.{
@@ -52733,10 +52734,10 @@ test "processProtectedShortDatagram accepts forward gaps and rejects tampered pa
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
 
     var server = try Connection.init(std.testing.allocator, .server, .{});
@@ -52777,10 +52778,10 @@ test "processProtectedShortDatagram acknowledges reordered packets with ACK rang
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
 
     var server = try Connection.init(std.testing.allocator, .server, .{});
@@ -53923,7 +53924,7 @@ test "pollProtectedShortDatagram emits protected CONNECTION_CLOSE and retransmit
     defer server.deinit();
     try server.validatePeerAddress();
 
-    try client.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try client.closeConnection(0, @backingInt(frame.FrameType.stream), "done");
     try std.testing.expect(!client.closed);
     try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
     try std.testing.expectEqual(@as(?i64, null), client.closeDeadline());
@@ -53994,7 +53995,7 @@ test "pollProtectedShortDatagram preserves close frame when anti-amplification b
     var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
-    try server.closeConnection(0, @intFromEnum(frame.FrameType.stream), "blocked close");
+    try server.closeConnection(0, @backingInt(frame.FrameType.stream), "blocked close");
     try std.testing.expectEqual(
         @as(?[]u8, null),
         try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
@@ -54016,7 +54017,7 @@ test "pollProtectedLongDatagram emits protected Initial CONNECTION_CLOSE with ca
     var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ns = 100 });
     defer server.deinit();
 
-    try client.closeConnection(transport_error.codeValue(.no_error), @intFromEnum(frame.FrameType.crypto), "initial close");
+    try client.closeConnection(transport_error.codeValue(.no_error), @backingInt(frame.FrameType.crypto), "initial close");
     const close_packet = (try client.pollProtectedLongDatagram(
         10,
         &original_dcid,
@@ -54040,7 +54041,7 @@ test "pollProtectedLongDatagram emits protected Initial CONNECTION_CLOSE with ca
     switch (server.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.no_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("initial close", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -54059,7 +54060,7 @@ test "pollProtectedLongDatagram emits protected Handshake CONNECTION_CLOSE with 
     var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer client.deinit();
 
-    try server.closeConnection(transport_error.codeValue(.internal_error), @intFromEnum(frame.FrameType.crypto), "handshake close");
+    try server.closeConnection(transport_error.codeValue(.internal_error), @backingInt(frame.FrameType.crypto), "handshake close");
     const close_packet = (try server.pollProtectedLongDatagram(
         10,
         &client_scid,
@@ -54082,7 +54083,7 @@ test "pollProtectedLongDatagram emits protected Handshake CONNECTION_CLOSE with 
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.internal_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("handshake close", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -54117,7 +54118,7 @@ test "processProtectedLongDatagramOrClose queues protected Initial protocol viol
 
     var plaintext: [1200]u8 = undefined;
     @memset(&plaintext, 0);
-    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+    plaintext[0] = @backingInt(frame.FrameType.handshake_done);
 
     const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
         .version = .v1,
@@ -54159,7 +54160,7 @@ test "processProtectedLongDatagramOrClose queues protected Initial protocol viol
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.handshake_done)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
@@ -54347,7 +54348,7 @@ test "packet number spaces reject frames forbidden by RFC 9000 packet type rules
     try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
 
-    const handshake_done = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    const handshake_done = [_]u8{@backingInt(frame.FrameType.handshake_done)};
     try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.handshake, 1, &handshake_done));
     try std.testing.expect(!conn.handshakeConfirmed());
     try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.handshake));
@@ -54384,7 +54385,7 @@ test "handshakeState tracks Handshake space use and confirmation" {
 
     var receiver = try Connection.init(std.testing.allocator, .client, .{});
     defer receiver.deinit();
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try receiver.processDatagramInSpace(.handshake, 0, &ping);
     try std.testing.expectEqual(HandshakeState.handshake, receiver.handshakeState());
     try std.testing.expect(!receiver.handshakeConfirmed());
@@ -54393,7 +54394,7 @@ test "handshakeState tracks Handshake space use and confirmation" {
     var rollback = try Connection.init(std.testing.allocator, .client, .{});
     defer rollback.deinit();
     const invalid_payload = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
+        @backingInt(frame.FrameType.ping),
         0xff,
     };
     try std.testing.expectError(error.InvalidPacket, rollback.processDatagramInSpace(.handshake, 0, &invalid_payload));
@@ -54421,7 +54422,7 @@ test "0-RTT packet type shares Application packet number space but filters frame
     try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(usize, 1), server.recv_streams.items.len);
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try server.processDatagramForPacketType(.one_rtt, 1, &ping);
     try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
@@ -54499,7 +54500,7 @@ test "processDatagramForPacketTypeOrClose queues protocol violation close" {
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.ack)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.ack)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -54543,7 +54544,7 @@ test "processDatagramForPacketTypeOrClose queues protocol violation close for AC
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.ack_ecn)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.ack_ecn)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -54676,7 +54677,7 @@ test "packet number spaces isolate receive-side ACK generation" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try conn.processDatagramInSpace(.initial, 0, &ping);
     try conn.processDatagramInSpace(.handshake, 1, &ping);
 
@@ -54963,7 +54964,7 @@ test "processDatagram rejects invalid payload in ECN validation state when later
             .ecn_ce_count = 1,
         },
     } });
-    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+    try payload.writer().writeByte(@backingInt(frame.FrameType.handshake_done));
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(60 * ms, payload.getWritten()));
 }
@@ -55316,7 +55317,7 @@ test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer a
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token2 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid0 = [_]u8{ 0, 1, 2, 3 };
     const cid1 = [_]u8{ 4, 5, 6, 7 };
     const cid2 = [_]u8{ 8, 9, 10, 11 };
@@ -55336,7 +55337,7 @@ test "issueConnectionId rejects sequence numbers outside QUIC varint bounds befo
     conn.next_local_connection_id_sequence = max_quic_varint + 1;
 
     const cid = [_]u8{ 0xc1, 0xd0, 0x00, 0x01 };
-    const token = [_]u8{0x5a} ** packet.stateless_reset_token_len;
+    const token = @as([packet.stateless_reset_token_len]u8, @splat(0x5a));
 
     try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid, token, 0));
     try std.testing.expectEqual(@as(u64, max_quic_varint + 1), conn.next_local_connection_id_sequence);
@@ -55351,7 +55352,7 @@ test "issueConnectionId allows replacement when retire_prior_to frees peer activ
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token2 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid0 = [_]u8{ 0xa0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xa0, 0, 0, 1 };
     const cid2 = [_]u8{ 0xa0, 0, 0, 2 };
@@ -55396,7 +55397,7 @@ test "zero-length local initial source CID rejects NEW and RETIRE connection-id 
     defer issue_conn.deinit();
     try issue_conn.setLocalInitialSourceConnectionId(&.{});
 
-    const issue_token = [_]u8{0x5a} ** packet.stateless_reset_token_len;
+    const issue_token = @as([packet.stateless_reset_token_len]u8, @splat(0x5a));
     const issue_cid = [_]u8{ 0xc3, 0, 0, 0 };
     try std.testing.expectError(error.InvalidPacket, issue_conn.issueConnectionId(&issue_cid, issue_token, 0));
     try std.testing.expectEqual(@as(u64, 0), issue_conn.localConnectionIdCount());
@@ -55546,7 +55547,7 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token2 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid0 = [_]u8{ 0xc0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xc0, 0, 0, 1 };
     const cid2 = [_]u8{ 0xc0, 0, 0, 2 };
@@ -55720,7 +55721,7 @@ test "NEW_CONNECTION_ID rejects retire_prior_to greater than sequence number bef
     _ = (try conn.pollTx(0 * ms, &tx)).?;
 
     out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.new_connection_id));
+    try out.writer().writeByte(@backingInt(frame.FrameType.new_connection_id));
     try packet.encodeVarInt(out.writer(), 1);
     try packet.encodeVarInt(out.writer(), 2);
     try out.writer().writeByte(@as(u8, @intCast(cid1.len)));
@@ -55742,7 +55743,7 @@ test "NEW_CONNECTION_ID retires newly received ids below largest retire_prior_to
 
     const token1 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token2 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token3 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token3 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid1 = [_]u8{ 0xce, 0, 0, 1 };
     const cid2 = [_]u8{ 0xce, 0, 0, 2 };
     const cid3 = [_]u8{ 0xce, 0, 0, 3 };
@@ -55798,7 +55799,7 @@ test "NEW_CONNECTION_ID below largest retire_prior_to rejects invalid payload in
 
     const token1 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token2 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token3 = [_]u8{0xa6} ** packet.stateless_reset_token_len;
+    const token3 = @as([packet.stateless_reset_token_len]u8, @splat(0xa6));
     const cid1 = [_]u8{ 0xcd, 0, 0, 1 };
     const cid2 = [_]u8{ 0xcd, 0, 0, 2 };
     const cid3 = [_]u8{ 0xcd, 0, 0, 3 };
@@ -56004,7 +56005,7 @@ test "processStatelessResetDatagram ignores retired tokens and stops pending clo
     try std.testing.expectEqual(@as(?u64, null), conn.processStatelessResetDatagram(10, reset_out.getWritten()));
     try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "closing");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.stream), "closing");
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
     try std.testing.expect(conn.pending_close != null);
 
@@ -57497,7 +57498,7 @@ test "client accepts HANDSHAKE_DONE and queues ACK" {
     try conn.sendCryptoInSpace(.handshake, "late handshake");
     try std.testing.expect(conn.hasHandshakeProtectionKeys());
 
-    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    const payload = [_]u8{@backingInt(frame.FrameType.handshake_done)};
     try conn.processDatagram(0 * ms, &payload);
 
     try std.testing.expect(conn.handshakeConfirmed());
@@ -57533,7 +57534,7 @@ test "HANDSHAKE_DONE state rejects invalid payload in when payload is invalid" {
     });
 
     const payload = [_]u8{
-        @intFromEnum(frame.FrameType.handshake_done),
+        @backingInt(frame.FrameType.handshake_done),
         0xff,
     };
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0 * ms, &payload));
@@ -57543,7 +57544,7 @@ test "server rejects HANDSHAKE_DONE from peer" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
-    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    const payload = [_]u8{@backingInt(frame.FrameType.handshake_done)};
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0 * ms, &payload));
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
@@ -57603,7 +57604,7 @@ test "client rejects empty NEW_TOKEN without storing token" {
     defer conn.deinit();
 
     const empty_new_token = [_]u8{
-        @intFromEnum(frame.FrameType.new_token),
+        @backingInt(frame.FrameType.new_token),
         0x00, // empty token length
     };
 
@@ -57658,7 +57659,7 @@ test "connection close frame closes public connection API" {
     var close_out = buffer.fixedWriter(&close_buf);
     try frame.encodeFrame(close_out.writer(), .{ .connection_close = .{
         .error_code = 0,
-        .frame_type = @intFromEnum(frame.FrameType.stream),
+        .frame_type = @backingInt(frame.FrameType.stream),
         .reason_phrase = "done",
     } });
 
@@ -57679,7 +57680,7 @@ test "connection close frame closes public connection API" {
     var recv_buf: [8]u8 = undefined;
     try std.testing.expectError(error.ConnectionClosed, conn.recvOnStream(0, &recv_buf));
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     const next_peer_packet_number = conn.nextPeerPacketNumber(.application);
     try conn.processDatagram(0 * ms, &ping);
     try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
@@ -57735,7 +57736,7 @@ test "processDatagramOrClose queues frame encoding close for invalid ACK range" 
     try conn.validatePeerAddress();
 
     const invalid_ack = [_]u8{
-        @intFromEnum(frame.FrameType.ack),
+        @backingInt(frame.FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x00, // no additional ACK ranges
@@ -57770,7 +57771,7 @@ test "processDatagramOrClose queues frame encoding close for invalid ACK_ECN ran
     try conn.validatePeerAddress();
 
     const invalid_ack_ecn = [_]u8{
-        @intFromEnum(frame.FrameType.ack_ecn),
+        @backingInt(frame.FrameType.ack_ecn),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x00, // no additional ACK ranges
@@ -57806,7 +57807,7 @@ test "processDatagramOrClose queues frame encoding close for MAX_STREAMS overflo
 
     var datagram: [32]u8 = undefined;
     var out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_bidi));
+    try out.writer().writeByte(@backingInt(frame.FrameType.max_streams_bidi));
     try packet.encodeVarInt(out.writer(), max_stream_count + 1);
     const frame_type_value = rawFrameTypeValue(out.getWritten());
 
@@ -57839,7 +57840,7 @@ test "processDatagramOrClose queues frame encoding close for STREAMS_BLOCKED ove
 
         var datagram: [32]u8 = undefined;
         var out = buffer.fixedWriter(&datagram);
-        try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_bidi));
+        try out.writer().writeByte(@backingInt(frame.FrameType.streams_blocked_bidi));
         try packet.encodeVarInt(out.writer(), max_stream_count + 1);
         const frame_type_value = rawFrameTypeValue(out.getWritten());
 
@@ -57872,7 +57873,7 @@ test "processDatagramOrClose queues frame encoding close for STREAMS_BLOCKED ove
 
         var datagram: [32]u8 = undefined;
         var out = buffer.fixedWriter(&datagram);
-        try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_uni));
+        try out.writer().writeByte(@backingInt(frame.FrameType.streams_blocked_uni));
         try packet.encodeVarInt(out.writer(), max_stream_count + 1);
         const frame_type_value = rawFrameTypeValue(out.getWritten());
 
@@ -57904,7 +57905,7 @@ test "processDatagramInSpaceOrClose queues protocol violation close" {
     defer conn.deinit();
     try conn.validatePeerAddress();
 
-    const handshake_done = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    const handshake_done = [_]u8{@backingInt(frame.FrameType.handshake_done)};
     try std.testing.expectError(
         error.InvalidPacket,
         conn.processDatagramInSpaceOrClose(.initial, 0, &handshake_done),
@@ -57922,7 +57923,7 @@ test "processDatagramInSpaceOrClose queues protocol violation close" {
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.handshake_done)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -58252,7 +58253,7 @@ test "processDatagramOrClose queues frame encoding close for empty NEW_TOKEN" {
     try conn.validatePeerAddress();
 
     const empty_new_token = [_]u8{
-        @intFromEnum(frame.FrameType.new_token),
+        @backingInt(frame.FrameType.new_token),
         0x00, // empty token length
     };
     const frame_type_value = rawFrameTypeValue(&empty_new_token);
@@ -58284,7 +58285,7 @@ test "processDatagramOrClose queues protocol violation close for server HANDSHAK
     defer conn.deinit();
     try conn.validatePeerAddress();
 
-    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    const payload = [_]u8{@backingInt(frame.FrameType.handshake_done)};
     try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &payload));
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
     try std.testing.expect(conn.pending_close != null);
@@ -58299,7 +58300,7 @@ test "processDatagramOrClose queues protocol violation close for server HANDSHAK
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.handshake_done)), close.frame_type);
             try std.testing.expectEqualStrings("handshake done", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -58409,7 +58410,7 @@ test "processDatagramOrClose queues connection-id-limit close for NEW_CONNECTION
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token2 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid0 = [_]u8{ 0xc0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xc0, 0, 0, 1 };
     const cid2 = [_]u8{ 0xc0, 0, 0, 2 };
@@ -58472,7 +58473,7 @@ test "processDatagramOrClose accepts NEW_CONNECTION_ID replacement under active 
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const token2 = @as([packet.stateless_reset_token_len]u8, @splat(0xa5));
     const cid0 = [_]u8{ 0xd0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xd0, 0, 0, 1 };
     const cid2 = [_]u8{ 0xd0, 0, 0, 2 };
@@ -58672,7 +58673,7 @@ test "processDatagramOrClose queues frame-encoding close for NEW_CONNECTION_ID r
     try conn.processDatagram(0 * ms, out.getWritten());
 
     out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.new_connection_id));
+    try out.writer().writeByte(@backingInt(frame.FrameType.new_connection_id));
     try packet.encodeVarInt(out.writer(), 1);
     try packet.encodeVarInt(out.writer(), 2);
     try out.writer().writeByte(@as(u8, @intCast(cid1.len)));
@@ -58708,14 +58709,14 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.stream), "done");
     try std.testing.expect(conn.peerClose() == null);
     try std.testing.expect(!conn.closed);
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadline());
     try std.testing.expectError(error.ConnectionClosed, conn.sendPing());
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try conn.processDatagram(0 * ms, &ping);
     try std.testing.expect(!conn.closed);
     try std.testing.expect(conn.pending_close != null);
@@ -58731,7 +58732,7 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
     switch (decoded.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(@as(u64, 0), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.stream)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.stream)), close.frame_type);
             try std.testing.expectEqualStrings("done", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -58747,7 +58748,7 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
     switch (retransmitted.frame) {
         .connection_close => |close| {
             try std.testing.expectEqual(@as(u64, 0), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.stream)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.stream)), close.frame_type);
             try std.testing.expectEqualStrings("done", close.reason_phrase);
         },
         else => return error.InvalidPacket,
@@ -58794,7 +58795,7 @@ test "local closing state expires after close timeout" {
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ns = 100 });
     defer conn.deinit();
 
-    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "bye");
+    try conn.closeConnection(0, @backingInt(frame.FrameType.ping), "bye");
 
     var out_buf: [64]u8 = undefined;
     _ = (try conn.pollTx(10 * ms, &out_buf)).?;
@@ -58854,7 +58855,7 @@ test "remote close exposes peer close diagnostics" {
     var close_out = buffer.fixedWriter(&close_buf);
     try frame.encodeFrame(close_out.writer(), .{ .connection_close = .{
         .error_code = 0x10c,
-        .frame_type = @intFromEnum(frame.FrameType.stream),
+        .frame_type = @backingInt(frame.FrameType.stream),
         .reason_phrase = "flow error",
     } });
 
@@ -58862,14 +58863,14 @@ test "remote close exposes peer close diagnostics" {
     switch (transport.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
             try std.testing.expectEqual(@as(u64, 0x10c), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.stream)), close.frame_type);
+            try std.testing.expectEqual(@as(u64, @backingInt(frame.FrameType.stream)), close.frame_type);
             try std.testing.expectEqualStrings("flow error", close.reason_phrase);
         },
         else => return error.TestUnexpectedResult,
     }
 
     const deadline = transport.closeDeadline().?;
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(frame.FrameType.ping)};
     try std.testing.expectError(error.ConnectionClosed, transport.processDatagram(deadline, &ping));
     try std.testing.expectEqual(ConnectionState.closed, transport.connectionState());
     switch (transport.peerClose() orelse return error.TestUnexpectedResult) {
@@ -58902,7 +58903,7 @@ test "local close validates size before mutating connection state" {
 
     try std.testing.expectError(
         error.BufferTooSmall,
-        conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "too-long"),
+        conn.closeConnection(0, @backingInt(frame.FrameType.stream), "too-long"),
     );
     try std.testing.expect(!conn.closed);
     try std.testing.expect(conn.pending_close == null);
@@ -60200,7 +60201,7 @@ test "MAX_STREAMS and STREAMS_BLOCKED reject values above stream count limit" {
 
     var datagram: [32]u8 = undefined;
     var out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_bidi));
+    try out.writer().writeByte(@backingInt(frame.FrameType.max_streams_bidi));
     try packet.encodeVarInt(out.writer(), max_stream_count + 1);
 
     try std.testing.expectError(error.InvalidPacket, bidi.processDatagram(0 * ms, out.getWritten()));
@@ -60214,7 +60215,7 @@ test "MAX_STREAMS and STREAMS_BLOCKED reject values above stream count limit" {
     defer uni.deinit();
 
     out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_uni));
+    try out.writer().writeByte(@backingInt(frame.FrameType.max_streams_uni));
     try packet.encodeVarInt(out.writer(), max_stream_count + 1);
 
     try std.testing.expectError(error.InvalidPacket, uni.processDatagram(0 * ms, out.getWritten()));
@@ -60226,7 +60227,7 @@ test "MAX_STREAMS and STREAMS_BLOCKED reject values above stream count limit" {
     defer blocked_bidi.deinit();
 
     out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_bidi));
+    try out.writer().writeByte(@backingInt(frame.FrameType.streams_blocked_bidi));
     try packet.encodeVarInt(out.writer(), max_stream_count + 1);
 
     try std.testing.expectError(error.InvalidPacket, blocked_bidi.processDatagram(0 * ms, out.getWritten()));
@@ -60238,7 +60239,7 @@ test "MAX_STREAMS and STREAMS_BLOCKED reject values above stream count limit" {
     defer blocked_uni.deinit();
 
     out = buffer.fixedWriter(&datagram);
-    try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_uni));
+    try out.writer().writeByte(@backingInt(frame.FrameType.streams_blocked_uni));
     try packet.encodeVarInt(out.writer(), max_stream_count + 1);
 
     try std.testing.expectError(error.InvalidPacket, blocked_uni.processDatagram(0 * ms, out.getWritten()));
@@ -60440,7 +60441,7 @@ test "processDatagram rejects truncated ACK ranges before allocation" {
     defer conn.deinit();
 
     const wire = [_]u8{
-        @intFromEnum(frame.FrameType.ack),
+        @backingInt(frame.FrameType.ack),
         0x00, // largest acknowledged
         0x00, // ack delay
         0x01, // one additional ACK range
@@ -61487,7 +61488,7 @@ test "Tls13Backend server drives a Connection to install handshake keys" {
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
     // Server key pair for CertificateVerify.
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -61576,7 +61577,7 @@ test "Tls13Backend client Connection withholds unauthenticated server parameters
 
     var server_secret: [32]u8 = undefined;
     tls13.secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
     var server_hello_buf: [128]u8 = undefined;
     const server_hello_len = tls13.buildServerHello(&server_hello_buf, server_public, 0x1301, true, true);
 
@@ -61646,7 +61647,7 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -61769,7 +61770,7 @@ test "Tls13Backend + Connection: PTO probe fires and backoffs on TLS-owned path 
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -61910,7 +61911,7 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62023,7 +62024,7 @@ test "Tls13Backend + Connection: STOP_SENDING signals peer to stop on TLS-owned 
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62103,7 +62104,7 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62162,9 +62163,11 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Server issues a new connection ID.
     const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
-    const srt = [_]u8{0xEE} ** 16;
+    const srt = @as([16]u8, @splat(0xEE));
     _ = try server.issueConnectionId(&new_cid, srt, 0);
     try std.testing.expect(server.pendingNewConnectionIdCount() > 0);
 
@@ -62187,7 +62190,7 @@ test "Tls13Backend + Connection: protected close on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62263,7 +62266,7 @@ test "Tls13Backend + Connection: path validation on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62346,7 +62349,7 @@ test "Tls13Backend + Connection: stateless reset on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62405,9 +62408,11 @@ test "Tls13Backend + Connection: stateless reset on TLS-owned path" {
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Server issues a new connection ID carrying a stateless reset token.
     const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
-    const srt = [_]u8{0xEE} ** 16;
+    const srt = @as([16]u8, @splat(0xEE));
     _ = try server.issueConnectionId(&new_cid, srt, 0);
     const cid_dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(8 * ms, &client_scid)) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(cid_dgram);
@@ -62434,7 +62439,7 @@ test "Tls13Backend + Connection: flow-control window update on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62490,6 +62495,8 @@ test "Tls13Backend + Connection: flow-control window update on TLS-owned path" {
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Client opens a stream and sends data up to the server's flow-control limit.
     const stream_id = try client.openStream();
@@ -62556,7 +62563,7 @@ test "protected short stream packets fragment queued writes against the exact pa
     try client.processProtectedShortDatagramWithInstalledKeys(2 * ms, client_scid.len, ping);
     try std.testing.expect(client.pendingAckLargest(.application) != null);
 
-    const payload = [_]u8{'x'} ** 4096;
+    const payload = @as([4096]u8, @splat('x'));
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, &payload, true);
     try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
@@ -62622,7 +62629,7 @@ test "protected zero-rtt stream packets fragment queued writes against the exact
     try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
     try server.acceptZeroRtt();
 
-    const payload = [_]u8{'z'} ** 4096;
+    const payload = @as([4096]u8, @splat('z'));
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, &payload, true);
     try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
@@ -62671,7 +62678,7 @@ test "Tls13Backend + Connection: ACK clears in-flight and samples RTT on TLS-own
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62754,7 +62761,7 @@ test "Tls13Backend + Connection: stream close releases MAX_STREAMS credit on TLS
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62842,7 +62849,7 @@ test "Tls13Backend + Connection: 1-RTT key update on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -62921,7 +62928,7 @@ test "Tls13Backend + Connection: responding endpoint updates send keys per RFC 9
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x56} ** 32;
+    const seed = @as([32]u8, @splat(0x56));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63014,7 +63021,7 @@ test "Tls13Backend + Connection: NEW_TOKEN over 1-RTT on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63071,6 +63078,8 @@ test "Tls13Backend + Connection: NEW_TOKEN over 1-RTT on TLS-owned path" {
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
 
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
+
     // Server issues a NEW_TOKEN for the client's future address validation.
     const token: []const u8 = "address-validation-token";
     try server.issueNewToken(token);
@@ -63090,7 +63099,7 @@ test "Tls13Backend + Connection: Retry packet exchange on TLS-owned path" {
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const retry_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63148,7 +63157,7 @@ test "Tls13Backend + Connection: Retry then resend ClientHello and complete hand
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const retry_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63270,7 +63279,7 @@ test "Tls13Backend + Connection: HANDSHAKE_DONE over 1-RTT on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63345,7 +63354,7 @@ test "Tls13Backend + Connection: application close on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63420,7 +63429,7 @@ test "Tls13Backend + Connection: DATA_BLOCKED over 1-RTT on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63503,7 +63512,7 @@ test "Tls13Backend + Connection: STREAM_DATA_BLOCKED over 1-RTT on TLS-owned pat
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63586,7 +63595,7 @@ test "Tls13Backend + Connection: STREAMS_BLOCKED over 1-RTT on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63665,7 +63674,7 @@ test "Tls13Backend + Connection: PTO backoff doubles deadline on TLS-owned path"
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63721,6 +63730,8 @@ test "Tls13Backend + Connection: PTO backoff doubles deadline on TLS-owned path"
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Client sends a PING over 1-RTT (in-flight, never ACKed).
     try client.sendPing();
@@ -63745,7 +63756,7 @@ test "Tls13Backend + Connection: initiateOneRttKeyUpdate on TLS-owned path" {
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63801,6 +63812,8 @@ test "Tls13Backend + Connection: initiateOneRttKeyUpdate on TLS-owned path" {
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7 * ms, cf);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    try tls13_test_support.confirmClient(&client, &server, &client_scid, 7 * ms + 1);
 
     // Client initiates a 1-RTT key update via the Connection API: this
     // advances the internal key-phase state (and arms the ack threshold),
@@ -63834,7 +63847,7 @@ test "Tls13Backend + Connection: PSK installs 0-RTT keys via traffic-secret hook
     // NewSessionTicket). Seeding the backend with it arms the 0-RTT path:
     // the ClientHello is built with early-data intent and the key schedule
     // carries a PSK-based early secret.
-    const resumption_psk = [_]u8{0xab} ** tls13.secret_len;
+    const resumption_psk = @as([tls13.secret_len]u8, @splat(0xab));
     var client_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
         .alpn = &alpn,
         .server_name = "example.com",
@@ -63884,9 +63897,9 @@ test "Tls13Backend + Connection: 0-RTT early data round-trip on TLS-owned path" 
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const alpn = [_][]const u8{"hq-interop"};
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -63973,7 +63986,7 @@ test "Tls13Backend + Connection: NewSessionTicket lets client derive resumption 
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -64053,7 +64066,7 @@ test "Tls13Backend + Connection: NewSessionTicket lets client derive resumption 
 test "Tls13Backend + Connection: resumption PSK from handshake drives 0-RTT round-trip" {
     const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const alpn = [_][]const u8{"hq-interop"};
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -64221,9 +64234,9 @@ test "Tls13Backend + Connection: rejectZeroRtt drops early data on TLS-owned pat
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const alpn = [_][]const u8{"hq-interop"};
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -64319,9 +64332,9 @@ test "Tls13Backend + Connection: accept_zero_rtt config auto-accepts early data"
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const alpn = [_][]const u8{"hq-interop"};
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -64411,9 +64424,9 @@ test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const alpn = [_][]const u8{"hq-interop"};
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -64617,9 +64630,9 @@ test "delayed previous-key packet opens without advancing peer key phase" {
     // ordering in unprotect plus the peer_initiated_key_update signal keep the
     // receive path from advancing on this delayed old-key packet.
     const delayed_plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
     const delayed_ping = try protection.protectShortPacketAes128(
         std.testing.allocator,
@@ -64662,7 +64675,7 @@ test "delayed previous-key packet opens without advancing peer key phase" {
     try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
 }
 
-test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
+test "unauthenticated discarded previous-key packet does not close a connection" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -64697,13 +64710,11 @@ test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
     try server.checkPtoTimeouts(10_000 * ms);
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 
-    // A packet protected with the discarded gen-0 key phase is a peer protocol
-    // violation: the receive path queues a KEY_UPDATE_ERROR transport
-    // CONNECTION_CLOSE (RFC 9001 §6.5).
+    // Once its key is gone, this packet cannot authenticate a peer violation.
     const stale_plaintext = [_]u8{
-        @intFromEnum(frame.FrameType.ping),
-        @intFromEnum(frame.FrameType.padding),
-        @intFromEnum(frame.FrameType.padding),
+        @backingInt(frame.FrameType.ping),
+        @backingInt(frame.FrameType.padding),
+        @backingInt(frame.FrameType.padding),
     };
     const stale_ping = try protection.protectShortPacketAes128(
         std.testing.allocator,
@@ -64719,13 +64730,15 @@ test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
     defer std.testing.allocator.free(stale_ping);
     try std.testing.expectError(
         error.InvalidPacket,
-        server.processProtectedShortDatagramWithInstalledKeys(12 * ms, server_dcid.len, stale_ping),
+        server.processProtectedShortDatagramWithInstalledKeys(10_001 * ms, server_dcid.len, stale_ping),
     );
-    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expectEqual(
-        @as(?u64, transport_error.codeValue(.key_update_error)),
-        server.pendingCloseErrorCode(),
-    );
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+    try std.testing.expectEqual(@as(?u64, null), server.pendingCloseErrorCode());
+    try client.sendPing();
+    const current_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(10_002 * ms, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(current_ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(10_003 * ms, server_dcid.len, current_ping);
+    try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
 }
 
 test "sendDatagram and recvDatagram roundtrip through pollTx and frame processing" {
@@ -64798,7 +64811,7 @@ test "connection multipath enable and path management" {
 test "connectionStats reports stream bytes sent and recovery counters" {
     var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    try client.installOneRttTrafficSecrets(.{ .local = [_]u8{0x11} ** 32, .peer = [_]u8{0x22} ** 32 });
+    try client.installOneRttTrafficSecrets(.{ .local = @as([32]u8, @splat(0x11)), .peer = @as([32]u8, @splat(0x22)) });
     try client.confirmHandshake();
     const sid = try client.openStream();
     try client.sendOnStream(sid, "hello", false);

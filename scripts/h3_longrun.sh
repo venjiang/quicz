@@ -1,7 +1,7 @@
 #!/bin/bash
 # Long-run stability check for the production-runtime HTTP/3 loopback.
 #
-# Builds the ReleaseFast example and runs it N times, requiring every run to
+# Builds the fast example and runs it N times, requiring every run to
 # complete all four rounds (GET dynamic QPACK, POST echo, GET /stream) with
 # HTTP 200. Usage: scripts/h3_longrun.sh [runs] [sleep_secs]
 set -euo pipefail
@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 RUNS="${1:-50}"
 SLEEP="${2:-0.4}"
 
-zig build -Doptimize=ReleaseFast
+"${ZIG:-zig}" build -Doptimize=fast
 EXE=zig-out/bin/quicz-h3-runtime-loopback
 
 PASS=0; FAIL=0

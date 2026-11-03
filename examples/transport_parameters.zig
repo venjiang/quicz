@@ -83,6 +83,7 @@ pub fn main() !void {
         .initial_max_streams_bidi = 1,
     });
     defer server.deinit();
+    try server.setLocalInitialSourceConnectionId(&.{ 0x51, 0x52, 0x53, 0x54 });
 
     var client_extension: [512]u8 = undefined;
     const client_bytes = try client.encodeLocalTransportParameters(&client_extension);
@@ -181,7 +182,7 @@ pub fn main() !void {
             close_error_code = close.error_code;
             close_frame_type = close.frame_type;
             try require(close_error_code == quicz.transport_error.codeValue(.transport_parameter_error));
-            try require(close_frame_type == @intFromEnum(quicz.frame.FrameType.crypto));
+            try require(close_frame_type == @backingInt(quicz.frame.FrameType.crypto));
         },
         else => return error.TransportParameterExampleFailed,
     }
@@ -191,7 +192,7 @@ pub fn main() !void {
         .{
             greased_client_bytes.len,
             server_bytes.len,
-            @intFromEnum(compatible_selected),
+            @backingInt(compatible_selected),
             compatible_peer.available_versions.len,
             client.effectiveIdleTimeout().?,
             client.recovery_state.max_datagram_size,

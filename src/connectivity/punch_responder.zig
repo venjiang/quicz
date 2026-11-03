@@ -156,13 +156,13 @@ fn sameAddress(lhs: std.Io.net.IpAddress, rhs: std.Io.net.IpAddress) bool {
 }
 
 test "responder consumes attempt packets and only answers bounded validated peer probes" {
-    const key: wire.Key = .{0x42} ** 32;
+    const key: wire.Key = @splat(0x42);
     const remote = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 4_433 } };
-    const responder = try PunchResponder.init(key, .{0x11} ** 16, .{0xa1} ** 16, remote, 1_000, 100);
+    const responder = try PunchResponder.init(key, @splat(0x11), @splat(0xa1), remote, 1_000, 100);
     const peer_probe = wire.encode(key, .{
         .kind = .probe,
         .attempt_id = responder.attempt_id,
-        .nonce = .{0xb2} ** 16,
+        .nonce = @splat(0xb2),
     });
     const acknowledgement = responder.handle(remote, 2_000, &peer_probe).acknowledgement;
     const decoded = try wire.decode(key, &acknowledgement);
@@ -191,18 +191,18 @@ test "responder consumes attempt packets and only answers bounded validated peer
 }
 
 test "registry keeps concurrent attempts and removes only the selected attempt" {
-    const key_one: wire.Key = .{0x41} ** 32;
-    const key_two: wire.Key = .{0x42} ** 32;
-    const attempt_one: wire.AttemptId = .{0x11} ** 16;
-    const attempt_two: wire.AttemptId = .{0x22} ** 16;
+    const key_one: wire.Key = @splat(0x41);
+    const key_two: wire.Key = @splat(0x42);
+    const attempt_one: wire.AttemptId = @splat(0x11);
+    const attempt_two: wire.AttemptId = @splat(0x22);
     const remote_one = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 4_001 } };
     const remote_two = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 2 }, .port = 4_002 } };
     var registry = try PunchResponderRegistry.init(std.testing.allocator, 2);
     defer registry.deinit();
-    try registry.register(try .init(key_one, attempt_one, .{0xa1} ** 16, remote_one, 1_000, 100));
-    try registry.register(try .init(key_two, attempt_two, .{0xa2} ** 16, remote_two, 1_000, 100));
-    const first = wire.encode(key_one, .{ .kind = .probe, .attempt_id = attempt_one, .nonce = .{0xb1} ** 16 });
-    const second = wire.encode(key_two, .{ .kind = .probe, .attempt_id = attempt_two, .nonce = .{0xb2} ** 16 });
+    try registry.register(try .init(key_one, attempt_one, @splat(0xa1), remote_one, 1_000, 100));
+    try registry.register(try .init(key_two, attempt_two, @splat(0xa2), remote_two, 1_000, 100));
+    const first = wire.encode(key_one, .{ .kind = .probe, .attempt_id = attempt_one, .nonce = @splat(0xb1) });
+    const second = wire.encode(key_two, .{ .kind = .probe, .attempt_id = attempt_two, .nonce = @splat(0xb2) });
     const first_ack = registry.handle(remote_one, 2_000, &first).acknowledgement;
     const second_ack = registry.handle(remote_two, 2_000, &second).acknowledgement;
     try std.testing.expectEqual(attempt_one, (try wire.decode(key_one, &first_ack)).attempt_id);

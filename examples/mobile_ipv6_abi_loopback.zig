@@ -11,8 +11,8 @@ const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromS
 
 fn checkLayout(comptime C: type, comptime Zig: type) void {
     if (@sizeOf(C) != @sizeOf(Zig) or @alignOf(C) != @alignOf(Zig)) @compileError("C and Zig mobile ABI layouts differ");
-    inline for (std.meta.fields(Zig)) |field| {
-        if (@offsetOf(C, field.name) != @offsetOf(Zig, field.name)) @compileError("C and Zig mobile ABI field offsets differ");
+    inline for (@typeInfo(Zig).@"struct".field_names) |name| {
+        if (@offsetOf(C, name) != @offsetOf(Zig, name)) @compileError("C and Zig mobile ABI field offsets differ");
     }
 }
 
@@ -208,18 +208,18 @@ fn checkPunchClose(comptime ipv6: bool, io: std.Io, ca: []const u8) !bool {
         mobile.quicz_mobile_client_close(handle);
         thread.join();
         const elapsed_ms = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
-        const canceled = worker.result == @intFromEnum(mobile.Result.punch_failed) and
-            worker.diagnostics.outcome == @intFromEnum(mobile.PunchOutcome.canceled) and elapsed_ms < 250;
+        const canceled = worker.result == @backingInt(mobile.Result.punch_failed) and
+            worker.diagnostics.outcome == @backingInt(mobile.PunchOutcome.canceled) and elapsed_ms < 250;
         std.debug.print("mobile close: ipv6={} blocked_signal={} elapsed_ms={d} outcome={d}\n", .{ ipv6, blocked_signal, elapsed_ms, worker.diagnostics.outcome });
         passed = passed and canceled;
         if (!canceled) continue;
-        if (mobile.quicz_mobile_client_connect_timeout(handle, 50) != @intFromEnum(mobile.Result.connection_failed)) return error.ClosedClientConnected;
+        if (mobile.quicz_mobile_client_connect_timeout(handle, 50) != @backingInt(mobile.Result.connection_failed)) return error.ClosedClientConnected;
         var stream_id: u64 = 0;
-        if (mobile.quicz_mobile_client_open_bidi(handle, &stream_id) != @intFromEnum(mobile.Result.stream_failed)) return error.ClosedClientOpenedStream;
-        if (mobile.quicz_mobile_client_send(handle, 0, null, 0, 0) != @intFromEnum(mobile.Result.stream_failed)) return error.ClosedClientSent;
+        if (mobile.quicz_mobile_client_open_bidi(handle, &stream_id) != @backingInt(mobile.Result.stream_failed)) return error.ClosedClientOpenedStream;
+        if (mobile.quicz_mobile_client_send(handle, 0, null, 0, 0) != @backingInt(mobile.Result.stream_failed)) return error.ClosedClientSent;
         var response: [1]u8 = undefined;
         var received: usize = 0;
-        if (mobile.quicz_mobile_client_receive(handle, 0, &response, response.len, &received) != @intFromEnum(mobile.Result.stream_failed)) return error.ClosedClientReceived;
+        if (mobile.quicz_mobile_client_receive(handle, 0, &response, response.len, &received) != @backingInt(mobile.Result.stream_failed)) return error.ClosedClientReceived;
         if (bound_address.bind(io, .{ .mode = .dgram, .protocol = .udp })) |unexpected| {
             unexpected.close(io);
             return error.CloseReleasedSocket;
@@ -297,12 +297,12 @@ pub fn main(init: std.process.Init) !void {
     if (mobile.quicz_mobile_client_discover_ipv6(handle, &stun_endpoint, 500, 1, &mapped) != 0) return error.DiscoveryFailed;
     if (!std.mem.eql(u8, &mapped.address, &bound.address) or mapped.port != bound.port or
         mapped.scope_id != 0 or mapped.reserved != 0) return error.MappingMismatch;
-    if (mobile.quicz_mobile_client_discover_ipv6(handle, &stun_endpoint, 500, 1, &mapped) != @intFromEnum(mobile.Result.discovery_failed)) return error.WrongMappingFamilyAccepted;
+    if (mobile.quicz_mobile_client_discover_ipv6(handle, &stun_endpoint, 500, 1, &mapped) != @backingInt(mobile.Result.discovery_failed)) return error.WrongMappingFamilyAccepted;
     try stun.await(io);
 
-    const key: quicz.connectivity.punch_wire.Key = .{0x42} ** 32;
-    const attempt_id: quicz.connectivity.punch_wire.AttemptId = .{0x11} ** 16;
-    const host_nonce: quicz.connectivity.punch_wire.Nonce = .{0xb2} ** 16;
+    const key: quicz.connectivity.punch_wire.Key = @splat(0x42);
+    const attempt_id: quicz.connectivity.punch_wire.AttemptId = @splat(0x11);
+    const host_nonce: quicz.connectivity.punch_wire.Nonce = @splat(0xb2);
     var attempt = try PunchAttempt.init(key, attempt_id, host_nonce, .{});
     const app_address = std.Io.net.IpAddress{ .ip6 = .{ .bytes = bound.address, .port = bound.port } };
     var host_punch = try io.concurrent(runHostPunch, .{ io, host_socket, app_address, &attempt });
@@ -311,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
         .remote = remote,
         .key = key,
         .attempt_id = attempt_id,
-        .nonce = .{0xa1} ** 16,
+        .nonce = @splat(0xa1),
         .initial_retry_ms = 100,
         .maximum_retry_ms = 1_000,
         .max_attempts = 5,
@@ -320,7 +320,7 @@ pub fn main(init: std.process.Init) !void {
     var diagnostics: mobile.PunchDiagnostics = undefined;
     if (mobile.quicz_mobile_client_punch_ipv6_with_diagnostics(handle, &punch, &diagnostics) != 0) return error.PunchFailed;
     try host_punch.await(io);
-    if (diagnostics.outcome != @intFromEnum(mobile.PunchOutcome.validated) or
+    if (diagnostics.outcome != @backingInt(mobile.PunchOutcome.validated) or
         diagnostics.peer_probe == 0 or diagnostics.local_ack == 0) return error.ProofMissing;
     var responder = try quicz.connectivity.punch_responder.PunchResponder.init(key, attempt_id, host_nonce, app_address, @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds), 2_000);
     defer responder.deinit();

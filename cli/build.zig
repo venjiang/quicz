@@ -36,9 +36,7 @@ pub fn build(b: *std.Build) void {
     const run = b.step("run", "Run the quicz CLI");
     const run_cmd = b.addRunArtifact(exe);
     run.dependOn(&run_cmd.step);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const cli_tests = b.addTest(.{
         .name = "quicz-cli-tests",

@@ -176,7 +176,7 @@ pub fn main() !void {
     });
     try require(conn.ecnValidationState(.handshake) == .capable);
 
-    const ping = [_]u8{@intFromEnum(quicz.frame.FrameType.ping)};
+    const ping = [_]u8{@backingInt(quicz.frame.FrameType.ping)};
     try conn.processDatagramInSpace(.handshake, 70, &ping);
     try conn.processDatagramInSpace(.application, 80, &ping);
     try require(conn.pendingAckLargest(.handshake) != null);

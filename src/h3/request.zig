@@ -182,12 +182,12 @@ pub fn encodeRequest(out: []u8, request: Request) !usize {
 
     // Write HEADERS frame
     const fbs_out = out[pos..];
-    pos += try writeFrame(fbs_out, @intFromEnum(h3_frame.FrameType.headers), header_buf[0..header_len]);
+    pos += try writeFrame(fbs_out, @backingInt(h3_frame.FrameType.headers), header_buf[0..header_len]);
 
     // Write DATA frame if body present
     if (request.body) |body| {
         if (body.len > 0) {
-            pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.data), body);
+            pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.data), body);
         }
     }
 
@@ -199,7 +199,7 @@ pub fn encodeRequest(out: []u8, request: Request) !usize {
 pub fn encodeRequestHeaders(out: []u8, request: Request) !usize {
     var header_buf: [4096]u8 = undefined;
     const header_len = try request.encodeHeaders(&header_buf);
-    return writeFrame(out, @intFromEnum(h3_frame.FrameType.headers), header_buf[0..header_len]);
+    return writeFrame(out, @backingInt(h3_frame.FrameType.headers), header_buf[0..header_len]);
 }
 
 /// Encode a complete HTTP/3 response as HEADERS + optional DATA frames.
@@ -209,11 +209,11 @@ pub fn encodeResponse(out: []u8, response: Response) !usize {
     var header_buf: [4096]u8 = undefined;
     const header_len = try response.encodeHeaders(&header_buf);
 
-    pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.headers), header_buf[0..header_len]);
+    pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.headers), header_buf[0..header_len]);
 
     if (response.body) |body| {
         if (body.len > 0) {
-            pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.data), body);
+            pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.data), body);
         }
     }
 
@@ -225,7 +225,7 @@ pub fn encodeResponse(out: []u8, response: Response) !usize {
 pub fn encodeResponseHeaders(out: []u8, response: Response) !usize {
     var header_buf: [4096]u8 = undefined;
     const header_len = try response.encodeHeaders(&header_buf);
-    return writeFrame(out, @intFromEnum(h3_frame.FrameType.headers), header_buf[0..header_len]);
+    return writeFrame(out, @backingInt(h3_frame.FrameType.headers), header_buf[0..header_len]);
 }
 
 /// Encode only the HEADERS frame of a response using QPACK dynamic references.
@@ -252,7 +252,7 @@ pub fn encodeResponseHeadersWithDynamic(
 
     var header_buf: [4096]u8 = undefined;
     const enc = try qpack.encodeHeaderBlockWithDynamicInserting(&header_buf, encoder_stream_out, fields_buf[0..count], dynamic_table);
-    const pos = try writeFrame(out, @intFromEnum(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
+    const pos = try writeFrame(out, @backingInt(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
     return .{
         .len = pos,
         .encoder_stream_len = enc.encoder_stream_len,
@@ -262,7 +262,7 @@ pub fn encodeResponseHeadersWithDynamic(
 
 /// Encode a DATA frame with the given payload.
 pub fn encodeDataFrame(out: []u8, payload: []const u8) !usize {
-    return writeFrame(out, @intFromEnum(h3_frame.FrameType.data), payload);
+    return writeFrame(out, @backingInt(h3_frame.FrameType.data), payload);
 }
 
 /// Parse a single DATA frame from the front of `data`. Returns the payload
@@ -271,7 +271,7 @@ pub fn encodeDataFrame(out: []u8, payload: []const u8) !usize {
 /// frame yields `ExpectedDataFrame`.
 pub fn takeDataFrame(data: []const u8) !struct { payload: []const u8, consumed: usize } {
     const result = try h3_frame.decodeFrame(data);
-    if (result.frame.frame_type != @intFromEnum(h3_frame.FrameType.data)) {
+    if (result.frame.frame_type != @backingInt(h3_frame.FrameType.data)) {
         return error.ExpectedDataFrame;
     }
     return .{ .payload = result.frame.payload, .consumed = result.consumed };
@@ -413,7 +413,7 @@ pub fn decodeRequestWithHeaders(data: []const u8, headers_out: []qpack.HeaderFie
     // Skip GREASE / unknown extension frames that may precede the initial
     // HEADERS frame (RFC 9114 §7.2.8, §9), then require HEADERS.
     var headers_result = try h3_frame.decodeFrame(data[pos..]);
-    while (headers_result.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+    while (headers_result.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
         if (!h3_frame.isIgnorableHeaderPrefixFrame(headers_result.frame.frame_type)) {
             return error.ExpectedHeadersFrame;
         }
@@ -450,7 +450,7 @@ pub fn decodeRequestWithHeaders(data: []const u8, headers_out: []qpack.HeaderFie
     if (pos < data.len) {
         const data_result = h3_frame.decodeFrame(data[pos..]) catch null;
         if (data_result) |dr| {
-            if (dr.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+            if (dr.frame.frame_type == @backingInt(h3_frame.FrameType.data)) {
                 body = dr.frame.payload;
                 pos += dr.consumed;
             }
@@ -493,7 +493,7 @@ fn decodeResponseImpl(
     // Skip GREASE / unknown extension frames that may precede the initial
     // HEADERS frame (RFC 9114 §7.2.8, §9), then require HEADERS.
     var headers_result = try h3_frame.decodeFrame(data[pos..]);
-    while (headers_result.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+    while (headers_result.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
         if (!h3_frame.isIgnorableHeaderPrefixFrame(headers_result.frame.frame_type)) {
             return error.ExpectedHeadersFrame;
         }
@@ -530,7 +530,7 @@ fn decodeResponseImpl(
     if (pos < data.len) {
         const data_result = h3_frame.decodeFrame(data[pos..]) catch null;
         if (data_result) |dr| {
-            if (dr.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+            if (dr.frame.frame_type == @backingInt(h3_frame.FrameType.data)) {
                 body = dr.frame.payload;
                 pos += dr.consumed;
             }
@@ -603,7 +603,7 @@ pub fn encodeRequestHeadersWithDynamic(
 
     var header_buf: [4096]u8 = undefined;
     const enc = try qpack.encodeHeaderBlockWithDynamicInserting(&header_buf, encoder_stream_out, fields_buf[0..count], dynamic_table);
-    const pos = try writeFrame(out, @intFromEnum(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
+    const pos = try writeFrame(out, @backingInt(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
     return .{
         .len = pos,
         .encoder_stream_len = enc.encoder_stream_len,
@@ -671,7 +671,7 @@ test "HTTP/3 request rejects uppercase header name" {
 
     const block_len = 10;
     var buf: [64]u8 = undefined;
-    buf[0] = @intFromEnum(h3_frame.FrameType.headers); // HEADERS
+    buf[0] = @backingInt(h3_frame.FrameType.headers); // HEADERS
     buf[1] = @intCast(block_len); // 1-byte length
     @memcpy(buf[2 .. 2 + block_len], block[0..block_len]);
     try std.testing.expectError(error.UppercaseHeaderName, decodeRequest(buf[0 .. 2 + block_len]));
@@ -769,12 +769,12 @@ pub fn encodeRequestWithDynamic(
     const enc = try qpack.encodeHeaderBlockWithDynamicInserting(&header_buf, encoder_stream_out, fields_buf[0..count], dynamic_table);
 
     // Write HEADERS frame
-    pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
+    pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
 
     // Write DATA frame if body present
     if (request.body) |body| {
         if (body.len > 0) {
-            pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.data), body);
+            pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.data), body);
         }
     }
 
@@ -819,7 +819,7 @@ pub fn decodeRequestWithDynamicWithHeaders(
     // Skip GREASE / unknown extension frames that may precede the initial
     // HEADERS frame (RFC 9114 §7.2.8, §9), then require HEADERS.
     var headers_result = try h3_frame.decodeFrame(data[pos..]);
-    while (headers_result.frame.frame_type != @intFromEnum(h3_frame.FrameType.headers)) {
+    while (headers_result.frame.frame_type != @backingInt(h3_frame.FrameType.headers)) {
         if (!h3_frame.isIgnorableHeaderPrefixFrame(headers_result.frame.frame_type)) {
             return error.ExpectedHeadersFrame;
         }
@@ -858,7 +858,7 @@ pub fn decodeRequestWithDynamicWithHeaders(
     if (pos < data.len) {
         const data_result = h3_frame.decodeFrame(data[pos..]) catch null;
         if (data_result) |dr| {
-            if (dr.frame.frame_type == @intFromEnum(h3_frame.FrameType.data)) {
+            if (dr.frame.frame_type == @backingInt(h3_frame.FrameType.data)) {
                 body = dr.frame.payload;
                 pos += dr.consumed;
             }
@@ -904,11 +904,11 @@ pub fn encodeResponseWithDynamic(
     var header_buf: [4096]u8 = undefined;
     const enc = try qpack.encodeHeaderBlockWithDynamicInserting(&header_buf, encoder_stream_out, fields_buf[0..count], dynamic_table);
 
-    pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
+    pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.headers), header_buf[0..enc.header_block_len]);
 
     if (response.body) |body| {
         if (body.len > 0) {
-            pos += try writeFrame(out[pos..], @intFromEnum(h3_frame.FrameType.data), body);
+            pos += try writeFrame(out[pos..], @backingInt(h3_frame.FrameType.data), body);
         }
     }
 
@@ -1150,7 +1150,7 @@ test "encodeResponseHeaders emits only the HEADERS frame" {
 
     // Wire must be exactly one HEADERS frame with no DATA trailing.
     const frame = try h3_frame.decodeFrame(buf[0..len]);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(h3_frame.FrameType.headers)), frame.frame.frame_type);
+    try std.testing.expectEqual(@as(u64, @backingInt(h3_frame.FrameType.headers)), frame.frame.frame_type);
     try std.testing.expectEqual(len, frame.consumed);
 }
 

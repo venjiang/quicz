@@ -109,9 +109,9 @@ pub fn main() !void {
     const cid0 = [_]u8{ 0x60, 0x61, 0x62, 0x63 };
     const cid1 = [_]u8{ 0x70, 0x71, 0x72, 0x73 };
     const cid2 = [_]u8{ 0x80, 0x81, 0x82, 0x83 };
-    const token0 = [_]u8{0x20} ** quicz.packet.stateless_reset_token_len;
-    const token1 = [_]u8{0x21} ** quicz.packet.stateless_reset_token_len;
-    const token2 = [_]u8{0x22} ** quicz.packet.stateless_reset_token_len;
+    const token0 = @as([quicz.packet.stateless_reset_token_len]u8, @splat(0x20));
+    const token1 = @as([quicz.packet.stateless_reset_token_len]u8, @splat(0x21));
+    const token2 = @as([quicz.packet.stateless_reset_token_len]u8, @splat(0x22));
     const path = try udp4Tuple(server_socket.address, client_socket.address);
 
     const datagram0 = [_]u8{ 0x40, 0x60, 0x61, 0x62, 0x63, 0x01 };

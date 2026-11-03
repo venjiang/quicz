@@ -160,7 +160,7 @@ fn pairPriority(controlling: u32, controlled: u32) u64 {
 
 fn higherPriorityFirst(_: void, lhs: CandidatePair, rhs: CandidatePair) bool {
     if (lhs.priority != rhs.priority) return lhs.priority > rhs.priority;
-    if (lhs.local.source != rhs.local.source) return @intFromEnum(lhs.local.source) < @intFromEnum(rhs.local.source);
+    if (lhs.local.source != rhs.local.source) return @backingInt(lhs.local.source) < @backingInt(rhs.local.source);
     return lhs.id < rhs.id;
 }
 
@@ -206,7 +206,7 @@ test "pair scheduler filters address families and probes highest priority first"
     var remote = CandidateSet{};
     try remote.add(try ipv4Candidate(3, .host, .{ 10, 0, 0, 2 }, 4001));
     try remote.add(try Candidate.init(4, .host, .{ .ipv6 = .{
-        .address = .{ 0x20, 1, 0x0d, 0xb8 } ++ .{0} ** 12,
+        .address = .{ 0x20, 1, 0x0d, 0xb8 } ++ @as([12]u8, @splat(0)),
         .port = 4001,
     } }, defaultPriority(.host)));
 

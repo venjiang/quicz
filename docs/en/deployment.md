@@ -110,7 +110,7 @@ connections must not migrate between backends without connection migration).
 
 - `zig build test --summary all` — 1883 unit tests.
 - `zig build run-stability-bench -- 60000` — sustained transfer, no errors/leaks.
-- `zig build run-h3-runtime-loopback -Doptimize=ReleaseFast` — real handshake +
+- `zig build run-h3-runtime-loopback -Doptimize=fast` — real handshake +
   H3/QPACK round trips.
 - CI (`.github/workflows/ci.yml`) runs unit tests, the cross-implementation
   interop matrix (quic-go / quiche / s2n-quic, forward + reverse), HTTP/3

@@ -460,8 +460,8 @@ fn runCeProbePhase(allocator: std.mem.Allocator, io: std.Io) !CeProbeResult {
 
     var client_receive_buf: [1500]u8 = undefined;
     var server_receive_buf: [1500]u8 = undefined;
-    var ping_payload = [_]u8{@intFromEnum(quicz.frame.FrameType.padding)} ** 1178;
-    ping_payload[0] = @intFromEnum(quicz.frame.FrameType.ping);
+    var ping_payload = @as([1178]u8, @splat(@backingInt(quicz.frame.FrameType.padding)));
+    ping_payload[0] = @backingInt(quicz.frame.FrameType.ping);
     var packet_number: usize = 0;
     while (packet_number < 30) : (packet_number += 1) {
         const packet = try protectShortPacket(

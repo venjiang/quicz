@@ -1099,8 +1099,8 @@ fn EndpointRouterForTuple(comptime Path: type) type {
             if ((datagram[0] & 0x80) != 0) {
                 if ((datagram[0] & 0x40) == 0) {
                     if (datagram.len < 5) return error.InvalidDatagram;
-                    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-                    if (@intFromEnum(version) != 0) return null;
+                    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
+                    if (@backingInt(version) != 0) return null;
                 }
                 const dcid = try ConnectionId.init(try peekLongDestinationConnectionId(datagram));
                 if (self.findRouteIndexForPath(dcid, path) != null) return null;
@@ -1161,8 +1161,8 @@ fn EndpointRouterForTuple(comptime Path: type) type {
             if ((datagram[0] & 0x40) == 0) {
                 if ((datagram[0] & 0x80) == 0) return .dropped;
                 if (datagram.len < 5) return error.InvalidDatagram;
-                const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-                if (@intFromEnum(version) != 0) return .dropped;
+                const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
+                if (@backingInt(version) != 0) return .dropped;
             }
 
             if (self.routeDatagram(path, datagram)) |route| {
@@ -1220,8 +1220,8 @@ fn EndpointRouterForTuple(comptime Path: type) type {
             if ((datagram[0] & 0x80) != 0) {
                 if ((datagram[0] & 0x40) == 0) {
                     if (datagram.len < 5) return error.InvalidDatagram;
-                    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-                    if (@intFromEnum(version) != 0) return error.InvalidDatagram;
+                    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
+                    if (@backingInt(version) != 0) return error.InvalidDatagram;
                 }
                 return self.routeConnectionId(try peekLongDestinationConnectionId(datagram), path);
             }
@@ -1365,7 +1365,7 @@ pub fn writeVersionNegotiationForUnsupportedVersion(
     try validateSupportedVersions(supported_versions);
 
     const ids = try peekLongHeaderConnectionIds(datagram);
-    if (@intFromEnum(ids.version) == 0) return null;
+    if (@backingInt(ids.version) == 0) return null;
     if (versionListContains(supported_versions, ids.version)) return null;
 
     var writer = buffer.fixedWriter(out);
@@ -1408,8 +1408,8 @@ fn peekInitialAcceptDatagramForTuple(
 
     var version_buf: [4]u8 = undefined;
     reader.readNoEof(&version_buf) catch return error.InvalidDatagram;
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
-    if (@intFromEnum(version) == 0) return null;
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, &version_buf, .big)));
+    if (@backingInt(version) == 0) return null;
     if (!versionListContains(supported_versions, version)) return null;
     if (packet.longHeaderPacketTypeFromBits(version, packet_type_bits) != .initial) return null;
 
@@ -1449,7 +1449,7 @@ fn peekInitialAcceptDatagramForTuple(
 pub fn peekLongHeaderConnectionIds(datagram: []const u8) RouteError!LongHeaderConnectionIds {
     if (datagram.len < 6) return error.InvalidDatagram;
     if ((datagram[0] & 0x80) == 0) return error.InvalidDatagram;
-    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+    const version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, datagram[1..5], .big)));
     const dcid_len = datagram[5];
     if (dcid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
     const dcid_start: usize = 6;
@@ -1489,7 +1489,7 @@ fn peekLongDestinationConnectionId(datagram: []const u8) RouteError![]const u8 {
 
 fn versionListContains(versions: []const packet.Version, version: packet.Version) bool {
     for (versions) |candidate| {
-        if (@intFromEnum(candidate) == @intFromEnum(version)) return true;
+        if (@backingInt(candidate) == @backingInt(version)) return true;
     }
     return false;
 }
@@ -1497,7 +1497,7 @@ fn versionListContains(versions: []const packet.Version, version: packet.Version
 fn validateSupportedVersions(supported_versions: []const packet.Version) RouteError!void {
     if (supported_versions.len == 0) return error.InvalidVersionList;
     for (supported_versions) |supported| {
-        if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
+        if (@backingInt(supported) == 0) return error.InvalidVersionList;
         if (packet.isReservedVersion(supported)) return error.InvalidVersionList;
     }
 }
@@ -1537,8 +1537,8 @@ fn testPathWithLocal(local_port: u16, remote_port: u16) Udp4Tuple {
 }
 
 test "Udp4Tuple creates remote peer address-validation binding" {
-    const secret: address_validation_token.Secret = [_]u8{0x7a} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0x51} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x7a));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x51));
     const path = Udp4Tuple{
         .local = Udp4Address.init(.{ 192, 0, 2, 1 }, 4433),
         .remote = Udp4Address.init(.{ 203, 0, 113, 7 }, 50_000),
@@ -1585,9 +1585,9 @@ test "Udp4Tuple creates remote peer address-validation binding" {
 }
 
 test "AddressValidationPolicy validates rotated path-bound tokens and rejects replay" {
-    const old_secret: address_validation_token.Secret = [_]u8{0xa1} ** address_validation_token.secret_len;
-    const current_secret: address_validation_token.Secret = [_]u8{0xb2} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0xc3} ** address_validation_token.nonce_len;
+    const old_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xa1));
+    const current_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xb2));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0xc3));
     const path = testPath(50_000);
     const changed_path = testPath(50_001);
     var policy = AddressValidationPolicy.init(std.testing.allocator, old_secret, .{
@@ -1615,8 +1615,8 @@ test "AddressValidationPolicy validates rotated path-bound tokens and rejects re
 }
 
 test "AddressValidationPolicy rejects tokens from a different QUIC version" {
-    const secret: address_validation_token.Secret = [_]u8{0xd1} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = [_]u8{0xd2} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0xd1));
+    const nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0xd2));
     const path = testPath(50_000);
     var policy = AddressValidationPolicy.init(std.testing.allocator, secret, .{
         .max_previous_secrets = 1,
@@ -1640,11 +1640,11 @@ test "AddressValidationPolicy rejects tokens from a different QUIC version" {
 }
 
 test "AddressValidationPolicy drops oldest retained secret after rotation limit" {
-    const old_secret: address_validation_token.Secret = [_]u8{0x01} ** address_validation_token.secret_len;
-    const middle_secret: address_validation_token.Secret = [_]u8{0x02} ** address_validation_token.secret_len;
-    const current_secret: address_validation_token.Secret = [_]u8{0x03} ** address_validation_token.secret_len;
-    const old_nonce: address_validation_token.Nonce = [_]u8{0x11} ** address_validation_token.nonce_len;
-    const middle_nonce: address_validation_token.Nonce = [_]u8{0x22} ** address_validation_token.nonce_len;
+    const old_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x01));
+    const middle_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x02));
+    const current_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x03));
+    const old_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x11));
+    const middle_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x22));
     const path = testPath(50_000);
     var policy = AddressValidationPolicy.init(std.testing.allocator, old_secret, .{
         .max_previous_secrets = 1,
@@ -1669,12 +1669,12 @@ test "AddressValidationPolicy drops oldest retained secret after rotation limit"
 }
 
 test "AddressValidationPolicy exports and restores retained token secrets" {
-    const old_secret: address_validation_token.Secret = [_]u8{0x31} ** address_validation_token.secret_len;
-    const middle_secret: address_validation_token.Secret = [_]u8{0x32} ** address_validation_token.secret_len;
-    const current_secret: address_validation_token.Secret = [_]u8{0x33} ** address_validation_token.secret_len;
-    const old_nonce: address_validation_token.Nonce = [_]u8{0x41} ** address_validation_token.nonce_len;
-    const middle_nonce: address_validation_token.Nonce = [_]u8{0x42} ** address_validation_token.nonce_len;
-    const current_nonce: address_validation_token.Nonce = [_]u8{0x43} ** address_validation_token.nonce_len;
+    const old_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x31));
+    const middle_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x32));
+    const current_secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x33));
+    const old_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x41));
+    const middle_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x42));
+    const current_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x43));
     const path = testPath(50_000);
     var policy = AddressValidationPolicy.init(std.testing.allocator, old_secret, .{
         .max_previous_secrets = 2,
@@ -1718,9 +1718,9 @@ test "AddressValidationPolicy exports and restores retained token secrets" {
 }
 
 test "AddressValidationPolicy exports and restores replay filter state" {
-    const secret: address_validation_token.Secret = [_]u8{0x61} ** address_validation_token.secret_len;
-    const consumed_nonce: address_validation_token.Nonce = [_]u8{0x71} ** address_validation_token.nonce_len;
-    const fresh_nonce: address_validation_token.Nonce = [_]u8{0x72} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @as([address_validation_token.secret_len]u8, @splat(0x61));
+    const consumed_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x71));
+    const fresh_nonce: address_validation_token.Nonce = @as([address_validation_token.nonce_len]u8, @splat(0x72));
     const path = testPath(50_000);
     var policy = AddressValidationPolicy.init(std.testing.allocator, secret, .{
         .max_previous_secrets = 1,
@@ -1822,7 +1822,7 @@ test "EndpointRouter routes long and short datagrams by destination CID" {
 
 test "Endpoint version negotiation response swaps connection IDs" {
     const supported_versions = [_]packet.Version{ .v1, .v2 };
-    const unsupported_version: packet.Version = @enumFromInt(0xface_b00c);
+    const unsupported_version: packet.Version = @fromBackingInt(@intCast(0xface_b00c));
     const datagram = [_]u8{
         0xc0,
         0xfa,
@@ -1848,7 +1848,7 @@ test "Endpoint version negotiation response swaps connection IDs" {
     var too_long_dcid = buffer.fixedWriter(&too_long_dcid_buf);
     try too_long_dcid.writeAll(&[_]u8{ 0xc0, 0xfa, 0xce, 0xb0, 0x0c });
     try too_long_dcid.writeByte(@intCast(max_connection_id_len + 1));
-    try too_long_dcid.writeAll(&([_]u8{0xaa} ** (max_connection_id_len + 1)));
+    try too_long_dcid.writeAll(&(@as([(max_connection_id_len + 1)]u8, @splat(0xaa))));
     try too_long_dcid.writeByte(0);
     try std.testing.expectError(error.InvalidConnectionIdLength, peekLongHeaderConnectionIds(too_long_dcid.getWritten()));
 
@@ -1857,7 +1857,7 @@ test "Endpoint version negotiation response swaps connection IDs" {
     try too_long_scid.writeAll(&[_]u8{ 0xc0, 0xfa, 0xce, 0xb0, 0x0c });
     try too_long_scid.writeByte(0);
     try too_long_scid.writeByte(@intCast(max_connection_id_len + 1));
-    try too_long_scid.writeAll(&([_]u8{0xbb} ** (max_connection_id_len + 1)));
+    try too_long_scid.writeAll(&(@as([(max_connection_id_len + 1)]u8, @splat(0xbb))));
     try std.testing.expectError(error.InvalidConnectionIdLength, peekLongHeaderConnectionIds(too_long_scid.getWritten()));
 
     var response_buf: [64]u8 = undefined;
@@ -1939,8 +1939,8 @@ test "Endpoint version negotiation ignores non-triggering datagrams" {
         &supported_versions,
     ));
 
-    const zero_version = [_]packet.Version{@enumFromInt(0)};
-    const reserved_version = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
+    const zero_version = [_]packet.Version{@fromBackingInt(@intCast(0))};
+    const reserved_version = [_]packet.Version{@fromBackingInt(@intCast(0x0a0a0a0a))};
     try std.testing.expectError(
         error.InvalidVersionList,
         writeVersionNegotiationForUnsupportedVersion(&response_buf, &supported, &zero_version),
@@ -2150,7 +2150,7 @@ test "EndpointRouter registers accepted Initial connection IDs for server routin
     const client_scid = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
     const server_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const token = [_]u8{ 0x99, 0x88, 0x77 };
-    const reset_token = [_]u8{0x64} ** stateless_reset_token_len;
+    const reset_token = @as([stateless_reset_token_len]u8, @splat(0x64));
     const initial = [_]u8{
         0xc0, 0x00, 0x00, 0x00, 0x01,
         0x08, 0xaa, 0xbb, 0xcc, 0xdd,
@@ -2219,7 +2219,7 @@ test "EndpointRouter rejects accepted Initial route registration without partial
     const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11 };
     const duplicate_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const short_original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const reset_token = [_]u8{0x72} ** stateless_reset_token_len;
+    const reset_token = @as([stateless_reset_token_len]u8, @splat(0x72));
     const initial = [_]u8{
         0xc0, 0x00, 0x00, 0x00, 0x01,
         0x08, 0xaa, 0xbb, 0xcc, 0xdd,
@@ -2290,8 +2290,8 @@ test "EndpointRouter bounds retained stateless reset tokens without rejecting re
     const path = testPath(50_000);
     const cid0 = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
     const cid1 = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
-    const token0 = [_]u8{0x41} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x42} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x41));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x42));
     var router = EndpointRouter.initWithOptions(std.testing.allocator, .{
         .max_routes = 2,
         .max_stateless_reset_tokens = 1,
@@ -2354,9 +2354,9 @@ test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial 
     try std.testing.expectError(error.InvalidDatagram, peekInitialAcceptDatagram(path, &bad_length_initial, &supported_versions));
     try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &[_]packet.Version{}));
 
-    const zero_version = [_]packet.Version{@enumFromInt(0)};
+    const zero_version = [_]packet.Version{@fromBackingInt(@intCast(0))};
     try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &zero_version));
-    const reserved_version = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
+    const reserved_version = [_]packet.Version{@fromBackingInt(@intCast(0x0a0a0a0a))};
     try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &reserved_version));
 }
 
@@ -2466,7 +2466,7 @@ test "EndpointRouter commits caller-validated preferred address migration" {
     const current_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
     const preferred_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
     const duplicate_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
-    const preferred_token = [_]u8{0x42} ** stateless_reset_token_len;
+    const preferred_token = @as([stateless_reset_token_len]u8, @splat(0x42));
     const current_path = testPath(50_000);
     const preferred_path = testPathWithLocal(8443, 50_001);
     const third_path = testPathWithLocal(8443, 50_002);
@@ -2514,8 +2514,8 @@ test "EndpointRouter retires connection ID routes by sequence number" {
     const cid0 = [_]u8{ 0x30, 0x31, 0x32, 0x33 };
     const cid1 = [_]u8{ 0x40, 0x41, 0x42, 0x43 };
     const cid2 = [_]u8{ 0x50, 0x51, 0x52, 0x53 };
-    const token0 = [_]u8{0x01} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x02} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x01));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x02));
     const path = testPath(50_000);
     const datagram0 = [_]u8{ 0x40, 0x30, 0x31, 0x32, 0x33, 0x01 };
     const datagram1 = [_]u8{ 0x40, 0x40, 0x41, 0x42, 0x43, 0x01 };
@@ -2544,10 +2544,10 @@ test "EndpointRouter retires connection ID routes before a sequence threshold" {
     const cid1 = [_]u8{ 0x30, 0x31, 0x32, 0x33 };
     const cid2 = [_]u8{ 0x40, 0x41, 0x42, 0x43 };
     const other_cid = [_]u8{ 0x50, 0x51, 0x52, 0x53 };
-    const token0 = [_]u8{0x10} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x11} ** stateless_reset_token_len;
-    const token2 = [_]u8{0x12} ** stateless_reset_token_len;
-    const other_token = [_]u8{0x13} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x10));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x11));
+    const token2 = @as([stateless_reset_token_len]u8, @splat(0x12));
+    const other_token = @as([stateless_reset_token_len]u8, @splat(0x13));
     const path = testPath(50_000);
     const datagram0 = [_]u8{ 0x40, 0x20, 0x21, 0x22, 0x23, 0x01 };
     const datagram1 = [_]u8{ 0x40, 0x30, 0x31, 0x32, 0x33, 0x01 };
@@ -2581,9 +2581,9 @@ test "EndpointRouter registers replacement connection ID and retires older route
     const cid0 = [_]u8{ 0x60, 0x61, 0x62, 0x63 };
     const cid1 = [_]u8{ 0x70, 0x71, 0x72, 0x73 };
     const cid2 = [_]u8{ 0x80, 0x81, 0x82, 0x83 };
-    const token0 = [_]u8{0x20} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x21} ** stateless_reset_token_len;
-    const token2 = [_]u8{0x22} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x20));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x21));
+    const token2 = @as([stateless_reset_token_len]u8, @splat(0x22));
     const path = testPath(50_000);
     const datagram0 = [_]u8{ 0x40, 0x60, 0x61, 0x62, 0x63, 0x01 };
     const datagram1 = [_]u8{ 0x40, 0x70, 0x71, 0x72, 0x73, 0x01 };
@@ -2686,7 +2686,7 @@ test "EndpointRouter routes zero-length destination CIDs by UDP tuple" {
 
 test "EndpointRouter rejects stateless reset tokens for zero-length CIDs" {
     const empty_cid = [_]u8{};
-    const token = [_]u8{0x11} ** stateless_reset_token_len;
+    const token = @as([stateless_reset_token_len]u8, @splat(0x11));
     var router = EndpointRouter.init(std.testing.allocator);
     defer router.deinit();
 
@@ -2736,7 +2736,7 @@ test "EndpointRouter writes stateless reset datagrams for inactive routes" {
 test "EndpointRouter handles datagrams as route reset or drop" {
     const active_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const retired_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
-    const reset_token = [_]u8{0x9a} ** stateless_reset_token_len;
+    const reset_token = @as([stateless_reset_token_len]u8, @splat(0x9a));
     const prefix = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01, 0x02 };
     const active_datagram = [_]u8{ 0x40, 0x21, 0x22, 0x23, 0x24, 0x01 };
     const retired_datagram = [_]u8{
@@ -2784,7 +2784,7 @@ test "EndpointRouter handles datagrams as route reset or drop" {
 
 test "EndpointRouter rejects invalid stateless reset datagram sizing" {
     const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const token = [_]u8{0x11} ** stateless_reset_token_len;
+    const token = @as([stateless_reset_token_len]u8, @splat(0x11));
     const prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78 };
     const short_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56 };
     const long_header_prefix = [_]u8{ 0xc0, 0x12, 0x34, 0x56, 0x78 };
@@ -2850,8 +2850,8 @@ test "EndpointRouter rejects unknown duplicate ambiguous and malformed routes" {
 }
 
 test "EndpointRouter rejects ambiguous stateless reset token prefixes" {
-    const token0 = [_]u8{0x01} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x02} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x01));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x02));
     var router = EndpointRouter.init(std.testing.allocator);
     defer router.deinit();
 
@@ -2880,9 +2880,9 @@ test "EndpointRouter retires all active routes for a connection handle" {
     const cid0 = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
     const cid1 = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
     const other_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
-    const token0 = [_]u8{0x81} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x91} ** stateless_reset_token_len;
-    const other_token = [_]u8{0xa1} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x81));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x91));
+    const other_token = @as([stateless_reset_token_len]u8, @splat(0xa1));
     const path = testPath(50_000);
     const datagram0 = [_]u8{ 0x40, 0x81, 0x82, 0x83, 0x84, 0x01 };
     const datagram1 = [_]u8{ 0x40, 0x91, 0x92, 0x93, 0x94, 0x01 };
@@ -2914,8 +2914,8 @@ test "EndpointRouter rejects stateless reset token reuse across connection IDs" 
     const cid0 = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
     const cid1 = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
     const cid2 = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
-    const token0 = [_]u8{0x31} ** stateless_reset_token_len;
-    const token1 = [_]u8{0x32} ** stateless_reset_token_len;
+    const token0 = @as([stateless_reset_token_len]u8, @splat(0x31));
+    const token1 = @as([stateless_reset_token_len]u8, @splat(0x32));
     const path = testPath(50_000);
     var router = EndpointRouter.init(std.testing.allocator);
     defer router.deinit();
@@ -2945,7 +2945,7 @@ fn testIPv6Path() Udp6Tuple {
 }
 
 fn testIPv6PathVariants(path: Udp6Tuple) [6]Udp6Tuple {
-    var paths = [_]Udp6Tuple{path} ** 6;
+    var paths = @as([6]Udp6Tuple, @splat(path));
     paths[0].remote.octets[15] += 1;
     paths[1].remote.port += 1;
     paths[2].remote.scope_id += 1;
@@ -2970,8 +2970,8 @@ test "Udp6Tuple includes every address byte port and scope in identity" {
 
 test "IPv6 address token policy rejects changed peer identity and IPv4 binding" {
     const Family = ForTuple(Udp6Tuple);
-    const secret: address_validation_token.Secret = .{0x7a} ** address_validation_token.secret_len;
-    const nonce: address_validation_token.Nonce = .{0x51} ** address_validation_token.nonce_len;
+    const secret: address_validation_token.Secret = @splat(0x7a);
+    const nonce: address_validation_token.Nonce = @splat(0x51);
     const path = testIPv6Path();
     var policy = Family.AddressValidationPolicy.init(std.testing.allocator, secret, .{});
     defer policy.deinit();

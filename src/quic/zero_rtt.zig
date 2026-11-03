@@ -143,7 +143,7 @@ test "ResumptionManager full 0-RTT flow" {
     const nonce = try std.testing.allocator.dupe(u8, "nonce1");
     try mgr.cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{0xaa} ** 32,
+        .psk = @as([32]u8, @splat(0xaa)),
         .lifetime_sec = 3600,
         .age_add = 123,
         .nonce = nonce,
@@ -185,7 +185,7 @@ test "ResumptionManager server rejects" {
     const nonce = try std.testing.allocator.dupe(u8, "nonce2");
     try mgr.cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{0xbb} ** 32,
+        .psk = @as([32]u8, @splat(0xbb)),
         .lifetime_sec = 3600,
         .age_add = 0,
         .nonce = nonce,
@@ -223,7 +223,7 @@ test "ResumptionManager ticket without early data" {
     const nonce = try std.testing.allocator.dupe(u8, "nonce3");
     try mgr.cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{0xcc} ** 32,
+        .psk = @as([32]u8, @splat(0xcc)),
         .lifetime_sec = 3600,
         .age_add = 0,
         .nonce = nonce,

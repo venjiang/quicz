@@ -30,9 +30,9 @@ pub const Message = struct {
 };
 
 pub fn encode(key: Key, message: Message) [packet_length]u8 {
-    var packet = [_]u8{0} ** packet_length;
+    var packet = @as([packet_length]u8, @splat(0));
     @memcpy(packet[0..magic.len], magic);
-    packet[8] = @intFromEnum(message.kind);
+    packet[8] = @backingInt(message.kind);
     @memcpy(packet[12..28], &message.attempt_id);
     @memcpy(packet[28..44], &message.nonce);
     const tag = authenticate(key, packet[0..body_length]);
@@ -45,8 +45,8 @@ pub fn decode(key: Key, packet: []const u8) !Message {
     if (!std.mem.eql(u8, packet[0..magic.len], magic)) return error.InvalidMagic;
     if (!std.mem.allEqual(u8, packet[9..12], 0)) return error.InvalidReservedBits;
     const kind: Kind = switch (packet[8]) {
-        @intFromEnum(Kind.probe) => .probe,
-        @intFromEnum(Kind.acknowledgement) => .acknowledgement,
+        @backingInt(Kind.probe) => .probe,
+        @backingInt(Kind.acknowledgement) => .acknowledgement,
         else => return error.InvalidMessageKind,
     };
 
@@ -94,11 +94,11 @@ fn authenticate(key: Key, body: []const u8) [tag_length]u8 {
 }
 
 test "probe and acknowledgement authenticate the same connectivity attempt" {
-    const key: Key = .{0x42} ** HmacSha256.key_length;
+    const key: Key = @splat(0x42);
     const probe = Message{
         .kind = .probe,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0x22} ** 16,
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x22),
     };
     const decoded_probe = try decode(key, &encode(key, probe));
     try std.testing.expectEqual(probe, decoded_probe);
@@ -109,24 +109,24 @@ test "probe and acknowledgement authenticate the same connectivity attempt" {
 }
 
 test "tampered probe is rejected before routing" {
-    const key: Key = .{0x42} ** HmacSha256.key_length;
+    const key: Key = @splat(0x42);
     var packet = encode(key, .{
         .kind = .probe,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0x22} ** 16,
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x22),
     });
     packet[28] ^= 0x01;
     try std.testing.expectError(error.AuthenticationFailed, decode(key, &packet));
 }
 
 test "wrong attempt key cannot authenticate a probe" {
-    const packet = encode(.{0x42} ** HmacSha256.key_length, .{
+    const packet = encode(@splat(0x42), .{
         .kind = .probe,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0x22} ** 16,
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x22),
     });
     try std.testing.expectError(
         error.AuthenticationFailed,
-        decode(.{0x43} ** HmacSha256.key_length, &packet),
+        decode(@splat(0x43), &packet),
     );
 }

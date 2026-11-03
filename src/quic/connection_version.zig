@@ -9,13 +9,13 @@ const Error = transport_types.Error;
 
 /// Return whether a QUIC version field is the forbidden zero value.
 pub fn isZeroVersion(version: packet.Version) bool {
-    return @intFromEnum(version) == 0;
+    return @backingInt(version) == 0;
 }
 
 /// Return whether a version list contains the exact wire version value.
 pub fn versionListContains(versions: []const packet.Version, version: packet.Version) bool {
     for (versions) |candidate| {
-        if (@intFromEnum(candidate) == @intFromEnum(version)) return true;
+        if (@backingInt(candidate) == @backingInt(version)) return true;
     }
     return false;
 }
@@ -42,7 +42,7 @@ pub fn selectMutualVersionWithExtra(
     for (preferred_versions) |preferred| {
         if (isZeroVersion(preferred)) continue;
         if (packet.isReservedVersion(preferred)) continue;
-        if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
+        if (@backingInt(preferred) == @backingInt(extra_version) or versionListContains(offered_versions, preferred)) {
             return preferred;
         }
     }
@@ -64,14 +64,14 @@ pub fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Err
         if (side != .client) return error.InvalidPacket;
         if (isZeroVersion(selected)) return error.InvalidPacket;
         if (packet.isReservedVersion(selected)) return error.InvalidPacket;
-        if (@intFromEnum(selected) != @intFromEnum(config.chosen_version)) return error.InvalidPacket;
+        if (@backingInt(selected) != @backingInt(config.chosen_version)) return error.InvalidPacket;
         if (!versionListContains(config.available_versions, selected)) return error.InvalidPacket;
     }
 }
 
 test "selectMutualVersion skips forbidden preferred versions" {
-    const preferred = [_]packet.Version{ @enumFromInt(0), @enumFromInt(0x0a0a0a0a), .v2, .v1 };
-    const offered = [_]packet.Version{ @enumFromInt(0), .v1, .v2 };
+    const preferred = [_]packet.Version{ @fromBackingInt(@intCast(0)), @fromBackingInt(@intCast(0x0a0a0a0a)), .v2, .v1 };
+    const offered = [_]packet.Version{ @fromBackingInt(@intCast(0)), .v1, .v2 };
 
     try std.testing.expectEqual(packet.Version.v2, selectMutualVersion(&preferred, &offered).?);
 }
@@ -84,10 +84,10 @@ test "selectMutualVersionWithExtra accepts authenticated chosen version" {
 }
 
 test "selectMutualVersionWithExtra skips forbidden preferred versions" {
-    const preferred = [_]packet.Version{ @enumFromInt(0), @enumFromInt(0x0a0a0a0a), .v1 };
-    const offered = [_]packet.Version{ @enumFromInt(0), .v1 };
+    const preferred = [_]packet.Version{ @fromBackingInt(@intCast(0)), @fromBackingInt(@intCast(0x0a0a0a0a)), .v1 };
+    const offered = [_]packet.Version{ @fromBackingInt(@intCast(0)), .v1 };
 
-    try std.testing.expectEqual(packet.Version.v1, selectMutualVersionWithExtra(&preferred, &offered, @enumFromInt(0)));
+    try std.testing.expectEqual(packet.Version.v1, selectMutualVersionWithExtra(&preferred, &offered, @fromBackingInt(@intCast(0))));
 }
 
 test "validateLocalVersionInformation rejects inconsistent client follow-up config" {
@@ -101,7 +101,7 @@ test "validateLocalVersionInformation rejects inconsistent client follow-up conf
 }
 
 test "validateLocalVersionInformation rejects reserved chosen versions" {
-    const reserved = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
+    const reserved = [_]packet.Version{@fromBackingInt(@intCast(0x0a0a0a0a))};
 
     try std.testing.expectError(error.InvalidPacket, validateLocalVersionInformation(.client, .{
         .chosen_version = reserved[0],

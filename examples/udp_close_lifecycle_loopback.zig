@@ -213,7 +213,7 @@ pub fn main() !void {
     try require(server_lifecycle.routeCount() == 1);
     try require(server_lifecycle.statelessResetTokenCount() == 1);
 
-    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "udp close");
+    try client.closeConnection(0, @backingInt(quicz.frame.FrameType.stream), "udp close");
     try require(client.connectionState() == .closing);
     try require(client.closeDeadline() == null);
     const close_packet = (try client.pollProtectedShortDatagram(1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;

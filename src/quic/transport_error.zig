@@ -31,7 +31,7 @@ pub const crypto_error_max: u64 = 0x01ff;
 
 /// Return the wire value for a transport error code.
 pub fn codeValue(code: TransportErrorCode) u64 {
-    return @intFromEnum(code);
+    return @backingInt(code);
 }
 
 /// Return true when `raw_code` is one of the fixed RFC 9000 transport errors.

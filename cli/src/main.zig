@@ -26,6 +26,7 @@ comptime {
     _ = @import("cmd/bench.zig");
     _ = @import("cookies.zig");
     _ = @import("svcb.zig");
+    _ = @import("tls_tcp.zig");
 }
 const h3 = @import("cmd/h3.zig");
 const probe = @import("cmd/probe.zig");

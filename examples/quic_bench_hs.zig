@@ -122,7 +122,7 @@ fn setupHandshakenPair(
     scratch: []u8,
     hs_buf: []u8,
 ) !BenchBackends {
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -544,7 +544,7 @@ fn measureOneHandshakeNs(allocator: std.mem.Allocator, io: std.Io) !u64 {
     var server_socket = try bindLoopback(io);
     defer server_socket.close(io);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -618,7 +618,7 @@ fn measureStreamChurn(allocator: std.mem.Allocator, io: std.Io) !void {
     var server_socket = try bindLoopback(io);
     defer server_socket.close(io);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -713,7 +713,7 @@ fn measureDatagram(allocator: std.mem.Allocator, io: std.Io) !void {
     defer server_socket.close(io);
     const server_addr = server_socket.address;
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -818,7 +818,7 @@ fn asyncTransferTask(ctx: WorkerCtx) std.Io.Cancelable!void {
     defer server_socket.close(io);
     const server_addr = server_socket.address;
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = EcdsaP256Sha256.KeyPair.generateDeterministic(seed) catch return;
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -913,7 +913,7 @@ fn workerFn(ctx: WorkerCtx) void {
     defer server_socket.close(io);
     const server_addr = server_socket.address;
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = EcdsaP256Sha256.KeyPair.generateDeterministic(seed) catch return;
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };

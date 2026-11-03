@@ -64,7 +64,7 @@ pub const VersionInformation = struct {
     /// Return whether `version` is present in the Available Versions list.
     pub fn containsAvailableVersion(self: VersionInformation, version: packet.Version) bool {
         for (self.available_versions) |available| {
-            if (@intFromEnum(available) == @intFromEnum(version)) return true;
+            if (@backingInt(available) == @backingInt(version)) return true;
         }
         return false;
     }
@@ -158,7 +158,7 @@ fn encodeIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
 }
 
 fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
-    try validateParameterIdVarInt(@intFromEnum(id));
+    try validateParameterIdVarInt(@backingInt(id));
     if (value > max_quic_varint) return error.InvalidParameterValue;
 
     var raw: [8]u8 = undefined;
@@ -168,9 +168,9 @@ fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !vo
 }
 
 fn encodeBytesValue(writer: anytype, id: ParameterId, value: []const u8) !void {
-    try validateParameterIdVarInt(@intFromEnum(id));
+    try validateParameterIdVarInt(@backingInt(id));
     const value_len = try validateParameterValueLen(value);
-    try packet.encodeVarInt(writer, @intFromEnum(id));
+    try packet.encodeVarInt(writer, @backingInt(id));
     try packet.encodeVarInt(writer, value_len);
     try writer.writeAll(value);
 }
@@ -194,7 +194,7 @@ fn encodeConnectionIdValue(writer: anytype, id: ParameterId, cid: []const u8) !v
 }
 
 fn encodeZeroLengthValue(writer: anytype, id: ParameterId) !void {
-    try packet.encodeVarInt(writer, @intFromEnum(id));
+    try packet.encodeVarInt(writer, @backingInt(id));
     try packet.encodeVarInt(writer, 0);
 }
 
@@ -225,7 +225,7 @@ fn encodePreferredAddress(writer: anytype, preferred: PreferredAddress) !void {
 }
 
 fn validateVersion(version: packet.Version) !void {
-    if (@intFromEnum(version) == 0) return error.InvalidParameterValue;
+    if (@backingInt(version) == 0) return error.InvalidParameterValue;
 }
 
 fn validateChosenVersion(version: packet.Version) !void {
@@ -248,14 +248,14 @@ fn encodeVersionInformation(writer: anytype, version_information: VersionInforma
         try validateVersion(available);
     }
 
-    try packet.encodeVarInt(writer, @intFromEnum(ParameterId.version_information));
+    try packet.encodeVarInt(writer, @backingInt(ParameterId.version_information));
     try packet.encodeVarInt(writer, value_len);
 
     var version_buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &version_buf, @intFromEnum(version_information.chosen_version), .big);
+    std.mem.writeInt(u32, &version_buf, @backingInt(version_information.chosen_version), .big);
     try writer.writeAll(&version_buf);
     for (version_information.available_versions) |available| {
-        std.mem.writeInt(u32, &version_buf, @intFromEnum(available), .big);
+        std.mem.writeInt(u32, &version_buf, @backingInt(available), .big);
         try writer.writeAll(&version_buf);
     }
 }
@@ -303,7 +303,7 @@ fn parsePreferredAddress(value: []const u8, allocator: std.mem.Allocator) !Prefe
 fn parseVersionInformation(value: []const u8, allocator: std.mem.Allocator) !VersionInformation {
     if (value.len < 4 or value.len % 4 != 0) return error.InvalidParameterLength;
 
-    const chosen_version: packet.Version = @enumFromInt(std.mem.readInt(u32, value[0..4], .big));
+    const chosen_version: packet.Version = @fromBackingInt(@intCast(std.mem.readInt(u32, value[0..4], .big)));
     try validateChosenVersion(chosen_version);
 
     const available_count = value.len / 4 - 1;
@@ -312,7 +312,7 @@ fn parseVersionInformation(value: []const u8, allocator: std.mem.Allocator) !Ver
 
     var offset: usize = 4;
     for (available_versions) |*available| {
-        available.* = @enumFromInt(std.mem.readInt(u32, value[offset..][0..4], .big));
+        available.* = @fromBackingInt(@intCast(std.mem.readInt(u32, value[offset..][0..4], .big)));
         try validateVersion(available.*);
         offset += 4;
     }
@@ -411,7 +411,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !TransportParameter
         try rememberParameterId(&seen, id_raw, allocator);
         const value = try readValueSlice(&reader_fbs, value_len);
 
-        const id: ParameterId = @enumFromInt(id_raw);
+        const id: ParameterId = @fromBackingInt(@intCast(id_raw));
         switch (id) {
             .original_destination_connection_id => {
                 try validateConnectionIdLen(value);
@@ -480,8 +480,8 @@ test "reserved transport parameter identifiers follow RFC 9000 greasing pattern"
     try std.testing.expect(isReservedParameterId(27));
     try std.testing.expect(isReservedParameterId(58));
     try std.testing.expect(isReservedParameterId(89));
-    try std.testing.expect(!isReservedParameterId(@intFromEnum(ParameterId.preferred_address)));
-    try std.testing.expect(!isReservedParameterId(@intFromEnum(ParameterId.version_information)));
+    try std.testing.expect(!isReservedParameterId(@backingInt(ParameterId.preferred_address)));
+    try std.testing.expect(!isReservedParameterId(@backingInt(ParameterId.version_information)));
     try std.testing.expect(!isReservedParameterId(0));
 }
 
@@ -593,7 +593,7 @@ test "transport parameters reject malformed version information" {
 
     const reserved_chosen = TransportParameters{
         .version_information = .{
-            .chosen_version = @enumFromInt(0x0a0a0a0a),
+            .chosen_version = @fromBackingInt(@intCast(0x0a0a0a0a)),
             .available_versions = &[_]packet.Version{.v1},
         },
     };
@@ -603,7 +603,7 @@ test "transport parameters reject malformed version information" {
     const reserved_available = TransportParameters{
         .version_information = .{
             .chosen_version = .v1,
-            .available_versions = &[_]packet.Version{@enumFromInt(0x0a0a0a0a)},
+            .available_versions = &[_]packet.Version{@fromBackingInt(@intCast(0x0a0a0a0a))},
         },
     };
     writer = buffer.fixedWriter(&raw);
@@ -611,7 +611,7 @@ test "transport parameters reject malformed version information" {
     var parsed_reserved_available = try parse(writer.getWritten(), std.testing.allocator);
     defer parsed_reserved_available.deinit(std.testing.allocator);
     try std.testing.expectEqual(packet.Version.v1, parsed_reserved_available.version_information.?.chosen_version);
-    try std.testing.expect(parsed_reserved_available.version_information.?.containsAvailableVersion(@enumFromInt(0x0a0a0a0a)));
+    try std.testing.expect(parsed_reserved_available.version_information.?.containsAvailableVersion(@fromBackingInt(@intCast(0x0a0a0a0a))));
 
     const too_long = [_]packet.Version{ .v1, .v2 };
     writer = buffer.fixedWriter(raw[0..9]);

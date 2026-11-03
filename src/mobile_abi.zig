@@ -70,7 +70,7 @@ pub const PunchOutcome = enum(u32) {
 /// Per-call, address-free proof diagnostics. No identity or packet contents.
 pub const PunchDiagnostics = extern struct {
     duration_ms: u64 = 0,
-    outcome: u32 = @intFromEnum(PunchOutcome.not_started),
+    outcome: u32 = @backingInt(PunchOutcome.not_started),
     probes_sent: u32 = 0,
     acks_sent: u32 = 0,
     datagrams_received: u32 = 0,
@@ -343,7 +343,7 @@ pub fn capabilityMask() u64 {
 }
 
 fn bit(capability: Capability) u64 {
-    return @as(u64, 1) << @intFromEnum(capability);
+    return @as(u64, 1) << @backingInt(capability);
 }
 
 pub export fn quicz_mobile_abi_version() callconv(.c) u32 {
@@ -593,7 +593,7 @@ fn punchForTuple(comptime Path: type, handle: ?*anyopaque, config: ?*const Punch
         const elapsed = started.durationTo(std.Io.Timestamp.now(client.client.io, .awake)).toMilliseconds();
         output.* = .{
             .duration_ms = @intCast(@max(0, elapsed)),
-            .outcome = @intFromEnum(outcome),
+            .outcome = @backingInt(outcome),
             .probes_sent = counters.probe_sends,
             .acks_sent = counters.acknowledgement_sends,
             .datagrams_received = counters.datagrams_received,
@@ -743,7 +743,7 @@ fn optionalBytes(pointer: ?[*]const u8, length: usize) ?[]const u8 {
 }
 
 fn code(result: Result) i32 {
-    return @intFromEnum(result);
+    return @backingInt(result);
 }
 
 test "mobile ABI reports only implemented transport capabilities" {
@@ -978,7 +978,7 @@ test "mobile punch diagnostics retain silent peer counters on failure" {
     try std.testing.expectEqual(code(.punch_failed), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, &diagnostics));
     try std.testing.expectEqual(@as(u32, 1), diagnostics.probes_sent);
     try std.testing.expectEqual(@as(u32, 0), diagnostics.datagrams_received);
-    try std.testing.expectEqual(@intFromEnum(PunchOutcome.retry_exhausted), diagnostics.outcome);
+    try std.testing.expectEqual(@backingInt(PunchOutcome.retry_exhausted), diagnostics.outcome);
     try std.testing.expectEqual(@as(u8, 0), diagnostics.peer_probe);
     try std.testing.expectEqual(@as(u8, 0), diagnostics.local_ack);
     try std.testing.expect(diagnostics.duration_ms >= 10);
@@ -1054,7 +1054,7 @@ test "mobile punch diagnostics report verified bidirectional proof" {
     var diagnostics: PunchDiagnostics = undefined;
     try std.testing.expectEqual(code(.ok), quicz_mobile_client_punch_ipv4_with_diagnostics(client, &punch, &diagnostics));
     try serving.await(std.testing.io);
-    try std.testing.expectEqual(@intFromEnum(PunchOutcome.validated), diagnostics.outcome);
+    try std.testing.expectEqual(@backingInt(PunchOutcome.validated), diagnostics.outcome);
     try std.testing.expect(diagnostics.probes_sent >= 1);
     try std.testing.expect(diagnostics.acks_sent >= 1);
     try std.testing.expect(diagnostics.datagrams_received >= 2);
@@ -1155,9 +1155,9 @@ test "mobile IPv6 ABI retains its bound endpoint and rejects IPv4 operations" {
     try std.testing.expectEqual(code(.invalid_argument), quicz_mobile_client_bound_ipv4(handle, &old_bound));
     const old_punch: PunchConfig = .{
         .remote = .{ .address = .{ 127, 0, 0, 1 }, .port = 4433 },
-        .key = .{0x41} ** 32,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0x21} ** 16,
+        .key = @splat(0x41),
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x21),
         .initial_retry_ms = 1,
         .maximum_retry_ms = 1,
         .max_attempts = 1,
@@ -1173,9 +1173,9 @@ test "mobile IPv6 ABI retains its bound endpoint and rejects IPv4 operations" {
 fn testPunch6Config(remote: Ipv6Endpoint) Punch6Config {
     return .{
         .remote = remote,
-        .key = .{0x41} ** 32,
-        .attempt_id = .{0x11} ** 16,
-        .nonce = .{0x21} ** 16,
+        .key = @splat(0x41),
+        .attempt_id = @splat(0x11),
+        .nonce = @splat(0x21),
         .initial_retry_ms = 1,
         .maximum_retry_ms = 1,
         .max_attempts = 1,
@@ -1190,7 +1190,7 @@ test "mobile IPv6 configuration rejects unsupported endpoints and clears output"
     var handle: ?*anyopaque = null;
     try std.testing.expectEqual(code(.ok), quicz_mobile_client_create_ipv6(&valid, &handle));
     defer quicz_mobile_client_destroy(handle);
-    var invalid = [_]Client6Config{valid} ** 10;
+    var invalid = @as([10]Client6Config, @splat(valid));
     invalid[0].local.reserved = 1;
     invalid[1].remote.reserved = 1;
     invalid[2].local.scope_id = 1;
@@ -1490,7 +1490,7 @@ fn maskedCallerNaturalRetry(comptime ipv6: bool) !void {
     try std.testing.expectEqual(@as(usize, 5), observer.received);
     try std.testing.expectEqual(@as(?anyerror, null), observer.failure);
     try std.testing.expectEqual(code(.punch_failed), result);
-    try std.testing.expectEqual(@intFromEnum(PunchOutcome.retry_exhausted), diagnostics.outcome);
+    try std.testing.expectEqual(@backingInt(PunchOutcome.retry_exhausted), diagnostics.outcome);
     try std.testing.expectEqual(@as(u32, 5), diagnostics.probes_sent);
     try std.testing.expectEqual(@as(u32, 0), diagnostics.datagrams_received);
     try std.testing.expect(elapsed >= 2_500 and elapsed < 3_500);

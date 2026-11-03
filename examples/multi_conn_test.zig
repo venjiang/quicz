@@ -58,7 +58,7 @@ fn runAbruptSession(allocator: std.mem.Allocator, io: std.Io) !void {
     @memset(&payload, 'Y');
     _ = try client.send(&payload, false);
     client.close();
-    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+    try client.waitClosed(10_000);
     std.debug.print("[client abrupt] closed connection without FIN\n", .{});
 }
 
@@ -101,9 +101,7 @@ fn runClientSession(allocator: std.mem.Allocator, io: std.Io, ci: usize) !void {
         if (total != payload.len) return error.EchoMismatch;
     }
     client.close();
-    // Stay alive briefly so a lost close frame can be retransmitted by PTO
-    // before the client endpoint is destroyed.
-    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+    try client.waitClosed(10_000);
 }
 
 pub fn main() !void {

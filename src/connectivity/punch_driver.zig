@@ -145,8 +145,8 @@ test "runtime handoff returns promptly after mutual validation" {
     defer first_socket.close(io);
     const second_socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer second_socket.close(io);
-    var first_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{});
-    var second_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xb2} ** 16, .{});
+    var first_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{});
+    var second_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xb2), .{});
     var first = TestRun{ .io = io, .socket = first_socket, .remote = second_socket.address, .attempt = &first_attempt };
     var second = TestRun{ .io = io, .socket = second_socket, .remote = first_socket.address, .attempt = &second_attempt };
     const started = std.Io.Timestamp.now(io, .awake);
@@ -213,24 +213,25 @@ test "validated driver acknowledges a retransmit after its first ACK is lost" {
     const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(io);
     const config = punch_attempt.Config{ .initial_retry_ms = 30, .maximum_retry_ms = 60 };
-    var attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, config);
-    var peer_attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xb2} ** 16, config);
+    var attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), config);
+    var peer_attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xb2), config);
+    const probe = attempt.nextProbe(0).?;
+    const local_ack = (try peer_attempt.receive(&probe)).acknowledgement.?;
+    const peer_probe = peer_attempt.nextProbe(0).?;
+    const lost_ack = (try attempt.receive(&peer_probe)).acknowledgement.?;
+    try std.testing.expectEqual(wire.Kind.acknowledgement, (try wire.decode(attempt.key, &lost_ack)).kind);
+    _ = try attempt.receive(&local_ack);
+    try std.testing.expectEqual(punch_attempt.State.validated, attempt.state);
+    try std.testing.expectEqual(punch_attempt.State.probing, peer_attempt.state);
     var task = TestRun{ .io = io, .socket = local, .remote = peer.address, .attempt = &attempt };
     var pending: std.Io.Group = .init;
     defer pending.cancel(io);
     try pending.concurrent(io, TestRun.start, .{&task});
     var buffer: [256]u8 = undefined;
     const timeout = std.Io.Timeout{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(300) } };
-    const probe = try peer.receiveTimeout(io, &buffer, timeout);
-    const local_ack = (try peer_attempt.receive(probe.data)).acknowledgement.?;
-    const peer_probe = peer_attempt.nextProbe(0).?;
-    try peer.send(io, &local.address, &peer_probe);
-    const lost_ack = try peer.receiveTimeout(io, &buffer, timeout);
-    try std.testing.expectEqual(wire.Kind.acknowledgement, (try wire.decode(attempt.key, lost_ack.data)).kind);
-    // Drop this ACK, then validate the local side only.
-    try peer.send(io, &local.address, &local_ack);
-    try io.sleep(.fromMilliseconds(30), .awake);
-    try peer.send(io, &local.address, &peer_attempt.nextProbe(30).?);
+    // Start in the validated finishing phase without racing a short sleep against its deadline.
+    const retry_probe = peer_attempt.nextProbe(30).?;
+    try peer.send(io, &local.address, &retry_probe);
     const retry_ack = try peer.receiveTimeout(io, &buffer, timeout);
     _ = try peer_attempt.receive(retry_ack.data);
     try std.testing.expectEqual(punch_attempt.State.validated, peer_attempt.state);
@@ -257,7 +258,7 @@ test "driver propagates cancellation without waiting for probe retry" {
     defer local.close(io);
     const peer = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer peer.close(io);
-    var attempt = try punch_attempt.PunchAttempt.init(.{0x42} ** 32, .{0x11} ** 16, .{0xa1} ** 16, .{
+    var attempt = try punch_attempt.PunchAttempt.init(@splat(0x42), @splat(0x11), @splat(0xa1), .{
         .initial_retry_ms = 500,
         .maximum_retry_ms = 500,
         .max_attempts = 1,

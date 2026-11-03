@@ -24,7 +24,7 @@ pub const ClientKex = struct {
     /// Generate from deterministic seeds (for testing).
     pub fn generateDeterministic(x25519_seed: [32]u8, kyber_seed: [Kyber768.seed_length]u8) !ClientKex {
         return .{
-            .x25519_keypair = try X25519.KeyPair.generateDeterministic(x25519_seed),
+            .x25519_keypair = X25519.KeyPair.generateDeterministic(x25519_seed),
             .kyber_keypair = try Kyber768.KeyPair.generateDeterministic(kyber_seed),
         };
     }
@@ -76,7 +76,7 @@ pub fn serverRespondDeterministic(
     const client_kyber_pk = Kyber768.PublicKey.fromBytes(&kyber_pk_bytes) catch
         return error.InvalidShare;
 
-    const server_x25519 = try X25519.KeyPair.generateDeterministic(x25519_seed);
+    const server_x25519 = X25519.KeyPair.generateDeterministic(x25519_seed);
     const x25519_shared = X25519.scalarmult(
         server_x25519.secret_key,
         client_x25519_pk,
@@ -138,9 +138,9 @@ test "X25519Kyber768 key lengths" {
 }
 
 test "X25519Kyber768 invalid share rejected" {
-    const short_share = [_]u8{0} ** 10;
+    const short_share = @as([10]u8, @splat(0));
     try std.testing.expectError(
         error.InvalidShare,
-        serverRespondDeterministic(&short_share, [_]u8{1} ** 32, [_]u8{2} ** Kyber768.encaps_seed_length, std.testing.allocator),
+        serverRespondDeterministic(&short_share, @as([32]u8, @splat(1)), @as([Kyber768.encaps_seed_length]u8, @splat(2)), std.testing.allocator),
     );
 }

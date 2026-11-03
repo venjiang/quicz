@@ -387,7 +387,7 @@ pub fn main(init: std.process.Init) !void {
     const migrated_server_path = try udp4Tuple(server_socket.address, migrated_client_socket.address);
 
     // ─── crypto material + Initial secrets ───
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -395,7 +395,7 @@ pub fn main(init: std.process.Init) !void {
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
     // ─── Connection + Tls13Backend（client + server） ───
-    // initial_rtt_ns=100 使 PTO deadline 可预测（约 300ms），事件循环能快速推进触发。
+    // 100 ms 的初始 RTT 使握手 PTO 约为 300 ms，事件循环按 deadline 推进。
     const initial_max_streams_bidi: u64 = if (testcase == .stream_limit) 1 else 8;
     var client = try Connection.init(allocator, .client, .{
         .initial_max_data = 8192,
@@ -520,6 +520,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (testcase == .congestion) {
         // Keep the controlled loss exchange separate from handshake traffic.
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
         now += 1;
         const initial_cwnd = client.congestionWindow(.application);
         try require(initial_cwnd > 0);
@@ -584,16 +585,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (testcase == .persistent) {
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
         // Establish an RTT sample before candidate-loss packets. RFC 9002 only
         // considers packets sent after this sample for persistent congestion.
-        now += 10;
+        now += 10 * std.time.ns_per_ms;
+        const rtt_ping_number = client.nextPacketNumber(.application);
         try client.sendPing();
         try require(try pollOneRttAndSend(&client_ep, io, now));
         const rtt_ping = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
         processRecv(&server_ep, rtt_ping.data, now);
-        try require(server.pendingAckLargest(.application) == 0);
+        try require(server.pendingAckLargest(.application) == rtt_ping_number);
 
-        now += 100;
+        now += 100 * std.time.ns_per_ms;
         try driveAndPoll(&server_ep, io, now, secrets, &scratch);
         var rtt_ack_packets: usize = 0;
         while (rtt_ack_packets < 4 and client.sentPacketCount(.application) != 0) : (rtt_ack_packets += 1) {
@@ -611,7 +614,8 @@ pub fn main(init: std.process.Init) !void {
 
         const first_lost_packet_number = client.nextPacketNumber(.application);
         const persistent_duration = client.recovery_state.persistentCongestionDuration();
-        const send_times = [_]i64{ now + 10, now + 1000, now + 1100, now + 1200 };
+        const ms = std.time.ns_per_ms;
+        const send_times = [_]i64{ now + 10 * ms, now + 1000 * ms, now + 1100 * ms, now + 1200 * ms };
         const initial_cwnd = client.congestionWindow(.application);
         client_ep.drop_ack_eliciting_one_rtt_datagrams = 3;
         for (send_times) |send_time| {
@@ -625,7 +629,7 @@ pub fn main(init: std.process.Init) !void {
         try require(server.pendingAckLargest(.application) == first_lost_packet_number + 3);
         try require(server.nextPeerPacketNumber(.application) == first_lost_packet_number + 4);
 
-        now = send_times[3] + 100;
+        now = send_times[3] + 100 * ms;
         try driveAndPoll(&server_ep, io, now, secrets, &scratch);
         var persistent_ack_packets: usize = 0;
         while (persistent_ack_packets < 4 and client.sentPacketCount(.application) != 0) : (persistent_ack_packets += 1) {
@@ -645,7 +649,7 @@ pub fn main(init: std.process.Init) !void {
         try require(client.bytesInFlight(.application) == 0);
         try require(client.congestionWindow(.application) == minimum_cwnd);
         try require(client.congestionWindow(.application) < initial_cwnd);
-        std.debug.print("persistent_congestion=true first_lost_packet={d} duration_ms={d} rtt_ack_packets={d} persistent_ack_packets={d} cwnd_before={d} cwnd_after={d}\n", .{
+        std.debug.print("persistent_congestion=true first_lost_packet={d} duration_ns={d} rtt_ack_packets={d} persistent_ack_packets={d} cwnd_before={d} cwnd_after={d}\n", .{
             first_lost_packet_number,
             persistent_duration,
             rtt_ack_packets,

@@ -282,7 +282,8 @@ pub const Tls13Backend = struct {
 
     fn handshakeConfirmed(context: *anyopaque) bool {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
-        return self.hs.isComplete();
+        // A client still needs QUIC HANDSHAKE_DONE after TLS completes.
+        return self.hs.is_server and self.hs.isComplete();
     }
 
     fn setEarlyDataAccepted(context: *anyopaque, accepted: bool) Error!void {
@@ -511,7 +512,7 @@ test "Tls13Backend resumptionPsk returns stored PSK" {
         .server_name = "example.com",
     });
     try std.testing.expect(backend.resumptionPsk() == null);
-    backend.hs.resumption_psk = [_]u8{0x01} ** tls13.secret_len;
+    backend.hs.resumption_psk = @as([tls13.secret_len]u8, @splat(0x01));
     const psk = backend.resumptionPsk().?;
     try std.testing.expectEqual(@as(usize, tls13.secret_len), psk.len);
     try std.testing.expectEqual(@as(u8, 0x01), psk[0]);
@@ -520,7 +521,7 @@ test "Tls13Backend resumptionPsk returns stored PSK" {
 test "Tls13Backend setServerPskIdentity configures underlying TLS handshake" {
     var backend = Tls13Backend.initServerWithPsk(.{
         .alpn = &.{},
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     try backend.setServerPskIdentity(&ticket);
     try std.testing.expectEqual(ticket.len, backend.hs.server_psk_identity_len);
@@ -536,8 +537,8 @@ test "Tls13Backend setServerPskIdentity configures underlying TLS handshake" {
 test "Tls13Backend writeKeylog waits for ClientHello random" {
     var backend = Tls13Backend.initClient(.{});
     backend.hs.key_schedule.handshake_secret_derived = true;
-    backend.hs.key_schedule.server_handshake_traffic_secret = [_]u8{0x11} ** tls13.secret_len;
-    backend.hs.key_schedule.client_handshake_traffic_secret = [_]u8{0x22} ** tls13.secret_len;
+    backend.hs.key_schedule.server_handshake_traffic_secret = @as([tls13.secret_len]u8, @splat(0x11));
+    backend.hs.key_schedule.client_handshake_traffic_secret = @as([tls13.secret_len]u8, @splat(0x22));
 
     var keylog = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer keylog.deinit();
@@ -545,7 +546,7 @@ test "Tls13Backend writeKeylog waits for ClientHello random" {
     try backend.writeKeylog(&keylog.writer);
     try testing.expectEqual(@as(usize, 0), keylog.written().len);
 
-    backend.hs.client_random = [_]u8{0x33} ** 32;
+    backend.hs.client_random = @as([32]u8, @splat(0x33));
     backend.hs.client_random_available = true;
     try backend.writeKeylog(&keylog.writer);
     try testing.expect(std.mem.indexOf(u8, keylog.written(), "SERVER_HANDSHAKE_TRAFFIC_SECRET") != null);
@@ -556,7 +557,7 @@ test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello
     var backend = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(backend.hs.session_ticket[0..ticket.len], &ticket);
     backend.hs.session_ticket_len = ticket.len;
@@ -578,7 +579,7 @@ test "Tls13Backend pullEarlyTrafficSecret requires ticket early_data permission"
     var no_ticket = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     var no_ticket_cb = no_ticket.cryptoBackend();
     var no_ticket_out: [4096]u8 = undefined;
     _ = try no_ticket_cb.pull(no_ticket_cb.context, .initial, &no_ticket_out);
@@ -587,7 +588,7 @@ test "Tls13Backend pullEarlyTrafficSecret requires ticket early_data permission"
     var disallowed = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(disallowed.hs.session_ticket[0..ticket.len], &ticket);
     disallowed.hs.session_ticket_len = ticket.len;
@@ -601,7 +602,7 @@ test "Tls13Backend zero rtt hook does not build ClientHello without early data t
     var no_ticket = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     var no_ticket_cb = no_ticket.cryptoBackend();
     try std.testing.expect(try no_ticket_cb.pullZeroRttTrafficSecrets() == null);
     try std.testing.expect(!no_ticket.client_hello_built);
@@ -615,7 +616,7 @@ test "Tls13Backend zero rtt hook does not build ClientHello without early data t
     var disallowed = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(disallowed.hs.session_ticket[0..ticket.len], &ticket);
     disallowed.hs.session_ticket_len = ticket.len;
@@ -634,7 +635,7 @@ test "Tls13Backend zero rtt hook builds ClientHello only with early data ticket"
     var backend = Tls13Backend.initClientWithPsk(.{
         .alpn = &.{},
         .server_name = "example.com",
-    }, [_]u8{0xab} ** tls13.secret_len);
+    }, @as([tls13.secret_len]u8, @splat(0xab)));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(backend.hs.session_ticket[0..ticket.len], &ticket);
     backend.hs.session_ticket_len = ticket.len;
@@ -681,7 +682,7 @@ test "Tls13Backend rejects ServerHello outside Initial space without buffering i
 
     var server_secret: [32]u8 = undefined;
     tls13.secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
     var server_hello_buf: [128]u8 = undefined;
     const server_hello_len = tls13.buildServerHello(
         &server_hello_buf,
@@ -713,7 +714,7 @@ test "Tls13Backend pumps local send state before rejecting early peer input spac
 
     var server_secret: [32]u8 = undefined;
     tls13.secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
     var server_hello_buf: [128]u8 = undefined;
     const server_hello_len = tls13.buildServerHello(
         &server_hello_buf,
@@ -762,7 +763,7 @@ test "Tls13Backend server emits NewSessionTicket only from Application pull" {
     var server = Tls13Backend.initServer(.{
         .alpn = &.{},
     });
-    const shared_secret = [_]u8{0x01} ** 32;
+    const shared_secret = @as([32]u8, @splat(0x01));
     server.hs.key_schedule.deriveHandshakeSecrets(&shared_secret, server.hs.transcript.current());
     server.hs.key_schedule.deriveAppSecrets(server.hs.transcript.current());
     server.hs.state = .connected;
@@ -811,7 +812,7 @@ test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
     // Server X25519 key pair + shared secret (replicated to predict secrets).
     var server_secret: [32]u8 = undefined;
     tls13.secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
     const shared = try X25519.scalarmult(backend.hs.x25519_secret, server_public);
 
     var th = tls13.TranscriptHash.init();
@@ -845,7 +846,7 @@ test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
 
     // CertificateVerify uses a dummy signature; verification is skipped by
     // default (skip_cert_verify = true), so the signature need not be real.
-    const sig_bytes = [_]u8{0x42} ** 64;
+    const sig_bytes = @as([64]u8, @splat(0x42));
     var cv_buf: [256]u8 = undefined;
     const cv_len = tls13.buildCertificateVerify(&cv_buf, 0x0807, &sig_bytes);
     const cv = cv_buf[0..cv_len];
@@ -892,8 +893,9 @@ test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
     const alpn_result = (try cb.pullNegotiatedAlpn(&scratch)) orelse return error.TestExpectedAlpn;
     try testing.expectEqualStrings(alpn_proto, alpn_result);
 
-    // Handshake is complete.
-    try testing.expect(cb.isHandshakeConfirmed());
+    // TLS completion cannot confirm delivery of the client Finished to the server.
+    try testing.expect(backend.hs.isComplete());
+    try testing.expect(!cb.isHandshakeConfirmed());
 
     // No more outbound data in any space.
     try testing.expect((try cb.pull(cb.context, .initial, &scratch)) == null);
@@ -920,7 +922,7 @@ test "Tls13Backend client with certificate verification withholds unauthenticate
 
     var server_secret: [32]u8 = undefined;
     tls13.secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
 
     var sh_buf: [128]u8 = undefined;
     const sh_len = tls13.buildServerHello(&sh_buf, server_public, 0x1301, true, true);
@@ -972,7 +974,7 @@ test "Tls13Backend set_local_transport_parameters is ignored after ClientHello i
 }
 
 test "Tls13Backend set_local_transport_parameters is ignored after server EncryptedExtensions" {
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
 
     var client = Tls13Backend.initClientWithPsk(.{
@@ -1039,7 +1041,7 @@ test "Tls13Backend receive maps invalid ServerHello X25519 key share to CryptoEr
     try testing.expect(client_hello.len > 0);
 
     var sh_buf: [128]u8 = undefined;
-    const sh_len = tls13.buildServerHello(&sh_buf, [_]u8{0} ** 32, 0x1301, true, true);
+    const sh_len = tls13.buildServerHello(&sh_buf, @as([32]u8, @splat(0)), 0x1301, true, true);
     try testing.expectError(error.CryptoError, cb.receive(cb.context, .initial, sh_buf[0..sh_len]));
     try testing.expectEqual(@as(usize, 1), backend.drive_errors);
     try testing.expect((try cb.pullHandshakeTrafficSecrets()) == null);
@@ -1138,7 +1140,7 @@ test "Tls13Backend.retryReceived re-emits cached ClientHello" {
 }
 
 test "Tls13Backend server does not cache ServerHello for Retry replay" {
-    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const psk = @as([tls13.secret_len]u8, @splat(0xab));
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
 
     var client = Tls13Backend.initClientWithPsk(.{

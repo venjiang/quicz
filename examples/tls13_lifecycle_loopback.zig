@@ -54,7 +54,7 @@ pub fn main() !void {
     try server_lifecycle.registerConnectionId(server_handle, &original_dcid, server_path, .{ .active_migration_disabled = true });
     try server_lifecycle.registerConnectionId(server_handle, &server_scid, server_path, .{ .active_migration_disabled = true });
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
@@ -299,7 +299,7 @@ pub fn main() !void {
     // Client initiates protected close via lifecycle.
     // M5: server issues a new connection ID (NEW_CONNECTION_ID frame over 1-RTT).
     const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
-    const srt = [_]u8{0xEE} ** 16;
+    const srt = @as([16]u8, @splat(0xEE));
     _ = try server.issueConnectionId(&new_cid, srt, 0);
     const cid_dgram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,

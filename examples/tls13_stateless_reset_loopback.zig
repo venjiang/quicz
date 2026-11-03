@@ -31,7 +31,7 @@ const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 // 注册到 router 的 stateless_reset_token 表。此处显式注册到 lifecycle 以
 // 模拟该绑定（与 udp_stateless_reset_loopback.zig 一致）。
 const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
-const srt = [_]u8{0xEE} ** 16;
+const srt = @as([16]u8, @splat(0xEE));
 const server_handle: u64 = 2;
 
 fn require(condition: bool) !void {
@@ -84,7 +84,7 @@ pub fn main() !void {
 
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
 
-    const seed = [_]u8{0x55} ** 32;
+    const seed = @as([32]u8, @splat(0x55));
     const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
     const server_priv = server_kp.secret_key.bytes;
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };

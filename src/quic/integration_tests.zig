@@ -74,7 +74,7 @@ test "integration: session cache with PSK derivation" {
     const nonce = try std.testing.allocator.dupe(u8, "ticket-nonce-1");
     try cache.store(.{
         .server_id = server_id,
-        .psk = [_]u8{0xab} ** 32,
+        .psk = @as([32]u8, @splat(0xab)),
         .lifetime_sec = 7200,
         .age_add = 999,
         .nonce = nonce,
@@ -86,7 +86,7 @@ test "integration: session cache with PSK derivation" {
     const ticket = cache.retrieve("quic.example.com:443", 1000).?;
     try std.testing.expect(ticket.allows_early_data);
 
-    const resumption_secret = [_]u8{0x01} ** 32;
+    const resumption_secret = @as([32]u8, @splat(0x01));
     const psk = tls13.KeySchedule.derivePskFromTicket(resumption_secret, ticket.nonce);
     try std.testing.expect(!std.mem.allEqual(u8, &psk, 0));
 }
@@ -132,7 +132,7 @@ test "integration: H3 connection with QPACK headers" {
     var frame_buf: [512]u8 = undefined;
     var out = buffer.fixedWriter(&frame_buf);
     try h3_frame.encodeFrame(out.writer(), .{
-        .frame_type = @intFromEnum(h3_frame.FrameType.headers),
+        .frame_type = @backingInt(h3_frame.FrameType.headers),
         .payload = header_buf[0..header_len],
     });
     try std.testing.expect(out.getWritten().len > header_len);
