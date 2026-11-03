@@ -58,6 +58,11 @@ quicz.fuzz_targets / quicz.stress_test               // harness material
 | `prefer_chacha20` | `bool` | `false` | Prefer ChaCha20-Poly1305 |
 | `bind_addr` | `?[4]u8` | `null` | IPv4 to bind; null = `127.0.0.1`, `.{0,0,0,0}` = all |
 
+`Server` owns the certificate-chain slice headers used by its TLS transports.
+It borrows the certificate DER bytes and private-key bytes.
+Keep those bytes valid until `Server.deinit()` completes.
+Keep the Server at a stable address while it runs.
+
 Fixed transport params: `initial_max_data`/`stream_data` = 10 MiB,
 bidi/uni streams = 128, `max_datagram_size` = 8192, idle timeout = 30 s.
 

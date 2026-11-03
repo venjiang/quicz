@@ -1387,6 +1387,8 @@ pub fn ServerForTuple(comptime Path: type) type {
         next_handle: u64 = 1,
         alpn: []const []const u8,
         cert_der: []const u8,
+        /// TLS transports borrow these headers through connection teardown.
+        cert_chain_storage: [1][]const u8,
         private_key: []const u8,
         private_key_algorithm: quicz.tls13.PrivateKeyAlgorithm,
         prefer_chacha20: bool = false,
@@ -1483,6 +1485,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                 .server_ep = server_ep,
                 .alpn = config.alpn,
                 .cert_der = config.cert_der,
+                .cert_chain_storage = .{config.cert_der},
                 .private_key = config.private_key,
                 .private_key_algorithm = config.private_key_algorithm,
                 .prefer_chacha20 = config.prefer_chacha20,
@@ -2028,7 +2031,6 @@ pub fn ServerForTuple(comptime Path: type) type {
                         log.err("drive: allocate ServerRecord: {}", .{e});
                         return;
                     };
-                    const cert_chain = [_][]const u8{self.cert_der};
                     record.* = .{
                         .handle = handle,
                         .admission = self.connection_admission,
@@ -2042,7 +2044,7 @@ pub fn ServerForTuple(comptime Path: type) type {
                             .max_idle_timeout_ms = self.max_idle_timeout_ms,
                         }, .{
                             .alpn = self.alpn,
-                            .cert_chain_der = &cert_chain,
+                            .cert_chain_der = &self.cert_chain_storage,
                             .private_key_bytes = self.private_key,
                             .private_key_algorithm = self.private_key_algorithm,
                             .prefer_chacha20 = self.prefer_chacha20,
