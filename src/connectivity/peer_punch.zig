@@ -281,6 +281,55 @@ test "peer learning cannot combine sources or reuse the original challenge" {
     try std.testing.expect(check.attempt.diagnostics.probe_sends <= 6);
 }
 
+// Keep deadline assertions independent of wall-clock scheduling while all
+// authenticated probe/challenge bytes still travel over real loopback sockets.
+const DeadlineTestIo = struct {
+    base: std.Io,
+    host: std.Io.net.Socket,
+    learned: std.Io.net.Socket,
+    logical_ns: i96 = 0,
+    packet_queued: bool = false,
+    packet_received: bool = false,
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        std.debug.assert(clock == .awake);
+        return .{ .nanoseconds = self.logical_ns };
+    }
+
+    fn randomSecure(userdata: ?*anyopaque, output: []u8) std.Io.RandomSecureError!void {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        return self.base.vtable.randomSecure(self.base.userdata, output);
+    }
+
+    fn send(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        const result = self.base.vtable.netSend(self.base.userdata, handle, messages, flags);
+        if (!self.packet_queued and result[0] == null and result[1] > 0) {
+            const probe = wire.encode(@splat(0x42), .{ .kind = .probe, .attempt_id = @splat(0x11), .nonce = @splat(0xb2) });
+            self.learned.send(self.base, &self.host.address, &probe) catch |err| return .{ err, result[1] };
+            self.packet_queued = true;
+        }
+        return result;
+    }
+
+    fn receive(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        std.debug.assert(timeout == .deadline and timeout.deadline.clock == .awake);
+        const deadline_ns = timeout.deadline.raw.nanoseconds;
+        const delivery_ns = 250 * std.time.ns_per_ms;
+        if (!self.packet_received and delivery_ns < deadline_ns) {
+            self.packet_received = true;
+            self.logical_ns = delivery_ns;
+            return self.base.vtable.batchAwaitConcurrent(self.base.userdata, batch, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+        }
+        std.debug.assert(deadline_ns >= self.logical_ns);
+        self.logical_ns = deadline_ns;
+        batch.cancel(self.base);
+        return error.Timeout;
+    }
+};
+
 test "peer learning has an absolute deadline and propagates cancellation" {
     for ([_]bool{ false, true }) |cancel| {
         var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -299,25 +348,43 @@ test "peer learning has an absolute deadline and propagates cancellation" {
             .max_attempts = 1,
         }), .learn = true };
         const started = std.Io.Timestamp.now(io, .awake);
-        var task = try io.concurrent(TestCheck.run, .{&check});
-        defer task.cancel(io);
         var buffer: [256]u8 = undefined;
-        _ = try advertised.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
         if (cancel) {
+            var task = try io.concurrent(TestCheck.run, .{&check});
+            defer task.cancel(io);
+            _ = try advertised.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
             task.cancel(io);
             try std.testing.expectEqual(@as(?anyerror, error.Canceled), check.failure);
             try host.send(io, &advertised.address, "borrowed-socket-open");
             const retained = try advertised.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
             try std.testing.expectEqualStrings("borrowed-socket-open", retained.data);
+            try std.testing.expect(started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 550);
         } else {
-            try std.Io.sleep(io, .fromMilliseconds(250), .awake);
-            const probe = wire.encode(@splat(0x42), .{ .kind = .probe, .attempt_id = @splat(0x11), .nonce = @splat(0xb2) });
-            try learned.send(io, &host.address, &probe);
-            task.await(io);
+            var clock = DeadlineTestIo{ .base = io, .host = host, .learned = learned };
+            var vtable = std.Io.failing.vtable.*;
+            vtable.now = DeadlineTestIo.now;
+            vtable.randomSecure = DeadlineTestIo.randomSecure;
+            vtable.netSend = DeadlineTestIo.send;
+            vtable.batchAwaitConcurrent = DeadlineTestIo.receive;
+            check.io = .{ .userdata = &clock, .vtable = &vtable };
+            check.run();
             try std.testing.expectEqual(@as(?anyerror, error.PunchFailed), check.failure);
+            try std.testing.expectEqual(@as(i96, 400 * std.time.ns_per_ms), clock.logical_ns);
+            try std.testing.expect(check.selected == null);
             try std.testing.expectEqual(@as(u32, 2), check.attempt.diagnostics.probe_sends);
+            var challenges: usize = 0;
+            for (0..2) |_| {
+                const received = try learned.receiveTimeout(io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
+                try std.testing.expect(sameIPv4(received.from, host.address));
+                const message = try wire.decode(@splat(0x42), received.data);
+                if (message.kind == .probe) {
+                    challenges += 1;
+                    try std.testing.expect(!std.mem.eql(u8, &message.nonce, &@as(wire.Nonce, @splat(0xa1))));
+                    try std.testing.expect(!std.mem.eql(u8, &message.nonce, &@as(wire.Nonce, @splat(0xb2))));
+                } else try std.testing.expectEqual(wire.Kind.acknowledgement, message.kind);
+            }
+            try std.testing.expectEqual(@as(usize, 1), challenges);
         }
-        try std.testing.expect(started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() < 550);
     }
 }
 
