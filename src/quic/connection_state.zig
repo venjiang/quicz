@@ -2,6 +2,7 @@ const std = @import("std");
 
 const frame = @import("frame.zig");
 const packet_context = @import("packet_context.zig");
+const endpoint = @import("endpoint.zig");
 
 const EcnCodepoint = packet_context.EcnCodepoint;
 
@@ -54,6 +55,12 @@ pub const PendingCloseFrame = union(enum) {
 
 /// Rollback snapshot for whether peer close diagnostics existed.
 pub const PeerCloseSnapshot = enum { absent, present };
+
+/// Queued PATH_RESPONSE payload and optional caller-supplied origin.
+pub const PendingPathResponse = struct {
+    data: [8]u8,
+    origin: ?endpoint.DatagramPath = null,
+};
 
 /// Pending PATH_CHALLENGE data awaiting transmission.
 pub const PendingPathChallenge = struct {

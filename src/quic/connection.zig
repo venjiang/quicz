@@ -172,6 +172,7 @@ const PendingMaxFrame = connection_state.PendingMaxFrame;
 const PendingCloseFrame = connection_state.PendingCloseFrame;
 const PeerCloseSnapshot = connection_state.PeerCloseSnapshot;
 const PendingPathChallenge = connection_state.PendingPathChallenge;
+const PendingPathResponse = connection_state.PendingPathResponse;
 const OutstandingPathChallenge = connection_state.OutstandingPathChallenge;
 const SentPacket = connection_state.SentPacket;
 const RttEstimateSnapshot = connection_state.RttEstimateSnapshot;
@@ -305,6 +306,7 @@ const BuiltProtectedShortPacket = struct {
     consume_ping: bool = false,
     consume_crypto: bool = false,
     consume_path_response: bool = false,
+    response_origin: ?endpoint.DatagramPath = null,
     consume_path_challenge: bool = false,
     consume_retire_connection_id: bool = false,
     new_connection_id_index: ?usize = null,
@@ -677,6 +679,14 @@ pub const ConnectionStats = struct {
 };
 
 pub const Connection = struct {
+    /// Protected bytes and the origin of a consumed PATH_RESPONSE, if any.
+    pub const PolledDatagram = struct {
+        /// Caller frees these bytes with the connection allocator.
+        datagram: []u8,
+        /// Metadata only. This does not choose the packet's UDP destination.
+        response_origin: ?endpoint.DatagramPath = null,
+    };
+
     allocator: std.mem.Allocator,
     config: Config,
     /// Optional qlog event writer. Non-null when QLOG_DIR is set.
@@ -703,7 +713,9 @@ pub const Connection = struct {
     next_peer_packet_number: u64,
     pending_ack_largest: ?u64,
     received_packet_ranges: ReceivedPacketRanges,
-    pending_path_responses: std.ArrayList([8]u8),
+    pending_path_responses: std.ArrayList(PendingPathResponse),
+    /// Origin annotation scoped by the source-aware protected receive wrapper.
+    datagram_origin: ?endpoint.DatagramPath = null,
     pending_path_challenges: std.ArrayList(PendingPathChallenge),
     outstanding_path_challenges: std.ArrayList(OutstandingPathChallenge),
     /// Exact-token observation owned by one synchronous protected receive call.
@@ -4270,6 +4282,24 @@ pub const Connection = struct {
         self.peer_one_rtt_key_phase_state = state;
     }
 
+    /// Process protected input with origin metadata for queued PATH_RESPONSE frames.
+    /// This uses the existing authentication and close-on-error behavior.
+    /// With an origin, equal tokens deduplicate only on an equal tuple.
+    /// Legacy receive still deduplicates by token alone. Origin metadata does
+    /// not validate an address or update a route.
+    pub fn processProtectedShortDatagramWithInstalledKeysFromPathOrClose(
+        self: *Connection,
+        now_nanos: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        origin: endpoint.DatagramPath,
+    ) Error!void {
+        const previous_origin = self.datagram_origin;
+        self.datagram_origin = origin;
+        defer self.datagram_origin = previous_origin;
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(now_nanos, dcid_len, datagram);
+    }
+
     /// Process installed-key input and report consumption of one exact response token.
     ///
     /// Authentication, deduplication, frame errors and key updates retain their
@@ -4350,12 +4380,24 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
     ) Error!?[]u8 {
+        const output = try self.pollProtectedShortDatagramWithKeyPhaseAndOrigin(now_nanos, dcid, keys, key_phase);
+        return if (output) |packet_output| packet_output.datagram else null;
+    }
+
+    fn pollProtectedShortDatagramWithKeyPhaseAndOrigin(
+        self: *Connection,
+        now_nanos: i64,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+    ) Error!?PolledDatagram {
         self.pacing_send_deadline = null;
         errdefer self.pacing_send_deadline = null;
         self.expireIdleState(now_nanos);
         self.expireCloseState(now_nanos);
         if (self.pending_close != null) {
-            return try self.pollProtectedShortCloseDatagram(now_nanos, dcid, keys, key_phase);
+            const close = try self.pollProtectedShortCloseDatagram(now_nanos, dcid, keys, key_phase);
+            return if (close) |bytes| .{ .datagram = bytes } else null;
         }
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
@@ -4416,7 +4458,7 @@ pub const Connection = struct {
         if (pacing_limited) {
             self.pacing_send_deadline = self.tx_pacer.nextSendTime(now_nanos, self.maxTxDatagramSize(), self.recovery_state.congestion_window, self.recovery_state.smoothed_rtt_ns);
         }
-        return built.datagram;
+        return .{ .datagram = built.datagram, .response_origin = built.response_origin };
     }
 
     /// Return a pacing wakeup recorded by protected polling. Merge this value
@@ -4464,6 +4506,21 @@ pub const Connection = struct {
             return error.InvalidPacket;
         };
         return self.pollProtectedShortDatagramWithKeyPhaseState(now_nanos, dcid, &state);
+    }
+
+    /// Poll protected bytes with optional PATH_RESPONSE origin metadata.
+    /// Ordinary and close output have no response origin. Packet selection,
+    /// ACK coalescing and send accounting match the existing byte-only poll.
+    pub fn pollProtectedShortDatagramWithInstalledKeysAndOrigin(
+        self: *Connection,
+        now_nanos: i64,
+        dcid: []const u8,
+    ) Error!?PolledDatagram {
+        const state = self.local_one_rtt_key_phase_state orelse {
+            self.pacing_send_deadline = null;
+            return error.InvalidPacket;
+        };
+        return self.pollProtectedShortDatagramWithKeyPhaseAndOrigin(now_nanos, dcid, state.currentKeys(), state.currentKeyPhase());
     }
 
     fn protectedPathValidationPlaintextLen(
@@ -5753,7 +5810,8 @@ pub const Connection = struct {
     ) Error!BuiltProtectedShortPacket {
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
-        const response_data = self.pending_path_responses.items[0];
+        const response = self.pending_path_responses.items[0];
+        const response_data = response.data;
         const response_encoded_len = pathResponseFrameWireLen();
         var encoded_frame_len = response_encoded_len;
         if (ack_to_send) |ack| {
@@ -5809,6 +5867,7 @@ pub const Connection = struct {
             .ack_eliciting = true,
             .clear_ack = ack_to_send != null,
             .consume_path_response = true,
+            .response_origin = response.origin,
         };
     }
 
@@ -9530,7 +9589,7 @@ pub const Connection = struct {
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 
-        const response_data = self.pending_path_responses.items[0];
+        const response_data = self.pending_path_responses.items[0].data;
         var out = buffer.fixedWriter(out_buf[0..encoded_len]);
         if (include_ack) {
             frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
@@ -10762,10 +10821,16 @@ pub const Connection = struct {
     }
 
     fn receivePathChallengeFrame(self: *Connection, path_challenge: frame.PathChallengeFrame) Error!void {
-        for (self.pending_path_responses.items) |response_data| {
-            if (std.mem.eql(u8, &response_data, &path_challenge.data)) return;
+        for (self.pending_path_responses.items) |response| {
+            if (!std.mem.eql(u8, &response.data, &path_challenge.data)) continue;
+            if (self.datagram_origin) |current| {
+                if (response.origin) |queued| if (queued.eql(current)) return;
+            } else return;
         }
-        self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
+        self.pending_path_responses.append(self.allocator, .{
+            .data = path_challenge.data,
+            .origin = self.datagram_origin,
+        }) catch return error.OutOfMemory;
     }
 
     fn pathResponseChallengeIndex(self: *Connection, data: [8]u8) ?usize {

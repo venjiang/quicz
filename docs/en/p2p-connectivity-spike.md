@@ -199,6 +199,23 @@ The actual multi-connection example completed all four handlers and
 reclaimed every runtime connection. The controlled-NAT matrix passed its
 eight positive cases. Both negative controls timed out as expected.
 
+### Queued PATH_RESPONSE Origin Metadata
+
+`processProtectedShortDatagramWithInstalledKeysFromPathOrClose` can annotate
+queued responses with a caller-supplied IPv4 or IPv6 tuple. The queue owns
+a value copy, including IPv6 scope IDs. Known origins deduplicate by token
+and complete tuple. Legacy receive retains token-only deduplication.
+
+`pollProtectedShortDatagramWithInstalledKeysAndOrigin` returns protected
+bytes and the origin of a consumed response. Ordinary, close and
+unannotated output have no response origin. The caller owns the returned
+bytes under the existing allocator contract.
+
+This is metadata only. It does not select a UDP destination or establish
+address validation. Existing byte APIs, packet order, ACK coalescing,
+admission and recovery remain unchanged. Endpoint and runtime routing do
+not adopt these annotations in this slice.
+
 ## Deliberately not implemented yet
 
 - Real STUN service and cellular-network validation.

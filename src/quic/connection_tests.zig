@@ -32150,6 +32150,183 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     try std.testing.expect(!(try lifecycle.routeDatagram(new_path, response)).path_changed);
 }
 
+test "PATH_RESPONSE origin survives protected receive and poll" {
+    const scenarios = [_]struct { first: endpoint.DatagramPath, other: endpoint.DatagramPath }{
+        .{
+            .first = .{ .ipv4 = .{
+                .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+                .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+            } },
+            .other = .{ .ipv4 = .{
+                .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+                .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_002),
+            } },
+        },
+        .{
+            .first = .{ .ipv6 = .{
+                .local = endpoint.Udp6Address.init(@splat(1), 4433, 5),
+                .remote = endpoint.Udp6Address.init(@splat(2), 50_001, 6),
+            } },
+            .other = .{ .ipv6 = .{
+                .local = endpoint.Udp6Address.init(@splat(1), 4433, 5),
+                .remote = endpoint.Udp6Address.init(@splat(2), 50_001, 7),
+            } },
+        },
+    };
+    for (scenarios) |scenario| {
+        const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+        const local_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+        const peer_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+        const token = [_]u8{0x61} ** 8;
+        const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+        try server.confirmHandshake();
+        try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+        var plaintext: [16]u8 = undefined;
+        var out = buffer.fixedWriter(&plaintext);
+        try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = token } });
+        for ([_]endpoint.DatagramPath{ scenario.first, scenario.first, scenario.other }, 0..) |origin, index| {
+            const packet_number: u64 = @intCast(index);
+            const datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
+                .dcid = &local_dcid,
+                .key_phase = false,
+                .packet_number = packet_number,
+            }, try packet.encodePacketNumberForHeader(packet_number, null), secrets.client, out.getWritten());
+            defer std.testing.allocator.free(datagram);
+            try server.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(@intCast((index + 1) * ms), local_dcid.len, datagram, origin);
+        }
+        const legacy_duplicate = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &local_dcid,
+            .key_phase = false,
+            .packet_number = 3,
+        }, try packet.encodePacketNumberForHeader(3, null), secrets.client, out.getWritten());
+        defer std.testing.allocator.free(legacy_duplicate);
+        try server.processProtectedShortDatagramWithInstalledKeysOrClose(4 * ms, local_dcid.len, legacy_duplicate);
+        for ([_]endpoint.DatagramPath{ scenario.first, scenario.other }, 0..) |expected_origin, index| {
+            const packet_number = server.next_packet_number;
+            const output = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(@intCast((index + 4) * ms), &peer_dcid)) orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(output.datagram);
+            try std.testing.expect(output.response_origin != null);
+            try std.testing.expect(output.response_origin.?.eql(expected_origin));
+            var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.server, output.datagram, peer_dcid.len, packet_number);
+            defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+            var offset: usize = 0;
+            var found = false;
+            while (offset < opened.packet.plaintext.len) {
+                var decoded = try frame.decodeFrameSliceBorrowing(opened.packet.plaintext[offset..], std.testing.allocator);
+                defer frame.deinitFrameBorrowing(&decoded.frame, std.testing.allocator);
+                if (decoded.frame == .path_response) {
+                    try std.testing.expectEqualSlices(u8, &token, &decoded.frame.path_response.data);
+                    found = true;
+                }
+                offset += decoded.len;
+            }
+            try std.testing.expect(found);
+        }
+        try std.testing.expect((try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(6 * ms, &peer_dcid)) == null);
+    }
+}
+
+test "PATH_RESPONSE origin is absent for legacy ordinary and close output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const local_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const peer_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+    var plaintext: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&plaintext);
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(0x62) } });
+    for (0..2) |index| {
+        const packet_number: u64 = @intCast(index);
+        const datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &local_dcid,
+            .key_phase = false,
+            .packet_number = packet_number,
+        }, try packet.encodePacketNumberForHeader(packet_number, null), secrets.client, out.getWritten());
+        defer std.testing.allocator.free(datagram);
+        try server.processProtectedShortDatagramWithInstalledKeysOrClose(@intCast((index + 1) * ms), local_dcid.len, datagram);
+    }
+    const legacy = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(3 * ms, &peer_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(legacy.datagram);
+    try std.testing.expect(legacy.response_origin == null);
+    try std.testing.expect((try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(4 * ms, &peer_dcid)) == null);
+    try server.sendPing();
+    const ordinary = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(5 * ms, &peer_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ordinary.datagram);
+    try std.testing.expect(ordinary.response_origin == null);
+
+    const origin = endpoint.DatagramPath{ .ipv4 = .{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    } };
+    const pending = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &local_dcid,
+        .key_phase = false,
+        .packet_number = 2,
+    }, try packet.encodePacketNumberForHeader(2, null), secrets.client, out.getWritten());
+    defer std.testing.allocator.free(pending);
+    try server.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(6 * ms, local_dcid.len, pending, origin);
+    try server.closeConnection(0, 0, "origin-test");
+    const close = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(7 * ms, &peer_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close.datagram);
+    try std.testing.expect(close.response_origin == null);
+}
+
+test "PATH_RESPONSE origin scope restores after successful and failed receives" {
+    for ([_]bool{ false, true }) |fail_receive| {
+        const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+        const local_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+        const peer_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+        const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+        const origin = endpoint.DatagramPath{ .ipv4 = .{
+            .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+        } };
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+        try server.confirmHandshake();
+        try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+        var plaintext: [16]u8 = undefined;
+        var out = buffer.fixedWriter(&plaintext);
+        try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(0x71) } });
+        const annotated = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &local_dcid,
+            .key_phase = false,
+            .packet_number = 0,
+        }, try packet.encodePacketNumberForHeader(0, null), secrets.client, out.getWritten());
+        defer std.testing.allocator.free(annotated);
+        if (fail_receive) {
+            annotated[annotated.len - 1] ^= 1;
+            try std.testing.expectError(error.InvalidPacket, server.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(1 * ms, local_dcid.len, annotated, origin));
+        } else {
+            try server.processProtectedShortDatagramWithInstalledKeysFromPathOrClose(1 * ms, local_dcid.len, annotated, origin);
+            const response = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(2 * ms, &peer_dcid)) orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(response.datagram);
+            try std.testing.expect(response.response_origin.?.eql(origin));
+        }
+        out = buffer.fixedWriter(&plaintext);
+        try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = @splat(0x72) } });
+        const packet_number: u64 = if (fail_receive) 0 else 1;
+        const legacy = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &local_dcid,
+            .key_phase = false,
+            .packet_number = packet_number,
+        }, try packet.encodePacketNumberForHeader(packet_number, null), secrets.client, out.getWritten());
+        defer std.testing.allocator.free(legacy);
+        try server.processProtectedShortDatagramWithInstalledKeysOrClose(3 * ms, local_dcid.len, legacy);
+        const response = (try server.pollProtectedShortDatagramWithInstalledKeysAndOrigin(4 * ms, &peer_dcid)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(response.datagram);
+        try std.testing.expect(response.response_origin == null);
+    }
+}
+
 test "EndpointConnectionLifecycle automatic validation keeps its candidate path" {
     for ([_]bool{ false, true }) |respond_on_original| {
         const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
@@ -55476,8 +55653,8 @@ test "duplicate PATH_CHALLENGE data queues one pending PATH_RESPONSE" {
 
     try server.processDatagram(20 * ms, challenge_out.getWritten());
     try std.testing.expectEqual(@as(usize, 2), server.pending_path_responses.items.len);
-    try std.testing.expectEqualSlices(u8, &first_challenge, &server.pending_path_responses.items[0]);
-    try std.testing.expectEqualSlices(u8, &second_challenge, &server.pending_path_responses.items[1]);
+    try std.testing.expectEqualSlices(u8, &first_challenge, &server.pending_path_responses.items[0].data);
+    try std.testing.expectEqualSlices(u8, &second_challenge, &server.pending_path_responses.items[1].data);
     try std.testing.expectEqual(@as(?u64, 0), server.pending_ack_largest);
 }
 

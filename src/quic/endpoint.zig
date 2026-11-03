@@ -125,6 +125,26 @@ pub const Udp6Tuple = struct {
     }
 };
 
+/// Value-only origin metadata for a queued UDP response.
+pub const DatagramPath = union(enum) {
+    ipv4: Udp4Tuple,
+    ipv6: Udp6Tuple,
+
+    /// Compare complete tuples without mapping between address families.
+    pub fn eql(self: DatagramPath, other: DatagramPath) bool {
+        return switch (self) {
+            .ipv4 => |path| switch (other) {
+                .ipv4 => |peer| path.eql(peer),
+                .ipv6 => false,
+            },
+            .ipv6 => |path| switch (other) {
+                .ipv6 => |peer| path.eql(peer),
+                .ipv4 => false,
+            },
+        };
+    }
+};
+
 /// Fixed-storage QUIC connection ID.
 pub const ConnectionId = struct {
     bytes: [max_connection_id_len]u8 = undefined,
