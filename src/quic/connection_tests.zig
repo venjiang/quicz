@@ -32150,6 +32150,78 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     try std.testing.expect(!(try lifecycle.routeDatagram(new_path, response)).path_changed);
 }
 
+test "EndpointConnectionLifecycle ignores non-advancing packets as validation triggers" {
+    for ([_]bool{ false, true }) |reordered| {
+        const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+        const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+        const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+        const options = EndpointFeedInstalledKeyDatagramOptions{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]packet.Version{.v1},
+            .path_challenge_data = @splat(0x51),
+        };
+        const old_path = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        };
+        const new_path = endpoint.Udp4Tuple{
+            .local = old_path.local,
+            .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+        };
+        var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+        defer lifecycle.deinit();
+        try lifecycle.registerConnectionId(189, &server_dcid, old_path, .{});
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        var client = try Connection.init(std.testing.allocator, .client, .{});
+        defer client.deinit();
+        try server.validatePeerAddress();
+        try client.confirmHandshake();
+        try server.confirmHandshake();
+        try client.installOneRttTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+        try server.installOneRttTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+
+        const stream_id = try client.openStream();
+        try client.sendOnStream(stream_id, "backfill", true);
+        const older = (try client.pollProtectedShortDatagramWithInstalledKeys(1 * ms, &server_dcid)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(older);
+        if (reordered) {
+            try client.sendPing();
+            const newer = (try client.pollProtectedShortDatagramWithInstalledKeys(2 * ms, &server_dcid)) orelse return error.TestUnexpectedResult;
+            defer std.testing.allocator.free(newer);
+            _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(189, &server, old_path, 3 * ms, newer, options);
+        } else {
+            _ = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(189, &server, old_path, 3 * ms, older, options);
+        }
+        const expected_next: u64 = if (reordered) 2 else 1;
+        try std.testing.expectEqual(expected_next, server.nextPeerPacketNumber(.application));
+        const ignored = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(189, &server, new_path, 4 * ms, older, options);
+        try std.testing.expect(!ignored.path_challenge_queued);
+        try std.testing.expect(ignored.updated_route == null);
+        try std.testing.expect(ignored.selected_output_path == null);
+        try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
+        try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+        try std.testing.expectEqual(expected_next, server.nextPeerPacketNumber(.application));
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+        var received: [16]u8 = undefined;
+        const count = (try server.recvOnStream(stream_id, &received)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("backfill", received[0..count]);
+        try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(stream_id, &received));
+
+        try client.sendPing();
+        const fresh = (try client.pollProtectedShortDatagramWithInstalledKeys(5 * ms, &server_dcid)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(fresh);
+        const started = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(189, &server, new_path, 6 * ms, fresh, options);
+        try std.testing.expect(started.path_challenge_queued);
+        try std.testing.expect(started.updated_route == null);
+        try std.testing.expect((started.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
+        try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
+        try std.testing.expect((try lifecycle.currentRoutePath(&server_dcid)).eql(old_path));
+    }
+}
+
 test "EndpointConnectionLifecycle installed-key path update OrClose queues close without route update" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };

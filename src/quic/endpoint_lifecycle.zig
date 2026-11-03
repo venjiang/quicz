@@ -1695,10 +1695,11 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
         /// routed 1-RTT application packets, it additionally commits the endpoint
         /// route only when authenticated processing consumes an outstanding
         /// PATH_CHALLENGE response from the changed UDP tuple. When the caller
-        /// supplies `path_challenge_data`, a successfully processed application
-        /// packet from a changed path queues one PATH_CHALLENGE unless validation
-        /// is already pending or has just completed. The result exposes the UDP
-        /// tuple that immediate path-validation-related output should use.
+        /// supplies `path_challenge_data`, only a successfully processed changed-path
+        /// application packet that advances the Application receive cursor can
+        /// queue one PATH_CHALLENGE. Validation already pending or completed by
+        /// this datagram does not queue another. The result exposes the UDP tuple
+        /// that immediate path-validation-related output should use.
         pub fn feedDatagramWithInstalledKeysAndUpdatePathOrClose(
             self: *Self,
             connection_id: u64,
@@ -1736,6 +1737,7 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                         ),
                         .application => {
                             const outstanding_before = connection.outstandingPathChallengeCount();
+                            const receive_cursor_before = connection.next_peer_packet_number;
                             try self.processProtectedShortDatagramWithInstalledKeysOrClose(
                                 connection_id,
                                 connection,
@@ -1753,7 +1755,10 @@ pub fn EndpointConnectionLifecycleForTuple(comptime Path: type) type {
                             else
                                 null;
                             var path_challenge_queued = false;
+                            // A discarded replay or an accepted older packet must
+                            // not turn its observed tuple into a new validation.
                             if (updated_route == null and route.path_changed and
+                                connection.next_peer_packet_number > receive_cursor_before and
                                 connection.pendingPathChallengeCount() == 0 and
                                 connection.outstandingPathChallengeCount() == 0)
                             {

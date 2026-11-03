@@ -110,6 +110,46 @@ The bound-endpoint ABI can return `0.0.0.0` for a wildcard socket. Platform
 candidate gathering must combine the bound port with reachable interface
 addresses; it must never advertise the wildcard address to a peer.
 
+## Active-session Migration Hardening
+
+Status: in progress. The initiation guard is locally tested. These slices
+do not establish production roaming.
+
+The first slice targets automatic challenge initiation in the installed-key
+lifecycle feed. Connection already authenticates and deduplicates packets,
+but its receive call can succeed after silently discarding a replay. The
+feed must not treat that return alone as new migration traffic.
+
+The Application receive cursor must advance before a changed tuple can
+start an automatic challenge. Exact replays and older packet numbers must
+not start validation. Ordinary receive processing remains responsible for
+ordered stream delivery, ACKs and deduplication. Fresh highest packets must
+still enter the existing validation flow.
+
+Acceptance checks cover literal ciphertext replay, reordered authenticated
+STREAM data and a fresh-highest positive control. The replay regression
+failed before the guard and passed after it. Reordered data is still
+delivered once. The fresh positive control still queues a challenge without
+committing an unvalidated route. Related path/response checks passed 27/27,
+and the local complete suite passed 2025/2025.
+
+The existing controlled-NAT matrix also completed: unchanged-path controls,
+five replacement-port trials and the loss control passed. The old pinned
+runtime's rebind and the candidate's blackhole control timed out as expected.
+This is local regression evidence, not a new physical-network acceptance.
+
+This guard uses existing receive state. It adds no candidate table, retry
+engine or public interface.
+
+Candidate/token ownership remains separate. The current commit decision
+still observes a decreased outstanding challenge count. Exact ownership,
+probing-only packet rules, retry output, amplification and CID coherence
+need later slices before production integration. The local reference
+[quic-go path manager](https://github.com/quic-go/quic-go/blob/add7529015e46cda13441129d3081020f1baddc1/path_manager.go)
+associates tokens with path records, then separately decides whether to
+switch. It does not justify committing the tuple carrying any matching
+response. No reference source code is copied into this implementation.
+
 ## Deliberately not implemented yet
 
 - Real STUN service and cellular-network validation.
