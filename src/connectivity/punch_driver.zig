@@ -229,19 +229,27 @@ test "validated driver acknowledges a retransmit after its first ACK is lost" {
     try std.testing.expectEqual(wire.Kind.acknowledgement, (try wire.decode(attempt.key, lost_ack.data)).kind);
     // Drop this ACK, then validate the local side only.
     try peer.send(io, &local.address, &local_ack);
-    try io.sleep(.fromMilliseconds(30), .awake);
+    // Advance the synthetic peer's retry clock without a wall-clock sleep.
+    // Queue the retry after the validation ACK on the same loopback socket.
     try peer.send(io, &local.address, &peer_attempt.nextProbe(30).?);
     const retry_ack = try peer.receiveTimeout(io, &buffer, timeout);
     _ = try peer_attempt.receive(retry_ack.data);
     try std.testing.expectEqual(punch_attempt.State.validated, peer_attempt.state);
     // Repeated peer traffic must not extend the finishing deadline.
     const finishing_started = std.Io.Timestamp.now(io, .awake);
+    var finishing_replies: u32 = 0;
     while (!task.finished.load(.acquire) and
         elapsedMilliseconds(finishing_started, std.Io.Timestamp.now(io, .awake)) < 400)
     {
         try peer.send(io, &local.address, &peer_probe);
-        try io.sleep(.fromMilliseconds(10), .awake);
+        const acknowledgement = peer.receiveTimeout(io, &buffer, timeout) catch |err| {
+            if (err == error.Timeout and task.finished.load(.acquire)) break;
+            return err;
+        };
+        try std.testing.expectEqual(wire.Kind.acknowledgement, (try wire.decode(attempt.key, acknowledgement.data)).kind);
+        finishing_replies += 1;
     }
+    try std.testing.expect(finishing_replies > 0);
     try std.testing.expect(task.finished.load(.acquire));
     try pending.await(io);
     try std.testing.expectEqual(@as(?anyerror, null), task.failure);
